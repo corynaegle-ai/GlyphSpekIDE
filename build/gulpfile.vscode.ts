@@ -26,9 +26,9 @@ import { config } from './lib/electron.ts';
 import { createAsar } from './lib/asar.ts';
 import minimist from 'minimist';
 import { compileBuildWithoutManglingTask, compileBuildWithManglingTask } from './gulpfile.compile.ts';
-import { compileNonNativeExtensionsBuildTask, compileNativeExtensionsBuildTask, compileAllExtensionsBuildTask, compileExtensionMediaBuildTask, cleanExtensionsBuildTask, compileCopilotExtensionBuildTask } from './gulpfile.extensions.ts';
+import { compileNonNativeExtensionsBuildTask, compileNativeExtensionsBuildTask, compileAllExtensionsBuildTask, compileExtensionMediaBuildTask, cleanExtensionsBuildTask } from './gulpfile.extensions.ts';
 import { copyCodiconsTask } from './lib/compilation.ts';
-import { getCopilotExcludeFilter, getCopilotRuntimePrebuildFiles, getRipgrepExcludeFilter, prepareBuiltInCopilotRipgrepShim } from './lib/copilot.ts';
+import { getCopilotExcludeFilter, getCopilotRuntimePrebuildFiles, getRipgrepExcludeFilter } from './lib/copilot.ts';
 import { useEsbuildTranspile } from './buildConfig.ts';
 import { promisify } from 'util';
 import globCallback from 'glob';
@@ -267,7 +267,12 @@ function packageTask(platform: string, arch: string, sourceFolderName: string, d
 			return !set.has(platform);
 		}).map(ext => `!.build/extensions/${ext.name}/**`);
 
-		const extensions = gulp.src(['.build/extensions/**', ...platformSpecificBuiltInExtensionsExclusions], { base: '.build', dot: true });
+		// GlyphSpek: hard exclude the bundled Copilot extension from the packaged app.
+		// We do not compile it (see vscodeTask), and this is a defense-in-depth guard so a
+		// stale .build/extensions/copilot can never be copied into Resources/app/extensions.
+		const glyphspekBuiltInExtensionsExclusions = ['!.build/extensions/copilot/**'];
+
+		const extensions = gulp.src(['.build/extensions/**', ...glyphspekBuiltInExtensionsExclusions, ...platformSpecificBuiltInExtensionsExclusions], { base: '.build', dot: true });
 
 		const sourceFilterPattern = stripSourceMapsInPackagingTasks
 			? ['**', '!**/*.{js,css}.map']
@@ -591,23 +596,6 @@ function patchWin32DependenciesTask(destinationFolderName: string) {
 	};
 }
 
-function prepareCopilotRipgrepShimTask(platform: string, arch: string, destinationFolderName: string) {
-	const outputDir = path.join(path.dirname(root), destinationFolderName);
-
-	return async () => {
-		// On Windows with win32VersionedUpdate, app resources live under a
-		// commit-hash prefix: {output}/{commitHash}/resources/app/
-		const versionedResourcesFolder = util.getVersionedResourcesFolder(platform, commit!);
-		const appBase = platform === 'darwin'
-			? path.join(outputDir, `${product.nameLong}.app`, 'Contents', 'Resources', 'app')
-			: path.join(outputDir, versionedResourcesFolder, 'resources', 'app');
-		const appNodeModulesDir = path.join(appBase, 'node_modules');
-
-		const builtInCopilotExtensionDir = path.join(appBase, 'extensions', 'copilot');
-		prepareBuiltInCopilotRipgrepShim(platform, arch, builtInCopilotExtensionDir, appNodeModulesDir);
-	};
-}
-
 const buildRoot = path.dirname(root);
 
 const BUILD_TARGETS = [
@@ -632,8 +620,9 @@ BUILD_TARGETS.forEach(buildTarget => {
 		const packageTasks: task.Task[] = [
 			compileNativeExtensionsBuildTask,
 			util.rimraf(path.join(buildRoot, destinationFolderName)),
-			packageTask(platform, arch, sourceFolderName, destinationFolderName, opts),
-			prepareCopilotRipgrepShimTask(platform, arch, destinationFolderName)
+			packageTask(platform, arch, sourceFolderName, destinationFolderName, opts)
+			// GlyphSpek: the Copilot ripgrep shim task is intentionally removed - we do not
+			// ship the bundled Copilot extension, so there is no extension dir to shim.
 		];
 
 		if (platform === 'win32') {
@@ -659,7 +648,7 @@ BUILD_TARGETS.forEach(buildTarget => {
 				copyCodiconsTask,
 				cleanExtensionsBuildTask,
 				compileNonNativeExtensionsBuildTask,
-				compileCopilotExtensionBuildTask,
+				// GlyphSpek: do NOT compile the bundled Copilot extension into the packaged app.
 				compileExtensionMediaBuildTask,
 				writeISODate('out-build'),
 				esbuildBundleTask,
@@ -670,7 +659,7 @@ BUILD_TARGETS.forEach(buildTarget => {
 				minified ? compileBuildWithManglingTask : compileBuildWithoutManglingTask,
 				cleanExtensionsBuildTask,
 				compileNonNativeExtensionsBuildTask,
-				compileCopilotExtensionBuildTask,
+				// GlyphSpek: do NOT compile the bundled Copilot extension into the packaged app.
 				compileExtensionMediaBuildTask,
 				minified ? minifyVSCodeTask : bundleVSCodeTask,
 				vscodeTaskCI

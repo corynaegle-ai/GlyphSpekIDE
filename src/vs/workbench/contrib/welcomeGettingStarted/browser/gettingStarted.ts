@@ -923,8 +923,25 @@ export class GettingStartedPage extends EditorPane {
 			onShowOnStartupChanged();
 		}));
 
-		const header = $('.header', {},
-			$('h1.product-name.caption', {}, this.productService.nameLong),
+		// GlyphSpek: brand hero. Show the GlyphSpek logo lockup prominently and render a
+		// two-tone, theme-aware product title ("Glyph" in foreground, "Spek" in brand indigo)
+		// instead of a single flat gray caption. The title falls back gracefully for any
+		// product name that does not follow the "Glyph…" wordmark convention.
+		const productName = this.productService.nameLong;
+		const titleChildren: HTMLElement[] = [];
+		const wordmarkMatch = /^(Glyph)(.*)$/.exec(productName);
+		if (wordmarkMatch) {
+			titleChildren.push($('span.product-name-base', {}, wordmarkMatch[1]));
+			if (wordmarkMatch[2]) {
+				titleChildren.push($('span.product-name-accent', {}, wordmarkMatch[2]));
+			}
+		} else {
+			titleChildren.push($('span.product-name-base', {}, productName));
+		}
+
+		const header = $('.header.glyphspek-hero', {},
+			$('.glyphspek-logo', { 'role': 'img', 'aria-label': productName }),
+			$('h1.product-name.caption', {}, ...titleChildren),
 			$('p.subtitle.description', {}, localize({ key: 'gettingStarted.editingEvolved', comment: ['Shown as subtitle on the Welcome page.'] }, "Editing evolved"))
 		);
 

@@ -188,6 +188,21 @@ offline-first launch:
 EOF
 echo
 
+# ---- bundled-extension deny gate --------------------------------------------
+# Chain the bundled-extension deny gate: a clean GlyphSpek build must also not
+# SHIP proprietary / Copilot extensions inside extensions/. This is a separate,
+# hard gate (its own script) but we run it here so `verify-no-telemetry.sh` is a
+# single command that fails on either a telemetry endpoint OR a denylisted ext.
+bundled_ext_fail=0
+DENY_GATE="$REPO_ROOT/build/glyphspek/verify-bundled-extensions.sh"
+if [ -x "$DENY_GATE" ]; then
+  echo "--- bundled-extension deny gate ---"
+  if ! "$DENY_GATE" "$TARGET"; then
+    bundled_ext_fail=1
+  fi
+  echo
+fi
+
 # ---- verdict ----------------------------------------------------------------
 echo "=== verdict ==="
 echo "NOTE: a string match means the ENDPOINT is present in the bundle, not that"
@@ -200,6 +215,11 @@ echo "      GlyphSpek product.json sets NO aiConfig/enableTelemetry, so the core
 echo "      telemetry channel is unconfigured. The authoritative proof is the"
 echo "      DYNAMIC startup capture above — run it on a cold offline launch."
 echo
+if [ "$bundled_ext_fail" -gt 0 ]; then
+  echo "RESULT: FAIL — the packaged app ships one or more denylisted built-in extensions"
+  echo "        (see the bundled-extension deny gate above). GlyphSpek must not ship them."
+  exit 1
+fi
 if [ "$hard_hits" -gt 0 ]; then
   echo "RESULT: REVIEW — $hard_hits file(s) contain hard telemetry/marketplace/update"
   echo "        endpoint strings (expected from vendored SDKs). Confirm dormancy via"

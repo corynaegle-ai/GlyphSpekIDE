@@ -65,6 +65,60 @@
 	font-weight: 200;
 }
 
+/* GlyphSpek brand hero: logo lockup + two-tone, theme-aware product title. */
+.monaco-workbench .part.editor > .content .gettingStartedContainer .header.glyphspek-hero {
+	display: flex;
+	flex-direction: column;
+	align-items: flex-start;
+}
+
+.monaco-workbench .part.editor > .content .gettingStartedContainer .glyphspek-hero .glyphspek-logo {
+	width: 196px;
+	height: 162px;
+	margin: 4px 0 14px;
+	background-image: url('./glyphspek-logo.png');
+	background-repeat: no-repeat;
+	background-position: center;
+	background-size: contain;
+	/* The logo art is the white G-mark + two-tone wordmark on near-black, so present it on a
+	   subtle dark brand panel. This reads cleanly in dark, light and high-contrast themes. */
+	background-color: #050608;
+	border: 1px solid rgba(99, 102, 241, 0.35);
+	border-radius: 12px;
+	padding: 14px 26px;
+	box-sizing: content-box;
+}
+
+.monaco-workbench.hc-black .part.editor > .content .gettingStartedContainer .glyphspek-hero .glyphspek-logo,
+.monaco-workbench.hc-light .part.editor > .content .gettingStartedContainer .glyphspek-hero .glyphspek-logo {
+	border-color: var(--vscode-contrastBorder, #6fc3df);
+}
+
+.monaco-workbench .part.editor > .content .gettingStartedContainer .glyphspek-hero .product-name {
+	font-weight: 600;
+	letter-spacing: -0.01em;
+}
+
+.monaco-workbench .part.editor > .content .gettingStartedContainer .glyphspek-hero .product-name .product-name-base {
+	color: var(--vscode-foreground);
+}
+
+/* Brand indigo (sampled from the logo's "Spek"/bracket). Theme-aware so it stays legible on
+   light backgrounds, and bright enough for high-contrast themes. */
+.monaco-workbench .part.editor > .content .gettingStartedContainer .glyphspek-hero .product-name .product-name-accent {
+	color: #6366f1;
+}
+
+.monaco-workbench.vs .part.editor > .content .gettingStartedContainer .glyphspek-hero .product-name .product-name-accent {
+	/* Slightly deeper indigo so the accent keeps contrast on light backgrounds. */
+	color: #4f46e5;
+}
+
+.monaco-workbench.hc-black .part.editor > .content .gettingStartedContainer .glyphspek-hero .product-name .product-name-accent,
+.monaco-workbench.hc-light .part.editor > .content .gettingStartedContainer .glyphspek-hero .product-name .product-name-accent {
+	color: #818cf8;
+}
+
 .monaco-workbench .part.editor > .content .gettingStartedContainer h2 {
 	font-weight: 400;
 	margin-top: 0;
