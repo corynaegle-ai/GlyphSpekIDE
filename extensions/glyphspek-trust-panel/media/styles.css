@@ -1,0 +1,1024 @@
+/*
+ * GlyphSpek Trust Panel prototype styles.
+ *
+ * Design intent: a calm, inspectable trust surface. The single most important
+ * visual contract is that the "Actor claims" panel and the "Verifier verdict"
+ * panel are unmistakably different — different border colors, header colors,
+ * tags, and framing — so a reviewer can never confuse a self-report with a
+ * signed verdict.
+ */
+
+:root {
+  --bg: #0f1419;
+  --bg-card: #161c24;
+  --bg-elev: #1d2530;
+  --border: #2a333f;
+  --text: #d7dde5;
+  --text-dim: #8b97a6;
+  --mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
+
+  /* Actor (claims) = amber/caution. Verifier (verdict) = blue/authority. */
+  --claims: #d9a441;
+  --claims-bg: #2a2113;
+  --verdict: #4b8fe0;
+  --verdict-bg: #11202f;
+
+  --pass: #3fb568;
+  --fail: #e0544b;
+  --warn: #d9a441;
+  --neutral: #6b7686;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  margin: 0;
+  padding: 0;
+}
+
+body {
+  background: var(--bg);
+  color: var(--text);
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+  font-size: 14px;
+  line-height: 1.5;
+}
+
+body.dragging {
+  outline: 3px dashed var(--verdict);
+  outline-offset: -8px;
+}
+
+code,
+.mono {
+  font-family: var(--mono);
+  font-size: 0.92em;
+}
+
+/* ---------- top bar ---------- */
+.topbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 12px 20px;
+  background: var(--bg-elev);
+  border-bottom: 1px solid var(--border);
+  flex-wrap: wrap;
+}
+
+.topbar-title {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+}
+
+.logo {
+  font-weight: 700;
+  font-size: 16px;
+  letter-spacing: 0.5px;
+}
+
+.topbar-sub {
+  color: var(--text-dim);
+  font-size: 12px;
+}
+
+.topbar-controls {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+input[type="file"] {
+  color: var(--text-dim);
+  font-size: 12px;
+  max-width: 220px;
+}
+
+.file-label {
+  font-size: 12px;
+  color: var(--text-dim);
+}
+
+.btn {
+  background: var(--bg-card);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 6px 12px;
+  font-size: 13px;
+  cursor: pointer;
+}
+
+.btn:hover {
+  border-color: var(--verdict);
+}
+
+.btn-primary {
+  background: var(--verdict);
+  border-color: var(--verdict);
+  color: #fff;
+  font-weight: 600;
+}
+
+.load-status {
+  padding: 0 20px;
+  font-size: 12px;
+  min-height: 18px;
+  color: var(--text-dim);
+}
+
+.load-status.ok {
+  color: var(--pass);
+}
+
+.load-status.err {
+  color: var(--fail);
+}
+
+/* ---------- layout ---------- */
+.layout {
+  max-width: 1180px;
+  margin: 0 auto;
+  padding: 16px 20px 40px;
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.card {
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 16px 18px;
+}
+
+.card-title {
+  margin: 0 0 6px;
+  font-size: 14px;
+  font-weight: 700;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.panel-caption {
+  margin: 0 0 12px;
+  color: var(--text-dim);
+  font-size: 12px;
+}
+
+.empty {
+  color: var(--text-dim);
+  font-style: italic;
+  margin: 4px 0;
+}
+
+/* ---------- run header ---------- */
+.run-id-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.run-id-label {
+  color: var(--text-dim);
+  font-size: 12px;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+}
+
+.run-id {
+  font-size: 15px;
+  color: var(--text);
+}
+
+.status-badge {
+  font-size: 12px;
+  font-weight: 600;
+  padding: 2px 10px;
+  border-radius: 999px;
+  border: 1px solid var(--border);
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+}
+
+.status-completed {
+  color: var(--pass);
+  border-color: var(--pass);
+}
+.status-failed,
+.status-aborted {
+  color: var(--fail);
+  border-color: var(--fail);
+}
+.status-executing {
+  color: var(--verdict);
+  border-color: var(--verdict);
+}
+
+.run-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 18px;
+  margin-top: 12px;
+}
+
+.meta-item {
+  display: flex;
+  flex-direction: column;
+}
+
+.meta-label {
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  color: var(--text-dim);
+}
+
+.meta-value {
+  font-size: 13px;
+}
+
+/* ---------- claims vs verdict ---------- */
+.claims-verdict {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 16px;
+}
+
+@media (max-width: 860px) {
+  .claims-verdict {
+    grid-template-columns: 1fr;
+  }
+}
+
+/* Actor claims — amber, dashed, "caution / unverified" feel. */
+.panel-claims {
+  border: 2px dashed var(--claims);
+  background: linear-gradient(180deg, var(--claims-bg) 0, var(--bg-card) 90px);
+}
+.panel-claims .card-title {
+  color: var(--claims);
+}
+
+/* Verifier verdict — blue, solid, "authority" feel. */
+.panel-verdict {
+  border: 2px solid var(--verdict);
+  background: linear-gradient(180deg, var(--verdict-bg) 0, var(--bg-card) 90px);
+}
+.panel-verdict .card-title {
+  color: var(--verdict);
+}
+
+.panel-tag {
+  font-size: 10px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.6px;
+  padding: 2px 8px;
+  border-radius: 4px;
+}
+.tag-claims {
+  background: var(--claims);
+  color: #1a1407;
+}
+.tag-verdict {
+  background: var(--verdict);
+  color: #061018;
+}
+
+.field {
+  margin-bottom: 12px;
+}
+.field-label {
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  color: var(--text-dim);
+  margin-bottom: 4px;
+}
+.field-value {
+  font-size: 13px;
+}
+
+.plain-list {
+  margin: 4px 0;
+  padding-left: 18px;
+}
+.plain-list li {
+  margin: 2px 0;
+}
+
+/* claim pill — always amber, always reads "claims:" to stay non-authoritative */
+.claim-pill {
+  font-size: 11px;
+  font-weight: 600;
+  padding: 2px 8px;
+  border-radius: 4px;
+  background: var(--claims-bg);
+  color: var(--claims);
+  border: 1px dashed var(--claims);
+}
+
+/* verdict pill — solid pass/fail, authoritative */
+.verdict-pill {
+  font-size: 11px;
+  font-weight: 700;
+  padding: 2px 8px;
+  border-radius: 4px;
+  text-transform: uppercase;
+}
+.check-pass {
+  background: var(--pass);
+  color: #04210f;
+}
+.check-fail {
+  background: var(--fail);
+  color: #260605;
+}
+.check-error {
+  background: var(--warn);
+  color: #251a04;
+}
+.check-skipped {
+  background: var(--neutral);
+  color: #0d1117;
+}
+
+.verdict-banner {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 10px 14px;
+  border-radius: 8px;
+  margin-bottom: 12px;
+  font-weight: 700;
+}
+.verdict-banner .verdict-label {
+  font-size: 11px;
+  letter-spacing: 1px;
+  opacity: 0.85;
+}
+.verdict-banner .verdict-value {
+  font-size: 18px;
+  letter-spacing: 1px;
+}
+.verdict-pass {
+  background: rgba(63, 181, 104, 0.18);
+  border: 1px solid var(--pass);
+  color: var(--pass);
+}
+.verdict-fail {
+  background: rgba(224, 84, 75, 0.18);
+  border: 1px solid var(--fail);
+  color: var(--fail);
+}
+.verdict-error {
+  background: rgba(217, 164, 65, 0.18);
+  border: 1px solid var(--warn);
+  color: var(--warn);
+}
+
+.sig-badge {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12px;
+  padding: 8px 12px;
+  border-radius: 6px;
+  margin-bottom: 12px;
+}
+/* Verified ✓ — the ONLY authoritative state. */
+.sig-present {
+  background: rgba(63, 181, 104, 0.14);
+  border: 1px solid var(--pass);
+  color: var(--pass);
+}
+.sig-present strong {
+  letter-spacing: 0.3px;
+}
+/* NOT verified — failed / missing / unsupported. De-authoritative. */
+.sig-failed {
+  background: rgba(224, 84, 75, 0.14);
+  border: 1px solid var(--fail);
+  color: var(--fail);
+  font-weight: 600;
+}
+/*
+ * Signature cryptographically VALID, but only for a key SUPPLIED BY THE BUNDLE
+ * (not a pinned out-of-band verifier key). Caution (amber), distinct from the
+ * red genuine-failure state and from the green authoritative state.
+ */
+.sig-untrusted-key {
+  background: rgba(217, 164, 65, 0.14);
+  border: 1px solid var(--warn);
+  color: var(--warn);
+  font-weight: 600;
+}
+.sig-check,
+.sig-x {
+  font-weight: 800;
+  font-size: 14px;
+}
+
+/*
+ * When the signature does NOT verify, strip the verifier panel of its
+ * "authority" cues: drop the blue solid border to a red warning frame and gray
+ * out the authoritative tag so the verdict cannot be mistaken for proven.
+ */
+.panel-verdict.verdict-untrusted {
+  border: 2px dashed var(--fail);
+  background: linear-gradient(180deg, rgba(224, 84, 75, 0.1) 0, var(--bg-card) 90px);
+}
+.panel-verdict.verdict-untrusted .card-title {
+  color: var(--fail);
+}
+.panel-verdict.verdict-untrusted .tag-verdict {
+  background: var(--fail);
+  color: #260605;
+}
+
+/* Untrusted verdict banner — neither pass nor fail; explicitly not proven. */
+.verdict-untrusted-banner {
+  background: rgba(224, 84, 75, 0.14);
+  border: 1px dashed var(--fail);
+  color: var(--fail);
+}
+
+/*
+ * Untrusted-KEY state: the signature verifies, but only against a key the bundle
+ * supplied — never a pinned out-of-band verifier key. Caution (amber), a step
+ * less alarming than the red "no valid signature" UNTRUSTED state but still NOT
+ * authoritative. Placed AFTER .verdict-untrusted so it overrides the red frame
+ * the de-authoritative toggle also applies (both classes are present here).
+ */
+.panel-verdict.verdict-untrusted-key {
+  border: 2px dashed var(--warn);
+  background: linear-gradient(180deg, rgba(217, 164, 65, 0.1) 0, var(--bg-card) 90px);
+}
+.panel-verdict.verdict-untrusted-key .card-title {
+  color: var(--warn);
+}
+.panel-verdict.verdict-untrusted-key .tag-verdict {
+  background: var(--warn);
+  color: #2a1d05;
+}
+.verdict-untrusted-key-banner {
+  background: rgba(217, 164, 65, 0.14);
+  border: 1px dashed var(--warn);
+  color: var(--warn);
+}
+
+/*
+ * DEMO-AUTHORITATIVE (sweep-06 High fix): the signature + trace binding verified
+ * against the BUILT-IN DEMO trust root only — NOT a production out-of-band key.
+ * A real, honest "the demo works" state, but it MUST be visually distinct from
+ * the green PRODUCT-authoritative state so it can never be mistaken for it. We
+ * reuse the verifier "authority" blue (--verdict) but DASHED, with a DEMO label
+ * — clearly distinct from green --pass (product), red --fail, and amber --warn.
+ */
+.sig-demo-authoritative {
+  background: rgba(75, 143, 224, 0.14);
+  border: 1px dashed var(--verdict);
+  color: var(--verdict);
+}
+.sig-demo-authoritative strong {
+  letter-spacing: 0.3px;
+}
+.panel-verdict.verdict-demo-authoritative {
+  border: 2px dashed var(--verdict);
+  background: linear-gradient(180deg, rgba(75, 143, 224, 0.12) 0, var(--bg-card) 90px);
+}
+.panel-verdict.verdict-demo-authoritative .card-title {
+  color: var(--verdict);
+}
+.panel-verdict.verdict-demo-authoritative .tag-verdict {
+  background: var(--verdict);
+  color: #06121f;
+}
+.verdict-demo-authoritative-banner {
+  background: rgba(75, 143, 224, 0.14);
+  border: 1px dashed var(--verdict);
+  color: var(--verdict);
+}
+
+/* ---------- timeline ---------- */
+.timeline {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.event {
+  display: grid;
+  grid-template-columns: 150px 1fr;
+  gap: 12px;
+  padding: 8px 10px;
+  border: 1px solid var(--border);
+  border-left: 3px solid var(--neutral);
+  border-radius: 6px;
+  background: var(--bg-elev);
+}
+
+.event-policy_decision {
+  border-left-color: var(--verdict);
+}
+.event-tool_start,
+.event-tool_end {
+  border-left-color: #8a6fd6;
+}
+.event-redaction {
+  border-left-color: var(--fail);
+  background: rgba(224, 84, 75, 0.06);
+}
+.event-verifier_verdict {
+  border-left-color: var(--pass);
+}
+.event-run_state_changed,
+.event-run_created {
+  border-left-color: var(--neutral);
+}
+
+.event-gutter {
+  display: flex;
+  flex-direction: column;
+  color: var(--text-dim);
+}
+.event-seq {
+  font-family: var(--mono);
+  font-size: 11px;
+}
+.event-time {
+  font-family: var(--mono);
+  font-size: 11px;
+}
+
+.event-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.event-type {
+  font-family: var(--mono);
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.event-chips {
+  display: inline-flex;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.event-detail {
+  font-family: var(--mono);
+  font-size: 12px;
+  color: var(--text);
+  margin-top: 4px;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.event-hash {
+  font-family: var(--mono);
+  font-size: 10px;
+  color: var(--text-dim);
+  margin-top: 4px;
+}
+
+/* ---------- chips ---------- */
+.chip {
+  font-size: 11px;
+  padding: 1px 7px;
+  border-radius: 4px;
+  border: 1px solid var(--border);
+  white-space: nowrap;
+}
+.chip-dim {
+  color: var(--text-dim);
+}
+.chip-cap {
+  font-family: var(--mono);
+  color: var(--text-dim);
+}
+.chip-state {
+  font-family: var(--mono);
+  color: var(--text-dim);
+}
+.chip-blocked {
+  background: var(--fail);
+  color: #260605;
+  border-color: var(--fail);
+  font-weight: 700;
+}
+.chip-redaction {
+  background: var(--fail);
+  color: #260605;
+  border-color: var(--fail);
+  font-weight: 700;
+}
+.chip-exit.exit-ok {
+  color: var(--pass);
+  border-color: var(--pass);
+}
+.chip-exit.exit-bad {
+  color: var(--fail);
+  border-color: var(--fail);
+}
+
+/* policy decision chips — one per of the 7 PolicyDecision values */
+.chip-decision {
+  font-weight: 700;
+}
+.decision-allow {
+  color: var(--pass);
+  border-color: var(--pass);
+}
+.decision-deny {
+  color: var(--fail);
+  border-color: var(--fail);
+}
+.decision-ask,
+.decision-force_ask {
+  color: var(--warn);
+  border-color: var(--warn);
+}
+.decision-allow_with_redaction {
+  color: #c98fe0;
+  border-color: #c98fe0;
+}
+.decision-sandbox_only {
+  color: #4bc0c0;
+  border-color: #4bc0c0;
+}
+.decision-read_only {
+  color: #7aa7e0;
+  border-color: #7aa7e0;
+}
+
+.chip-prov {
+  color: var(--text-dim);
+}
+.prov-web,
+.prov-tool-output,
+.prov-mcp {
+  color: var(--warn);
+  border-color: var(--warn);
+}
+
+/* ---------- derived grid ---------- */
+.derived-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 16px;
+}
+.derived-wide {
+  grid-column: 1 / -1;
+}
+@media (max-width: 860px) {
+  .derived-grid {
+    grid-template-columns: 1fr;
+  }
+}
+
+/* ---------- mini tables ---------- */
+.mini-table {
+  width: 100%;
+  border-collapse: collapse;
+}
+.mini-table td,
+.mini-table th {
+  padding: 5px 8px;
+  border-bottom: 1px solid var(--border);
+  text-align: left;
+  vertical-align: top;
+}
+.mini-table th {
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  color: var(--text-dim);
+}
+.rule-cell {
+  font-family: var(--mono);
+  font-size: 11px;
+  color: var(--text-dim);
+}
+
+/* ================================================================== *
+ * LIVE RUN VIEW (milestone M5).
+ * ================================================================== */
+.live-layout {
+  border-bottom: 1px solid var(--border);
+}
+
+/* ---- run list ---- */
+.runlist-table .runlist-row {
+  cursor: pointer;
+}
+.runlist-table .runlist-row:hover td {
+  background: var(--bg-elev);
+}
+.runlist-selected td {
+  background: rgba(75, 143, 224, 0.1);
+}
+
+/* ---- badge row ---- */
+.badge-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-bottom: 10px;
+}
+.trust-badge {
+  font-size: 12px;
+  font-weight: 700;
+  padding: 3px 10px;
+  border-radius: 999px;
+  border: 1px solid var(--border);
+  white-space: nowrap;
+}
+/* Runtime trust: green = isolated/trusted, red = dev runtime. */
+.trust-ok {
+  color: var(--pass);
+  border-color: var(--pass);
+  background: rgba(63, 181, 104, 0.12);
+}
+.trust-bad {
+  color: var(--fail);
+  border-color: var(--fail);
+  background: rgba(224, 84, 75, 0.12);
+}
+/* Extension posture. */
+.posture-sovereign {
+  color: var(--verdict);
+  border-color: var(--verdict);
+  background: rgba(75, 143, 224, 0.12);
+}
+.posture-developer {
+  color: var(--warn);
+  border-color: var(--warn);
+  background: rgba(217, 164, 65, 0.12);
+}
+/* CLI fidelity. */
+.fid-brokered {
+  color: var(--pass);
+  border-color: var(--pass);
+}
+.fid-boundary {
+  color: var(--warn);
+  border-color: var(--warn);
+  background: rgba(217, 164, 65, 0.12);
+}
+.fid-na {
+  color: var(--text-dim);
+}
+.actor-badge {
+  color: var(--text-dim);
+  font-family: var(--mono);
+}
+/* Product-trust eligibility (pre-crypto-gate). */
+.elig-ok {
+  color: var(--verdict);
+  border-color: var(--verdict);
+}
+.elig-bad {
+  color: var(--fail);
+  border-color: var(--fail);
+  background: rgba(224, 84, 75, 0.12);
+}
+
+/* ---- distinct failure cards ---- */
+.failure-stack {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.failure-card {
+  border: 1px solid var(--fail);
+  border-left-width: 4px;
+  border-radius: 6px;
+  padding: 8px 12px;
+  background: rgba(224, 84, 75, 0.08);
+}
+.failure-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+}
+.failure-icon {
+  font-weight: 800;
+}
+.failure-msg {
+  font-size: 12px;
+  color: var(--text);
+  margin-top: 4px;
+}
+.failure-detail {
+  font-size: 11px;
+  color: var(--text-dim);
+  margin-top: 3px;
+}
+.failure-headline {
+  box-shadow: 0 0 0 1px var(--fail);
+}
+/* Per-failure accent: each kind is visually distinguishable. */
+.failure-non_isolated_runtime {
+  border-color: var(--fail);
+  background: rgba(224, 84, 75, 0.12);
+}
+.failure-tampered_trace {
+  border-color: var(--fail);
+}
+.failure-stale_verifier {
+  border-color: var(--warn);
+  background: rgba(217, 164, 65, 0.1);
+}
+.failure-stale_verifier .failure-head,
+.failure-boundary_only_cli .failure-head {
+  color: var(--warn);
+}
+.failure-boundary_only_cli {
+  border-color: var(--warn);
+  background: rgba(217, 164, 65, 0.08);
+}
+.failure-bridge_mismatch {
+  border-color: #c98fe0;
+  background: rgba(201, 143, 224, 0.1);
+}
+.failure-bridge_mismatch .failure-head {
+  color: #c98fe0;
+}
+.failure-missing_verifier_signature {
+  border-color: var(--fail);
+}
+
+/* ---- diff / changed files ---- */
+.diff-change {
+  font-family: var(--mono);
+  font-weight: 800;
+  font-size: 12px;
+  width: 1.4em;
+  display: inline-block;
+  text-align: center;
+  border-radius: 3px;
+}
+.diff-A {
+  color: var(--pass);
+}
+.diff-M {
+  color: var(--warn);
+}
+.diff-D {
+  color: var(--fail);
+}
+.diff-\? {
+  color: var(--text-dim);
+}
+
+/* ---------- footer ---------- */
+.footer {
+  max-width: 1180px;
+  margin: 0 auto;
+  padding: 16px 20px 40px;
+  color: var(--text-dim);
+  font-size: 12px;
+}
+
+/* ============================================================== *
+ * GOVERNED CHAT + INLINE-EDIT (M6)
+ * ============================================================== */
+.chat-body {
+  display: flex;
+  flex-direction: column;
+  min-height: 100vh;
+}
+.chat-model-label {
+  color: var(--text-dim);
+  font-size: 12px;
+  margin-right: 6px;
+}
+.chat-model-select {
+  background: var(--card);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 4px 8px;
+  font-size: 13px;
+}
+.chat-totals {
+  margin-left: 12px;
+  color: var(--text-dim);
+  font-size: 12px;
+}
+.chat-layout {
+  max-width: 1180px;
+  margin: 0 auto;
+  padding: 12px 20px;
+  width: 100%;
+  box-sizing: border-box;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  flex: 1;
+}
+.chat-transcript-card {
+  display: flex;
+  flex-direction: column;
+}
+.chat-transcript {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  max-height: 56vh;
+  overflow-y: auto;
+  padding: 6px 2px;
+}
+.chat-turn {
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 8px 10px;
+  background: var(--card);
+}
+.chat-turn-user {
+  border-left: 3px solid var(--accent, #5b9dd9);
+}
+.chat-turn-assistant {
+  border-left: 3px solid var(--pass);
+}
+.chat-turn-blocked {
+  border-left: 3px solid var(--fail);
+  background: rgba(200, 60, 60, 0.06);
+}
+.chat-turn-role {
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--text-dim);
+  margin-bottom: 4px;
+}
+.chat-turn-body {
+  white-space: pre-wrap;
+  word-break: break-word;
+  font-size: 14px;
+  line-height: 1.45;
+}
+.chat-turn-meta {
+  margin-top: 6px;
+  font-size: 11px;
+  color: var(--text-dim);
+  font-family: var(--mono, monospace);
+}
+.chat-compose-card {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.chat-input {
+  width: 100%;
+  box-sizing: border-box;
+  background: var(--bg);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 8px 10px;
+  font-size: 14px;
+  font-family: inherit;
+  resize: vertical;
+}
+.chat-compose-actions {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+.chat-context-toggle {
+  color: var(--text-dim);
+  font-size: 12px;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.chat-approval {
+  border-left: 3px solid var(--warn);
+  max-width: 1180px;
+  margin: 8px auto 0;
+  width: 100%;
+  box-sizing: border-box;
+}
+.chat-approval-actions {
+  display: flex;
+  gap: 8px;
+  margin-top: 8px;
+}

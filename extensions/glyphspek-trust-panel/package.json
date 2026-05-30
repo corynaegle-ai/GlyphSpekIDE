@@ -1,0 +1,113 @@
+{
+  "name": "glyphspek",
+  "displayName": "GlyphSpek Trust Panel",
+  "description": "GlyphSpek Trust Panel as a plain VS Code / Code-OSS extension: hosts the trust review surface as a webview. Verifies the verifier's Ed25519 signature in-browser before presenting a verdict as authoritative. Open-VSX-distributable; no Microsoft Marketplace dependency; no telemetry.",
+  "version": "0.0.1",
+  "publisher": "glyphspek",
+  "private": true,
+  "license": "MIT",
+  "engines": {
+    "vscode": "^1.85.0"
+  },
+  "categories": [
+    "Other"
+  ],
+  "main": "./dist/extension.js",
+  "activationEvents": [
+    "onCommand:glyphspek.openTrustPanel",
+    "onCommand:glyphspek.loadRunBundle",
+    "onCommand:glyphspek.runGovernedTask",
+    "onCommand:glyphspek.demoLiveRun",
+    "onCommand:glyphspek.openChat",
+    "onCommand:glyphspek.inlineEdit"
+  ],
+  "contributes": {
+    "commands": [
+      {
+        "command": "glyphspek.openTrustPanel",
+        "title": "GlyphSpek: Open Trust Panel"
+      },
+      {
+        "command": "glyphspek.loadRunBundle",
+        "title": "GlyphSpek: Load Run Bundle…"
+      },
+      {
+        "command": "glyphspek.runGovernedTask",
+        "title": "GlyphSpek: Run Governed Task…"
+      },
+      {
+        "command": "glyphspek.demoLiveRun",
+        "title": "GlyphSpek: Demo Live Run (Trust Panel)"
+      },
+      {
+        "command": "glyphspek.openChat",
+        "title": "GlyphSpek: Open Governed Chat"
+      },
+      {
+        "command": "glyphspek.inlineEdit",
+        "title": "GlyphSpek: Inline Edit (governed)"
+      }
+    ],
+    "configuration": {
+      "title": "GlyphSpek",
+      "properties": {
+        "glyphspek.trustedVerifierKeys": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "default": [],
+          "scope": "machine",
+          "description": "SPKI PEM (or base64) public keys of trusted verifiers, provisioned out-of-band. A verdict is fully AUTHORITATIVE only if signed by one of these (the built-in demo key yields the separate, clearly-labeled DEMO-AUTHORITATIVE state, never product AUTHORITATIVE). A key embedded in a bundle is never trusted. The extension also pins its managed keystore key (~/.glyphspek/verifier/public.pem) in addition to these. Machine-scoped: a workspace/.vscode/settings.json cannot inject a trust root."
+        },
+        "glyphspek.supervisorMode": {
+          "type": "string",
+          "enum": [
+            "verify-only",
+            "autonomous"
+          ],
+          "default": "verify-only",
+          "scope": "machine",
+          "enumDescriptions": [
+            "Govern + run the repo's policy.verify checks in a clean --network none container, hash-chain the trace, and produce an independently signed verdict. No source edits; no model required.",
+            "Run the local-model autonomous capstone path against the repo/policy, then verify."
+          ],
+          "description": "How 'GlyphSpek: Run Governed Task' executes. Defaults to verify-only (no source edit, no model needed)."
+        },
+        "glyphspek.policyPath": {
+          "type": "string",
+          "default": "",
+          "description": "Absolute path to the GlyphSpek policy file. When empty, 'Run Governed Task' prompts with the bundled capstone-policy fixture as the default."
+        },
+        "glyphspek.supervisorPath": {
+          "type": "string",
+          "default": "",
+          "scope": "machine",
+          "description": "DEV OVERRIDE (optional). Leave empty for normal use: the extension launches the BUNDLED, hash-pinned supervisor shipped in the .vsix (dist-supervisor/governed-run.mjs). Set this to your GlyphSpek spikes root ONLY for development — it runs the UN-BUNDLED, UN-PINNED 'node --import tsx <path>/p0-supervisor/governed-run-cli.ts' instead, withholds the verifier private key unless explicitly opted in (glyphspek.devSupervisorTrustKey), and is the only path that can run autonomous mode this increment. Machine-scoped: a workspace/.vscode/settings.json cannot redirect the supervisor exec path."
+        },
+        "glyphspek.devSupervisorTrustKey": {
+          "type": "boolean",
+          "default": false,
+          "scope": "machine",
+          "description": "DEV OVERRIDE opt-in. Only consulted when glyphspek.supervisorPath is set (the un-bundled, un-pinned dev supervisor). When true, the verifier PRIVATE key is handed to that dev supervisor so its verdicts can pin as AUTHORITATIVE. Leave false (default) to withhold the key from un-pinned code. Has no effect on the bundled path, which always receives the key. Machine-scoped."
+        },
+        "glyphspek.runOutputRoot": {
+          "type": "string",
+          "default": "",
+          "scope": "machine",
+          "description": "Absolute path under which run bundles are written. When empty, defaults to <workspace>/.glyphspek/runs/<timestamp>/. Machine-scoped so a workspace cannot redirect run output."
+        },
+        "glyphspek.runtime": {
+          "type": "string",
+          "enum": [
+            "docker"
+          ],
+          "default": "docker",
+          "scope": "machine",
+          "description": "Sandbox runtime backing governed runs. P0 ships the Docker runtime; the remote (Firecracker) plane is future work. Machine-scoped so a workspace cannot redirect execution."
+        }
+      }
+    }
+  },
+  "scripts": {}
+}

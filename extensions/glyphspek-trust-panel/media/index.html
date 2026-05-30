@@ -1,0 +1,196 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <!--
+      Strict CSP for the webview. Scripts run only with the per-load nonce; styles
+      come only from the extension's media dir (webview.cspSource); no remote
+      origins, no inline event handlers, no eval. The Ed25519 Web Crypto verify
+      runs entirely client-side and needs no network, so default-src 'none' is
+      safe. {{...}} tokens are filled in by getWebviewContent() in extension.ts.
+    -->
+    <meta
+      http-equiv="Content-Security-Policy"
+      content="default-src 'none'; img-src {{cspSource}} data:; style-src {{cspSource}}; script-src 'nonce-{{nonce}}'; font-src {{cspSource}};"
+    />
+    <title>GlyphSpek — Trust Panel</title>
+    <link rel="stylesheet" href="{{stylesUri}}" />
+  </head>
+  <body>
+    <header class="topbar">
+      <div class="topbar-title">
+        <span class="logo">GlyphSpek</span>
+        <span class="topbar-sub">Trust Panel · IDE extension (W1-19 / W1-27 / W4)</span>
+      </div>
+      <div class="topbar-controls">
+        <button id="load-host-btn" type="button" class="btn">Load run bundle…</button>
+        <button id="sample-btn" type="button" class="btn">Reload signed sample</button>
+        <button id="tamper-btn" type="button" class="btn">Tamper sample (demo)</button>
+        <button id="demo-live-btn" type="button" class="btn">Demo live run</button>
+        <button id="export-btn" type="button" class="btn btn-primary">Download bundle</button>
+      </div>
+    </header>
+
+    <div id="load-status" class="load-status"></div>
+
+    <!--
+      LIVE RUN VIEW (milestone M5). Hidden until the first run/event arrives (from
+      the supervisor stream or the in-webview mock driver). Renders the run list,
+      the current run's badges (runtime trust / extension posture / CLI fidelity),
+      the streamed trace, diff/changed files, commands+exit codes, network
+      destinations, policy decisions, the claims-vs-verdict split, and each failure
+      state DISTINCTLY. The signature-before-display gate is reused verbatim from
+      app.js — a verdict is authoritative only after its Ed25519 signature verifies
+      in-browser, and a non-isolated runtime can never reach a product-trusted state.
+    -->
+    <main class="layout live-layout" id="live-view" hidden>
+      <section class="card" id="live-runlist-card">
+        <h2 class="card-title">Live runs</h2>
+        <p class="panel-caption">
+          Governed runs streamed from the supervisor over the bridge
+          <code>run/event</code> contract. Select a run to review it.
+        </p>
+        <div id="live-runlist"></div>
+      </section>
+
+      <section class="card" id="live-badges-card">
+        <h2 class="card-title">Run trust state</h2>
+        <div id="live-badges" class="badge-row"></div>
+        <div id="live-failures" class="failure-stack"></div>
+      </section>
+
+      <section class="claims-verdict">
+        <div class="card panel-claims" id="live-claims-card">
+          <h2 class="card-title">
+            Actor plan &amp; claims
+            <span class="panel-tag tag-claims">self-reported · NOT authoritative</span>
+          </h2>
+          <p class="panel-caption">
+            What the agent <em>says</em> it is doing / did. Unverified actor assertions —
+            never a verdict.
+          </p>
+          <div id="live-claims-body"></div>
+        </div>
+
+        <div class="card panel-verdict" id="live-verdict-card">
+          <h2 class="card-title">
+            Verifier verdict
+            <span class="panel-tag tag-verdict">independent · signed · authoritative</span>
+          </h2>
+          <p class="panel-caption">
+            What the <em>independent verifier</em> proved, bound to the trace-root hash and
+            signed with an actor-inaccessible key. Shown authoritative only after the
+            signature verifies in-browser.
+          </p>
+          <div id="live-verdict-body"></div>
+        </div>
+      </section>
+
+      <section class="card">
+        <h2 class="card-title">Live trace timeline</h2>
+        <p class="panel-caption">Hash-chained events streamed in order. The chain is re-verified in-browser.</p>
+        <div id="live-timeline" class="timeline"></div>
+      </section>
+
+      <section class="derived-grid">
+        <div class="card">
+          <h2 class="card-title">Changed files (diff)</h2>
+          <div id="live-files-body"></div>
+        </div>
+        <div class="card">
+          <h2 class="card-title">Commands run</h2>
+          <div id="live-commands-body"></div>
+        </div>
+        <div class="card">
+          <h2 class="card-title">Network destinations</h2>
+          <div id="live-network-body"></div>
+        </div>
+        <div class="card derived-wide">
+          <h2 class="card-title">Policy decisions</h2>
+          <div id="live-policy-body"></div>
+        </div>
+      </section>
+    </main>
+
+    <main class="layout">
+      <!-- Run header -->
+      <section class="card" id="run-header-card">
+        <h2 class="card-title">Run</h2>
+        <div id="run-header"></div>
+      </section>
+
+      <!-- The load-bearing split: actor CLAIMS vs verifier VERDICT. -->
+      <section class="claims-verdict">
+        <div class="card panel-claims" id="actor-claims-card">
+          <h2 class="card-title">
+            Actor claims
+            <span class="panel-tag tag-claims">self-reported · NOT authoritative</span>
+          </h2>
+          <p class="panel-caption">
+            What the agent <em>says</em> it did. These are unverified assertions from the
+            actor and must never be treated as proof.
+          </p>
+          <div id="actor-claims-body"></div>
+        </div>
+
+        <div class="card panel-verdict" id="verifier-verdict-card">
+          <h2 class="card-title">
+            Verifier verdict
+            <span class="panel-tag tag-verdict">independent · signed · authoritative</span>
+          </h2>
+          <p class="panel-caption">
+            What the <em>independent verifier</em> proved by running the checks from
+            <code>Policy.verify</code> in a separate trust domain, bound to the trace-root
+            hash and signed with an actor-inaccessible key.
+          </p>
+          <div id="verifier-verdict-body"></div>
+        </div>
+      </section>
+
+      <!-- Trace timeline -->
+      <section class="card">
+        <h2 class="card-title">Trace timeline</h2>
+        <p class="panel-caption">Hash-chained events in order. Hashes shown are placeholders.</p>
+        <div id="timeline" class="timeline"></div>
+      </section>
+
+      <!-- Derived sections -->
+      <section class="derived-grid">
+        <div class="card">
+          <h2 class="card-title">Commands run</h2>
+          <div id="commands-body"></div>
+        </div>
+        <div class="card">
+          <h2 class="card-title">Network destinations</h2>
+          <div id="network-body"></div>
+        </div>
+        <div class="card derived-wide">
+          <h2 class="card-title">Policy decisions</h2>
+          <div id="policy-body"></div>
+        </div>
+      </section>
+    </main>
+
+    <footer class="footer">
+      Trust surface hosted as a plain VS Code / Code-OSS extension — no fork, no
+      Microsoft Marketplace dependency, no telemetry. The verifier verdict is shown as
+      authoritative only after its Ed25519 signature is verified in-browser. Load real
+      demo-output bundles (trace.jsonl + verdict.json + verifier-public-key.pem) via
+      "Load run bundle…".
+    </footer>
+
+    <!--
+      Out-of-band trust-root seam (sweep-05). The host injects the operator's
+      trusted verifier public keys (from the `glyphspek.trustedVerifierKeys`
+      setting) as a nonce-guarded global BEFORE app.js runs. The host injects key
+      MATERIAL only; the Ed25519 verify still runs in the webview. app.js seeds
+      its pinned demo key plus whatever is injected here; a bundle's embedded key
+      is NEVER trusted. Empty when unset.
+    -->
+    {{trustedKeysScript}}
+    <script nonce="{{nonce}}" src="{{sampleBundleUri}}"></script>
+    <script nonce="{{nonce}}" src="{{appUri}}"></script>
+    <script nonce="{{nonce}}" src="{{liveUri}}"></script>
+  </body>
+</html>

@@ -1,0 +1,88 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <!--
+      Strict CSP for the chat webview. Scripts run only with the per-load nonce;
+      styles only from the extension media dir; no remote origins, no eval. The
+      chat NEVER fetches anything itself — every model call goes through the
+      extension host → supervisor bridge, which holds the provider credential.
+      default-src 'none' is therefore safe (no network from the webview at all).
+    -->
+    <meta
+      http-equiv="Content-Security-Policy"
+      content="default-src 'none'; img-src {{cspSource}} data:; style-src {{cspSource}}; script-src 'nonce-{{nonce}}'; font-src {{cspSource}};"
+    />
+    <title>GlyphSpek — Chat</title>
+    <link rel="stylesheet" href="{{stylesUri}}" />
+  </head>
+  <body class="chat-body">
+    <header class="topbar">
+      <div class="topbar-title">
+        <span class="logo">GlyphSpek</span>
+        <span class="topbar-sub">Governed chat &amp; inline edit · every model call is brokered</span>
+      </div>
+      <div class="topbar-controls">
+        <label class="chat-model-label" for="chat-model">Model</label>
+        <select id="chat-model" class="chat-model-select" aria-label="Allowlisted model"></select>
+        <span id="chat-totals" class="chat-totals"></span>
+      </div>
+    </header>
+
+    <div id="chat-status" class="load-status"></div>
+
+    <!--
+      APPROVAL PROMPT. Shown only when a model.call returns force_ask/ask: the
+      operator must confirm before the call is retried. Carries the non-secret
+      reason only.
+    -->
+    <section id="chat-approval" class="card chat-approval" hidden>
+      <h2 class="card-title">Approval required</h2>
+      <p id="chat-approval-reason" class="panel-caption"></p>
+      <div class="chat-approval-actions">
+        <button id="chat-approve" type="button" class="btn btn-primary">Approve &amp; retry</button>
+        <button id="chat-dismiss" type="button" class="btn">Dismiss</button>
+      </div>
+    </section>
+
+    <main class="chat-layout">
+      <section class="card chat-transcript-card">
+        <h2 class="card-title">Conversation</h2>
+        <p class="panel-caption">
+          Each reply shows its policy <strong>decision</strong>, the
+          <strong>redacted</strong> completion, token/cost <strong>usage</strong>,
+          and a <strong>trace ref</strong> auditable in the Trust Panel. The
+          provider credential is held supervisor-side and never reaches this view.
+        </p>
+        <div id="chat-transcript" class="chat-transcript"></div>
+      </section>
+
+      <section class="card chat-compose-card">
+        <textarea
+          id="chat-input"
+          class="chat-input"
+          rows="3"
+          placeholder="Ask the governed model… (every call is policy-decided, redacted, and traced)"
+        ></textarea>
+        <div class="chat-compose-actions">
+          <label class="chat-context-toggle">
+            <input type="checkbox" id="chat-include-selection" />
+            include active editor selection as context
+          </label>
+          <button id="chat-send" type="button" class="btn btn-primary">Send</button>
+        </div>
+      </section>
+    </main>
+
+    <footer class="footer">
+      Governed chat surface. Only models the supervisor allowlists are selectable;
+      a denied call renders a blocked card and a <code>force_ask</code> raises an
+      approval prompt. Inline edits are diff-gated. No credential is stored or
+      displayed in this view.
+    </footer>
+
+    <script nonce="{{nonce}}" src="{{chatViewUri}}"></script>
+    <script nonce="{{nonce}}" src="{{chatUri}}"></script>
+  </body>
+</html>
