@@ -32,7 +32,7 @@ export class FilePolicyService extends AbstractPolicyService implements IPolicyS
 	constructor(
 		private readonly file: URI,
 		@IFileService private readonly fileService: IFileService,
-		@ILogService private readonly logService: ILogService
+		@ILogService protected readonly logService: ILogService
 	) {
 		super();
 
@@ -45,7 +45,7 @@ export class FilePolicyService extends AbstractPolicyService implements IPolicyS
 		await this.refresh();
 	}
 
-	private async read(): Promise<Map<PolicyName, PolicyValue>> {
+	protected async read(): Promise<Map<PolicyName, PolicyValue>> {
 		const policies = new Map<PolicyName, PolicyValue>();
 
 		try {
@@ -65,9 +65,21 @@ export class FilePolicyService extends AbstractPolicyService implements IPolicyS
 			if ((<FileOperationError>error).fileOperationResult !== FileOperationResult.FILE_NOT_FOUND) {
 				this.logService.error(`[FilePolicyService] Failed to read policies`, error);
 			}
+			this.onReadFailed(error, policies);
 		}
 
 		return policies;
+	}
+
+	/**
+	 * Hook invoked when the policy file could not be read or parsed (missing, unreadable, or
+	 * not valid JSON). The base service swallows the failure and proceeds with an empty policy
+	 * map (`policies` is empty here — stock behavior). Subclasses (e.g. the Sovereign
+	 * fail-closed service) override this to impose a deny-by-default posture into `policies`
+	 * instead of silently degrading to an all-allowed default.
+	 */
+	protected onReadFailed(error: unknown, policies: Map<PolicyName, PolicyValue>): void {
+		// Stock behavior: an unreadable policy file means "no policy" (the empty map stands).
 	}
 
 	private async refresh(): Promise<void> {

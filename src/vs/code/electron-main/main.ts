@@ -64,6 +64,7 @@ import { IPolicyService, NullPolicyService } from '../../platform/policy/common/
 import { NativePolicyService } from '../../platform/policy/node/nativePolicyService.js';
 import { FilePolicyService } from '../../platform/policy/common/filePolicyService.js';
 import { MultiPolicyService } from '../../platform/policy/common/multiPolicyService.js';
+import { SovereignFilePolicyService } from '../../platform/policy/common/sovereignFilePolicyService.js';
 import { DisposableStore } from '../../base/common/lifecycle.js';
 import { IUriIdentityService } from '../../platform/uriIdentity/common/uriIdentity.js';
 import { UriIdentityService } from '../../platform/uriIdentity/common/uriIdentityService.js';
@@ -217,13 +218,16 @@ class CodeMain {
 			? (productService.parentPolicyConfig?.win32RegValueName ?? productService.win32RegValueName)
 			: (productService.parentPolicyConfig?.darwinBundleIdentifier ?? productService.darwinBundleIdentifier);
 		// GlyphSpek PATCH-001: a self-contained Sovereign build carries its `AllowedExtensions`
-		// allowlist as a bundled `policy.json` inside the signed app. Load it (safe-by-default)
-		// and layer the OS native/MDM policy *ahead* of it so native can tighten — never loosen —
-		// the allowlist. Gated entirely by `product.json`'s `glyphspekSovereignPolicyFile`; a
-		// stock/Developer build (flag absent) falls through to the unchanged selection below.
+		// allowlist as a bundled `policy.json` inside the signed app. Load it and layer the OS
+		// native/MDM policy *ahead* of it so native can tighten — never loosen — the allowlist.
+		// The bundled source is a `SovereignFilePolicyService` that FAILS CLOSED: if the bundled
+		// policy.json is missing/unreadable/invalid it forces `AllowedExtensions` to deny-all
+		// (UNTRUSTED) rather than silently degrading to the all-allowed default. Gated entirely by
+		// `product.json`'s `glyphspekSovereignPolicyFile`; a stock/Developer build (flag absent)
+		// falls through to the unchanged selection below using plain stock policy services.
 		const glyphspekSovereignPolicyFile = environmentMainService.glyphspekSovereignPolicyFile;
 		if (glyphspekSovereignPolicyFile) {
-			const bundledPolicyService = disposables.add(new FilePolicyService(glyphspekSovereignPolicyFile, fileService, logService));
+			const bundledPolicyService = disposables.add(new SovereignFilePolicyService(glyphspekSovereignPolicyFile, fileService, logService));
 			let nativePolicyService: IPolicyService | undefined;
 			if ((isWindows || isMacintosh) && policyProductName) {
 				nativePolicyService = disposables.add(new NativePolicyService(logService, policyProductName));

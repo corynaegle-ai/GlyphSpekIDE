@@ -374,6 +374,18 @@ function packageTask(platform: string, arch: string, sourceFolderName: string, d
 		];
 		let all = es.merge(...mergeStreams);
 
+		// GlyphSpek PATCH-001 (Sweep-19 Finding 2): a Sovereign build must SHIP its bundled
+		// `AllowedExtensions` allowlist inside the signed app. The main process loads it from
+		// `<appRoot>/policy.json` (via `glyphspekSovereignPolicyFile`); without this copy a
+		// Sovereign build would boot with no policy file, and the fail-closed path would force
+		// the app to UNTRUSTED (deny-all). Gated on the same `product.json` flag the runtime
+		// loader is gated on, so non-Sovereign/Developer builds ship no policy.json (unchanged).
+		if ((product as { glyphspekSovereignPolicyFile?: boolean }).glyphspekSovereignPolicyFile) {
+			const sovereignPolicy = gulp.src('build/glyphspek/sovereign-profile/sovereign-policy.json', { base: 'build/glyphspek/sovereign-profile' })
+				.pipe(rename('policy.json'));
+			all = es.merge(all, sovereignPolicy);
+		}
+
 		if (platform === 'win32') {
 			all = es.merge(all, gulp.src([
 				'resources/win32/bower.ico',

@@ -39,7 +39,9 @@ enablement. It is **optional** and recorded below as `PATCH-001`.
 
 ## PATCH-001 — Bundled file-policy source for self-contained Sovereign builds
 
-- **Status:** `APPLIED` (2026-05-30).
+- **Status:** `APPLIED` (2026-05-30). **Updated 2026-05-30 (Sweep-19 Finding 2):** the bundled
+  load now **fails closed** and the policy file is **wired into packaging** (see "Sweep-19 F2"
+  section below).
 - **Optional:** required only for a shrink-wrapped Sovereign app that must carry its allowlist
   policy *inside the signed bundle* on macOS/Windows **without** relying on OS managed
   preferences/registry or the `--__enable-file-policy` launch flag. If Sovereign deployments
@@ -80,10 +82,9 @@ layering** so native/MDM can tighten but never loosen. Files changed:
   cannot loosen the `"*"` floor or add an id the bundle did not allow).
 
 **Bundled policy source of truth:** `build/glyphspek/sovereign-profile/sovereign-policy.json`
-(the `{ "AllowedExtensions": { … } }` form). The package step must copy this to
-`<appRoot>/policy.json` in the Sovereign artifact; that build/gulp wiring is **not yet done**
-(consistent with the sovereign-profile README's "What is NOT wired" — `apply-overlay.md`), and
-no full package build was run for this patch per the M1 task constraint.
+(the `{ "AllowedExtensions": { … } }` form). The package step copies this to
+`<appRoot>/policy.json` in the Sovereign artifact — this build/gulp wiring is **now done**
+(see "Sweep-19 F2" below); a Sovereign build now SHIPS the policy file.
 
 **Enablement/install enforcement remains 100% stock** — no file under
 `extensionEnablementService.ts`, `allowedExtensionsService.ts`,
@@ -101,6 +102,66 @@ change posture). (2) The spec's `MultiPolicyService` was "…-style"; for the ob
 whole dict, so an allowlist-aware intersection was implemented to honor "tighten, never
 loosen." (3) Object-typed policy values flow through the config layer as JSON strings
 (`configurations.ts` `parse()`), so the merged value is serialized accordingly.
+
+### Sweep-19 F2 (APPLIED 2026-05-30) — fail closed + packaging wiring
+
+The original apply left two gaps that re-opened the exact silent Sovereign→Developer
+degradation the patch exists to prevent. Both are now closed.
+
+**Gap 1 — silent degrade on missing policy (NOW: fail closed).** Stock `FilePolicyService.read()`
+swallows `FILE_NOT_FOUND` (and any parse/read error) and returns an *empty* policy map. With
+`glyphspekSovereignPolicyFile` set but `<appRoot>/policy.json` absent/unreadable/invalid, the
+`AllowedExtensions` policy would simply be *unset* → `extensions.allowed` falls back to its `'*'`
+default (all allowed). A Sovereign build with no policy file would therefore boot all-allowed
+with no visible posture change.
+
+Fix — fail closed at the seam the patch added, distinguishing Sovereign from stock by
+*construction site*, not by a runtime flag check:
+
+- `src/vs/platform/policy/common/filePolicyService.ts` — `read()` is now `protected`; on any
+  read/parse failure it calls a new `protected onReadFailed(error, policies)` hook. The base
+  hook is a no-op (stock behavior — empty map stands), and `logService` was made `protected` so
+  a subclass can surface the event.
+- `src/vs/platform/policy/common/sovereignFilePolicyService.ts` — **new**
+  `SovereignFilePolicyService extends FilePolicyService`. Its `onReadFailed` override (a) logs a
+  clear "FAILING CLOSED … this build is UNTRUSTED" `logService.error` (the base stays silent on
+  `FILE_NOT_FOUND`; for a Sovereign build a missing policy IS a security event), and (b) forces
+  `AllowedExtensions` to a deny-all floor `{"*": false}` (as the JSON string the config layer
+  parses). With `extensions.allowed` then policy-set to deny-all, **no** third-party extension
+  can be enabled → effectively UNTRUSTED, never product-trusted. The watcher path means the
+  floor lifts automatically if a valid `policy.json` later appears, and re-applies if removed.
+- `src/vs/code/electron-main/main.ts` + `src/vs/code/node/cliProcessMain.ts` — the bundled
+  source on the Sovereign branch is now `SovereignFilePolicyService` (was plain
+  `FilePolicyService`). **Distinguish Sovereign vs stock:** this subclass is constructed *only*
+  inside the `if (environment…glyphspekSovereignPolicyFile) { … }` branch (gated by the
+  `product.json` flag). A stock/Developer build (flag absent) never enters that branch and uses
+  the unchanged stock `FilePolicyService` / `NativePolicyService` / `NullPolicyService` chain, so
+  non-Sovereign/Developer builds still boot normally — the fail-closed floor cannot affect them.
+  The `MultiPolicyService` intersection preserves the deny-all floor: native/MDM cannot loosen
+  `{"*": false}` (verified by test), so failing closed holds even with a native source layered
+  ahead.
+
+**Gap 2 — Sovereign build shipped WITHOUT the policy file (NOW: wired into packaging).**
+`build/gulpfile.vscode.ts` `packageTask` now, when `product.json` sets
+`glyphspekSovereignPolicyFile`, copies `build/glyphspek/sovereign-profile/sovereign-policy.json`
+→ `<appRoot>/policy.json` (rename to `policy.json`, merged into the package `all` stream for the
+darwin/linux/win paths). Gated on the same flag the runtime loader uses, so a
+non-Sovereign/Developer build ships no `policy.json` (unchanged). Without this the fail-closed
+path above would (correctly) force every Sovereign build to UNTRUSTED; with it, a Sovereign build
+ships its curated allowlist and boots Sovereign-enforced.
+
+**Acceptance test (added):** `src/vs/platform/policy/test/common/multiPolicyService.test.ts` —
+new suite `suite('SovereignFilePolicyService fail-closed (GlyphSpek PATCH-001 / Sweep-19 F2)')`:
+a present + valid bundled policy boots Sovereign-enforced (the curated allowlist, not `'*'`); a
+**missing** policy file resolves `AllowedExtensions` to `{"*": false}` (deny-all / UNTRUSTED);
+**invalid JSON** likewise; and a native/MDM source layered ahead that tries to re-open `"*": true`
+/ add an id **cannot** loosen the failed-closed floor.
+
+**Verification (Sweep-19 F2):** `npm run compile-check-ts-native` clean; `build/` `npm run
+typecheck` clean. The fail-closed merge math was confirmed against the real compiled
+`MultiPolicyService` (present-valid → enforced allowlist; deny-all floor survives a native
+loosen attempt → `{"*": false}`). Packaging-copy + full-launch fail-closed verification: see the
+build/run notes recorded with this task.
 
 ### Threat addressed
 

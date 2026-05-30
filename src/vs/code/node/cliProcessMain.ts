@@ -44,6 +44,7 @@ import { FilePolicyService } from '../../platform/policy/common/filePolicyServic
 import { IPolicyService, NullPolicyService } from '../../platform/policy/common/policy.js';
 import { NativePolicyService } from '../../platform/policy/node/nativePolicyService.js';
 import { MultiPolicyService } from '../../platform/policy/common/multiPolicyService.js';
+import { SovereignFilePolicyService } from '../../platform/policy/common/sovereignFilePolicyService.js';
 import product from '../../platform/product/common/product.js';
 import { IProductService } from '../../platform/product/common/productService.js';
 import { IRequestService } from '../../platform/request/common/request.js';
@@ -182,10 +183,13 @@ class CliMain extends Disposable {
 		let policyService: IPolicyService | undefined;
 		// GlyphSpek PATCH-001: mirror main.ts so the CLI (`glyphspek --install-extension`, etc.)
 		// honors the bundled Sovereign allowlist at install time, with native/MDM layered ahead
-		// to tighten — never loosen. Gated by `product.json`'s `glyphspekSovereignPolicyFile`.
+		// to tighten — never loosen. The bundled source FAILS CLOSED (deny-all AllowedExtensions)
+		// when the policy.json is missing/unreadable/invalid, so the CLI cannot install a
+		// non-allowlisted extension into a Sovereign profile that has lost its policy. Gated by
+		// `product.json`'s `glyphspekSovereignPolicyFile`.
 		const glyphspekSovereignPolicyFile = environmentService.glyphspekSovereignPolicyFile;
 		if (glyphspekSovereignPolicyFile) {
-			const bundledPolicyService = this._register(new FilePolicyService(glyphspekSovereignPolicyFile, fileService, logService));
+			const bundledPolicyService = this._register(new SovereignFilePolicyService(glyphspekSovereignPolicyFile, fileService, logService));
 			let nativePolicyService: IPolicyService | undefined;
 			if (isWindows && productService.win32RegValueName) {
 				nativePolicyService = this._register(new NativePolicyService(logService, productService.win32RegValueName));
