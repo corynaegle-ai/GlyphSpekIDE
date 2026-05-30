@@ -2,13 +2,19 @@
 # GlyphSpek — bundled-extension deny gate.
 #
 # WHAT THIS CHECKS
-#   Scans the BUILT app bundle's built-in extensions directory
-#   (Contents/Resources/app/extensions on macOS, resources/app/extensions on
-#   Linux/Windows) and FAILS if any extension folder matches a pattern in
-#   build/glyphspek/bundled-extension-denylist.json. A clean GlyphSpek build must
-#   not ship Copilot, the proprietary Remote/Dev-Containers pack, Pylance,
-#   cpptools, or the C# proprietary debugger — we cannot redistribute them and we
-#   ship no Copilot.
+#   (A) Scans the BUILT app bundle's built-in extensions directory
+#       (Contents/Resources/app/extensions on macOS, resources/app/extensions on
+#       Linux/Windows) and FAILS if any extension folder matches a pattern in
+#       build/glyphspek/bundled-extension-denylist.json. A clean GlyphSpek build
+#       must not ship Copilot, the proprietary Remote/Dev-Containers pack,
+#       Pylance, cpptools, or the C# proprietary debugger — we cannot
+#       redistribute them and we ship no Copilot.
+#   (B) Chains build/glyphspek/verify-no-copilot.sh, which scans the WHOLE app
+#       bundle (node_modules, *.asar, app resources) for Copilot RUNTIME
+#       libraries (@github/copilot*, @vscode/copilot-api, Copilot CLI binaries).
+#       Copilot can ship as a node_modules runtime dependency even when no
+#       extensions/copilot folder exists, so scanning extensions/ alone is NOT a
+#       sufficient "ships no Copilot" guarantee.
 #
 # USAGE
 #   build/glyphspek/verify-bundled-extensions.sh [TARGET_DIR]
@@ -20,8 +26,9 @@
 #                                              authoritative check is the .app)
 #
 # EXIT CODES
-#   0 = no denylisted extension present in the packaged app.
-#   1 = at least one denylisted extension folder is present (build is unshippable).
+#   0 = no denylisted extension AND no Copilot runtime present in the packaged app.
+#   1 = at least one denylisted extension folder OR Copilot runtime is present
+#       (build is unshippable).
 #   2 = target dir not found, or no extensions dir to scan.
 set -uo pipefail
 
@@ -129,13 +136,40 @@ done
 shopt -u nocasematch
 
 echo
+
+# ---- chain the no-Copilot-runtime gate --------------------------------------
+# extensions/ alone is not the whole story: Copilot ships as a node_modules
+# RUNTIME dependency (@github/copilot*, @vscode/copilot-api) and can be packed in
+# node_modules.asar. verify-no-copilot.sh scans the full app bundle for it.
+# Running it here keeps this script a single honest "ships no Copilot" gate.
+copilot_runtime_fail=0
+COPILOT_GATE="$REPO_ROOT/build/glyphspek/verify-no-copilot.sh"
+if [ -f "$COPILOT_GATE" ]; then
+  echo "--- no-Copilot-runtime gate ---"
+  if ! bash "$COPILOT_GATE" "$TARGET"; then
+    copilot_runtime_fail=1
+  fi
+  echo
+else
+  echo "WARN: verify-no-copilot.sh not found at $COPILOT_GATE — node_modules/ASAR" >&2
+  echo "      Copilot runtime is NOT being scanned (extensions/ only)." >&2
+  echo
+fi
+
 echo "=== verdict ==="
-if [ "$violations" -gt 0 ]; then
-  echo "RESULT: FAIL — $violations denylisted extension(s) shipped in the packaged app:"
-  printf '%s' "$matched_list" | sed '/^$/d' | sed 's/^/        - extensions\//'
-  echo "        GlyphSpek must not ship these. Remove them from the build/package path."
+if [ "$violations" -gt 0 ] || [ "$copilot_runtime_fail" -gt 0 ]; then
+  if [ "$violations" -gt 0 ]; then
+    echo "RESULT: FAIL — $violations denylisted extension(s) shipped in the packaged app:"
+    printf '%s' "$matched_list" | sed '/^$/d' | sed 's/^/        - extensions\//'
+    echo "        GlyphSpek must not ship these. Remove them from the build/package path."
+  fi
+  if [ "$copilot_runtime_fail" -gt 0 ]; then
+    echo "RESULT: FAIL — Copilot RUNTIME libraries present in the packaged app"
+    echo "        (see the no-Copilot-runtime gate above). GlyphSpek must ship no Copilot."
+  fi
   exit 1
 fi
 
-echo "RESULT: PASS — no denylisted extensions found under extensions/."
+echo "RESULT: PASS — no denylisted extensions under extensions/, and no Copilot runtime"
+echo "        libraries in node_modules / *.asar / app resources."
 exit 0

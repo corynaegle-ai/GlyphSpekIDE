@@ -175,3 +175,105 @@ key is added at apply time by whoever applies the patch.
   GlyphSpek branch as an added `else if` ahead of the `NullPolicyService` fallback to
   minimize conflict surface. Re-verify upstream hasn't renamed
   `LINUX_SYSTEM_POLICY_FILE_PATH`/`policyFile` on each rebase.
+
+---
+
+## GATE-002 — No-Copilot-runtime deny gate + Copilot-removal entanglement record
+
+- **Status:** `APPLIED` (2026-05-30) for the gate (Part 1). Full Copilot-runtime removal
+  (Part 2) is **BLOCKED** and intentionally **NOT** applied — see entanglement below.
+- **Origin:** Sweep-20 Finding 1 (Critical) — the packaged app shipped Copilot RUNTIME
+  libraries under `Contents/Resources/app/node_modules` (`@github/copilot`,
+  `@github/copilot-sdk`, `@vscode/copilot-api`) while the only deny gate
+  (`verify-bundled-extensions.sh`) scanned `extensions/` only and reported a false **PASS**.
+
+### Part 1 (APPLIED) — make the "ships no Copilot" gate honest
+
+- **New:** `build/glyphspek/verify-no-copilot.sh` — scans the WHOLE app bundle for Copilot
+  runtime material and FAILS if any is present:
+  - unpacked `Contents/Resources/app/node_modules` for `@github/copilot`,
+    `@github/copilot-<platform>`, `@github/copilot-sdk`, `@vscode/copilot-api`
+    (matched as exact `node_modules/<scope>/<pkg>` path segments — does **not**
+    false-positive on unrelated packages whose name merely contains "copilot");
+  - any `*.asar` (e.g. `node_modules.asar`) via the `asar` tool header listing, with a
+    `strings`-based binary scan fallback when the tool is unavailable;
+  - Copilot CLI command binaries / `.bin/copilot` shims under app resources.
+- **Chained:** `build/glyphspek/verify-bundled-extensions.sh` now runs `verify-no-copilot.sh`
+  and FAILS on either a denylisted `extensions/` folder OR a Copilot runtime artifact, so the
+  single command is an honest "ships no Copilot" gate.
+- **Verified against the current packaged app** (which still contains Copilot): the gate that
+  previously PASSED now correctly **FAILS** (exit 1), reporting the 3 packages. Self-tested
+  against (a) a clean tree with decoy `copilot-helper` / `@scope/my-copilot-theme` /
+  `awesome-copilot-snippets` packages → **PASS** (no false positives), (b) Copilot packed
+  inside an `.asar` → **FAIL**, (c) a `.bin/copilot` shim → **FAIL**.
+- **Threat addressed:** false release signal. A "PASS" deny gate while GitHub Copilot code +
+  SDK material sits in the app bundle masks a guardrail violation (GlyphSpek ships no Copilot)
+  and blocks the Sovereign/trusted-IDE alpha. The gate now refuses to green-light such a build.
+
+### Part 2 (BLOCKED — NOT applied) — why full Copilot removal breaks the build
+
+Removing the root `@github/copilot*` / `@vscode/copilot-api` dependencies and the Copilot
+package task **breaks the build** because the fork's **Agent Host** subsystem embeds the
+native Copilot SDK at runtime. This is load-bearing, not vestigial:
+
+- **Value (runtime) imports** of the Copilot packages live in 4 production source files that
+  compile into the shipped bundle (`out/vs/platform/agentHost/node/agentHostMain.js` contains
+  live `import { CopilotClient, RuntimeConnection } from "@github/copilot-sdk"` and
+  `import { CAPIClient, RequestType } from "@vscode/copilot-api"`):
+  - `src/vs/platform/agentHost/node/copilot/copilotAgent.ts` — `CopilotClient`,
+    `ResumeSessionConfig`, `RuntimeConnection` from `@github/copilot-sdk`
+  - `src/vs/platform/agentHost/node/copilot/copilotSessionWrapper.ts` — `CopilotSession`,
+    `SessionEventPayload`, `SessionEventType` from `@github/copilot-sdk`
+  - `src/vs/platform/agentHost/node/copilot/mapSessionEvents.ts` — `MessageOptions` from
+    `@github/copilot-sdk`
+  - `src/vs/platform/agentHost/node/shared/copilotApiService.ts` — `CAPIClient`,
+    `RequestType` from `@vscode/copilot-api`
+- `@github/copilot-sdk` ships its own types (`dist/index.d.ts`, no ambient shim), so removing
+  the package makes these value imports fail to resolve at type-check **and** at esbuild bundle
+  time. `@vscode/copilot-api` has an ambient *type* shim (`src/typings/copilot-api.d.ts`) but
+  the `CAPIClient`/`RequestType` **values** still resolve to the real package — removing it
+  breaks the bundle/runtime even though types would still type-check.
+- `@github/copilot` (the CLI) is a **runtime dependency of `@github/copilot-sdk`** (per
+  `package-lock.json`, `copilot-sdk` requires `@github/copilot ^1.0.55-1`) and is loaded
+  dynamically by the SDK at runtime (`copilotAgent.ts:498` notes `@github/copilot`'s exports
+  map blocks direct subpath access). It cannot be dropped while `copilot-sdk` is present.
+- `agentHost` is wired into the workbench/main process and the agentic `vs/sessions/` layer
+  (`src/vs/code/electron-main/app.ts`, `src/vs/code/electron-utility/sharedProcess/`
+  `sharedProcessMain.ts`, `src/vs/server/node/serverAgentHostManager.ts`, and many
+  `src/vs/sessions/**` files), so it is not dead code that could be excluded from packaging.
+- `build/gulpfile.vscode.ts` + `build/lib/copilot.ts` additionally pull Copilot runtime
+  prebuilds (`getCopilotRuntimePrebuildFiles`), filter wrong-arch Copilot packages
+  (`getCopilotExcludeFilter`), and force-unpack `**/@github/copilot-*/**` out of
+  `node_modules.asar`. These exist precisely because the Agent Host needs the native SDK at
+  runtime; removing them without first removing the Agent Host's SDK use would break that
+  subsystem.
+
+**Decision:** do not ship a broken build. Part 2 is left unapplied (root deps untouched).
+Part 1 (the honest, now-FAILING gate) stands as the release guardrail until the Agent Host's
+Copilot-SDK coupling is resolved.
+
+### What full Copilot removal would require (future work)
+
+1. Remove or re-platform the Agent Host's Copilot path: either delete
+   `src/vs/platform/agentHost/node/copilot/**` and `shared/copilotApiService.ts` and every
+   reference to them (the `copilotAgent` provider, session wrapper, event mapping, and any
+   `agentHost` registration that selects the Copilot agent), keeping only the non-Copilot
+   agent (e.g. the Claude agent under `agentHost/node/claude/**`), OR replace the
+   `@github/copilot-sdk` / `@vscode/copilot-api` runtime with a GlyphSpek-owned brokered model
+   client.
+2. After the code is Copilot-free, remove `@github/copilot`, `@github/copilot-sdk`,
+   `@vscode/copilot-api` from `package.json` dependencies, run `npm install` to regenerate
+   `package-lock.json` / `node_modules`, and delete the now-dead Copilot machinery in
+   `build/gulpfile.vscode.ts` (the `copilotRuntimePrebuilds` merge, `getCopilotExcludeFilter`,
+   the `**/@github/copilot-*/**` ASAR unpack pattern) and `build/lib/copilot.ts`. Remove the
+   `compile-copilot` / `watch-copilot` / `copilot:*` scripts and the
+   `@github/copilot-sdk`/`@vscode/copilot-api` import test fixtures + `src/typings/copilot-api.d.ts`.
+3. Rebuild and run `verify-bundled-extensions.sh` (Part 1): it must then PASS, and
+   `find VSCode-darwin-arm64/GlyphSpek.app -path '*node_modules/@github/copilot*'` must be empty.
+
+### Rollback / rebase note
+
+- **Part 1 rollback:** delete `build/glyphspek/verify-no-copilot.sh` and revert the chaining
+  block in `verify-bundled-extensions.sh`. No app/runtime impact (gates are build-time only).
+- **Rebase risk: LOW.** Both files are GlyphSpek-only build tooling with no upstream
+  counterpart.
