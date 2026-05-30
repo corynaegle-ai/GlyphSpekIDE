@@ -72,12 +72,16 @@
 	display: flex;
 	flex-direction: column;
 	align-items: flex-start;
+	/* Give the hero breathing room from the editor tab bar so the logo isn't crowded against the
+	   top edge, and push the whole brand block (logo + title + tagline) down a few lines so the
+	   page reads balanced rather than top-heavy. */
+	padding-top: 48px;
 }
 
 .monaco-workbench .part.editor > .content .gettingStartedContainer .glyphspek-hero .glyphspek-logo {
-	width: 117px;
-	height: 84px;
-	margin: 4px 0 14px;
+	width: 74px;
+	height: 53px;
+	margin: 0 0 14px;
 	background-image: url('./glyphspek-mark.png');
 	background-repeat: no-repeat;
 	background-position: center;
@@ -226,6 +230,13 @@
 .monaco-workbench .part.editor > .content .gettingStartedContainer .gettingStartedSlideCategories > .gettingStartedCategoriesContainer > .header {
 	grid-area: header;
 	align-self: end;
+}
+
+/* The GlyphSpek brand hero anchors to the top of its grid band (rather than bottom-aligning like
+   the stock header) so the padding-top reliably moves the logo + title down a few lines, away from
+   the editor tab bar. */
+.monaco-workbench .part.editor > .content .gettingStartedContainer .gettingStartedSlideCategories > .gettingStartedCategoriesContainer > .header.glyphspek-hero {
+	align-self: start;
 }
 
 .monaco-workbench .part.editor > .content .gettingStartedContainer .gettingStartedSlideCategories > .gettingStartedCategoriesContainer > .footer {
