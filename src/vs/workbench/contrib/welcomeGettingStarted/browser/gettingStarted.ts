@@ -923,10 +923,11 @@ export class GettingStartedPage extends EditorPane {
 			onShowOnStartupChanged();
 		}));
 
-		// GlyphSpek: brand hero. Show the GlyphSpek logo lockup prominently and render a
-		// two-tone, theme-aware product title ("Glyph" in foreground, "Spek" in brand indigo)
-		// instead of a single flat gray caption. The title falls back gracefully for any
-		// product name that does not follow the "Glyph…" wordmark convention.
+		// GlyphSpek: brand hero. Show the GlyphSpek G-mark symbol (bracket "GS" mark only, no
+		// wordmark) above a two-tone, theme-aware product title ("Glyph" in foreground, "Spek"
+		// in brand indigo) instead of a single flat gray caption. Using the symbol rather than
+		// the full lockup keeps the product name from appearing twice. The title falls back
+		// gracefully for any product name that does not follow the "Glyph…" wordmark convention.
 		const productName = this.productService.nameLong;
 		const titleChildren: HTMLElement[] = [];
 		const wordmarkMatch = /^(Glyph)(.*)$/.exec(productName);
@@ -942,7 +943,7 @@ export class GettingStartedPage extends EditorPane {
 		const header = $('.header.glyphspek-hero', {},
 			$('.glyphspek-logo', { 'role': 'img', 'aria-label': productName }),
 			$('h1.product-name.caption', {}, ...titleChildren),
-			$('p.subtitle.description', {}, localize({ key: 'gettingStarted.editingEvolved', comment: ['Shown as subtitle on the Welcome page.'] }, "Editing evolved"))
+			$('p.subtitle.description', {}, localize({ key: 'gettingStarted.trustInfrastructure', comment: ['Shown as subtitle on the Welcome page. GlyphSpek product tagline.'] }, "Trust infrastructure for autonomous coding"))
 		);
 
 		const leftColumn = $('.categories-column.categories-column-left', {},);
