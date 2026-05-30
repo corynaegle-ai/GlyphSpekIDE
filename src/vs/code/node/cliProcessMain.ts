@@ -43,6 +43,7 @@ import { ConsoleLogger, getLogLevel, ILogger, ILoggerService, ILogService, LogLe
 import { FilePolicyService } from '../../platform/policy/common/filePolicyService.js';
 import { IPolicyService, NullPolicyService } from '../../platform/policy/common/policy.js';
 import { NativePolicyService } from '../../platform/policy/node/nativePolicyService.js';
+import { MultiPolicyService } from '../../platform/policy/common/multiPolicyService.js';
 import product from '../../platform/product/common/product.js';
 import { IProductService } from '../../platform/product/common/productService.js';
 import { IRequestService } from '../../platform/request/common/request.js';
@@ -179,7 +180,22 @@ class CliMain extends Disposable {
 
 		// Policy
 		let policyService: IPolicyService | undefined;
-		if (isWindows && productService.win32RegValueName) {
+		// GlyphSpek PATCH-001: mirror main.ts so the CLI (`glyphspek --install-extension`, etc.)
+		// honors the bundled Sovereign allowlist at install time, with native/MDM layered ahead
+		// to tighten — never loosen. Gated by `product.json`'s `glyphspekSovereignPolicyFile`.
+		const glyphspekSovereignPolicyFile = environmentService.glyphspekSovereignPolicyFile;
+		if (glyphspekSovereignPolicyFile) {
+			const bundledPolicyService = this._register(new FilePolicyService(glyphspekSovereignPolicyFile, fileService, logService));
+			let nativePolicyService: IPolicyService | undefined;
+			if (isWindows && productService.win32RegValueName) {
+				nativePolicyService = this._register(new NativePolicyService(logService, productService.win32RegValueName));
+			} else if (isMacintosh && productService.darwinBundleIdentifier) {
+				nativePolicyService = this._register(new NativePolicyService(logService, productService.darwinBundleIdentifier));
+			} else if (isLinux) {
+				nativePolicyService = this._register(new FilePolicyService(URI.file(LINUX_SYSTEM_POLICY_FILE_PATH), fileService, logService));
+			}
+			policyService = this._register(new MultiPolicyService(bundledPolicyService, nativePolicyService));
+		} else if (isWindows && productService.win32RegValueName) {
 			policyService = this._register(new NativePolicyService(logService, productService.win32RegValueName));
 		} else if (isMacintosh && productService.darwinBundleIdentifier) {
 			policyService = this._register(new NativePolicyService(logService, productService.darwinBundleIdentifier));

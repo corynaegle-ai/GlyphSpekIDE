@@ -276,6 +276,25 @@ export abstract class AbstractNativeEnvironmentService implements INativeEnviron
 		return undefined;
 	}
 
+	/**
+	 * GlyphSpek PATCH-001 — path to the Sovereign policy file bundled inside the signed app.
+	 * Resolved (and only resolved) when `product.json` sets `glyphspekSovereignPolicyFile`,
+	 * so a stock GlyphSpek/Developer build is unaffected. The file ships at the app resources
+	 * root (`<appRoot>/policy.json`), placed there at package time. See SECURITY-PATCHES.md
+	 * PATCH-001. An explicit `--glyphspek-policy-file <path>` overrides the bundled location.
+	 */
+	@memoize
+	get glyphspekSovereignPolicyFile(): URI | undefined {
+		if (!this.productService.glyphspekSovereignPolicyFile) {
+			return undefined;
+		}
+		const override = this.args['glyphspek-policy-file'];
+		if (override) {
+			return URI.file(resolve(override));
+		}
+		return URI.file(join(this.appRoot, 'policy.json'));
+	}
+
 	@memoize
 	get agentSessionsWorkspace(): URI {
 		return joinPath(this.appSettingsHome, 'agent-sessions.code-workspace');

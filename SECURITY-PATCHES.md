@@ -39,11 +39,68 @@ enablement. It is **optional** and recorded below as `PATCH-001`.
 
 ## PATCH-001 — Bundled file-policy source for self-contained Sovereign builds
 
-- **Status:** `SPECIFIED` (NOT APPLIED).
+- **Status:** `APPLIED` (2026-05-30).
 - **Optional:** required only for a shrink-wrapped Sovereign app that must carry its allowlist
   policy *inside the signed bundle* on macOS/Windows **without** relying on OS managed
   preferences/registry or the `--__enable-file-policy` launch flag. If Sovereign deployments
   use MDM/GPO or the existing flag, **do not apply this patch**.
+
+### As applied (2026-05-30)
+
+Applied via the **`product.json` flag** approach the spec offered, with a **`MultiPolicyService`
+layering** so native/MDM can tighten but never loosen. Files changed:
+
+- `product.json` — added one additive key `"glyphspekSovereignPolicyFile": true` (the gate),
+  and (separately, M1 cleanliness Task 2) emptied `webviewContentExternalBaseUrlTemplate`.
+- `src/vs/base/common/product.ts` — declared the `glyphspekSovereignPolicyFile?: boolean`
+  field on `IProductConfiguration`.
+- `src/vs/platform/environment/common/environmentService.ts` — added a memoized
+  `glyphspekSovereignPolicyFile: URI | undefined` getter (analogous to `policyFile`): returns
+  `<appRoot>/policy.json` only when the product flag is set, overridable by
+  `--glyphspek-policy-file <path>`. A stock/Developer build (flag absent) returns `undefined`
+  and is wholly unaffected.
+- `src/vs/platform/environment/node/argv.ts` + `common/argv.ts` — added the non-hidden
+  `--glyphspek-policy-file <path>` string arg.
+- `src/vs/platform/policy/common/multiPolicyService.ts` — **new** `MultiPolicyService`:
+  merges the bundled file policy (baseline) with the OS native/MDM policy. For the
+  `AllowedExtensions` policy it does an allowlist-aware *intersection* (an id/publisher is
+  allowed only if both sources allow it; `"*"` floor = AND of both; absent keys resolve to a
+  source's own `"*"` fallback, matching `allowedExtensionsService.isAllowed`), delivering the
+  merged value as a JSON string (the form `PolicyConfiguration` parses for object policies).
+  Scalar policies: native wins when set. Native can therefore tighten, never loosen.
+- `src/vs/code/electron-main/main.ts` — in the policy-source selection block, added a
+  leading branch: when `glyphspekSovereignPolicyFile` is set, build a `FilePolicyService` over
+  the bundled file and wrap it with the platform's native source in a `MultiPolicyService`.
+  The original stock `if/else` chain is preserved untouched as the fallback.
+- `src/vs/code/node/cliProcessMain.ts` — mirrored the same selection so the CLI honors the
+  allowlist at install time.
+- `src/vs/platform/policy/test/common/multiPolicyService.test.ts` — **new** acceptance test
+  (`suite('MultiPolicyService (GlyphSpek PATCH-001)')`) covering acceptance #1 (standalone
+  bundled allowlist loads, not `"*"`) and #4 (native tightens by removing a curated id; native
+  cannot loosen the `"*"` floor or add an id the bundle did not allow).
+
+**Bundled policy source of truth:** `build/glyphspek/sovereign-profile/sovereign-policy.json`
+(the `{ "AllowedExtensions": { … } }` form). The package step must copy this to
+`<appRoot>/policy.json` in the Sovereign artifact; that build/gulp wiring is **not yet done**
+(consistent with the sovereign-profile README's "What is NOT wired" — `apply-overlay.md`), and
+no full package build was run for this patch per the M1 task constraint.
+
+**Enablement/install enforcement remains 100% stock** — no file under
+`extensionEnablementService.ts`, `allowedExtensionsService.ts`,
+`abstractExtensionManagementService.ts`, `extensionGalleryService.ts`, or the
+`extensions.allowed` registration was touched.
+
+**Compile:** `npm run compile-check-ts-native` (validates `src/tsconfig.json`) passes clean.
+The unit test was authored and type-checked; running it requires compiled `out/` (a full
+`npm run compile`), deferred to the next build per task constraints.
+
+**Spec ambiguity resolved:** (1) the spec offered "auto-detect bundled file" *or* "product
+flag"; the flag was chosen for auditability (presence/absence of the file cannot silently
+change posture). (2) The spec's `MultiPolicyService` was "…-style"; for the object-valued
+`AllowedExtensions` a per-policy-name override would let native *replace* (hence loosen) the
+whole dict, so an allowlist-aware intersection was implemented to honor "tighten, never
+loosen." (3) Object-typed policy values flow through the config layer as JSON strings
+(`configurations.ts` `parse()`), so the merged value is serialized accordingly.
 
 ### Threat addressed
 

@@ -63,6 +63,7 @@ import { IUserDataProfilesMainService, UserDataProfilesMainService } from '../..
 import { IPolicyService, NullPolicyService } from '../../platform/policy/common/policy.js';
 import { NativePolicyService } from '../../platform/policy/node/nativePolicyService.js';
 import { FilePolicyService } from '../../platform/policy/common/filePolicyService.js';
+import { MultiPolicyService } from '../../platform/policy/common/multiPolicyService.js';
 import { DisposableStore } from '../../base/common/lifecycle.js';
 import { IUriIdentityService } from '../../platform/uriIdentity/common/uriIdentity.js';
 import { UriIdentityService } from '../../platform/uriIdentity/common/uriIdentityService.js';
@@ -215,7 +216,22 @@ class CodeMain {
 		const policyProductName = isWindows
 			? (productService.parentPolicyConfig?.win32RegValueName ?? productService.win32RegValueName)
 			: (productService.parentPolicyConfig?.darwinBundleIdentifier ?? productService.darwinBundleIdentifier);
-		if (isWindows && policyProductName) {
+		// GlyphSpek PATCH-001: a self-contained Sovereign build carries its `AllowedExtensions`
+		// allowlist as a bundled `policy.json` inside the signed app. Load it (safe-by-default)
+		// and layer the OS native/MDM policy *ahead* of it so native can tighten — never loosen —
+		// the allowlist. Gated entirely by `product.json`'s `glyphspekSovereignPolicyFile`; a
+		// stock/Developer build (flag absent) falls through to the unchanged selection below.
+		const glyphspekSovereignPolicyFile = environmentMainService.glyphspekSovereignPolicyFile;
+		if (glyphspekSovereignPolicyFile) {
+			const bundledPolicyService = disposables.add(new FilePolicyService(glyphspekSovereignPolicyFile, fileService, logService));
+			let nativePolicyService: IPolicyService | undefined;
+			if ((isWindows || isMacintosh) && policyProductName) {
+				nativePolicyService = disposables.add(new NativePolicyService(logService, policyProductName));
+			} else if (isLinux) {
+				nativePolicyService = disposables.add(new FilePolicyService(URI.file(LINUX_SYSTEM_POLICY_FILE_PATH), fileService, logService));
+			}
+			policyService = disposables.add(new MultiPolicyService(bundledPolicyService, nativePolicyService));
+		} else if (isWindows && policyProductName) {
 			policyService = disposables.add(new NativePolicyService(logService, policyProductName));
 		} else if (isMacintosh && policyProductName) {
 			policyService = disposables.add(new NativePolicyService(logService, policyProductName));
