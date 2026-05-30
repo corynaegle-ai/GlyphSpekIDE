@@ -10,7 +10,6 @@ import { isCancellationError } from '../../../../base/common/errors.js';
 import { StopWatch } from '../../../../base/common/stopwatch.js';
 import { URI } from '../../../../base/common/uri.js';
 import { isWindows, isMacintosh, isLinux } from '../../../../base/common/platform.js';
-import { assertDefined } from '../../../../base/common/types.js';
 import { FileAccess } from '../../../../base/common/network.js';
 import { ILayoutService } from '../../../../platform/layout/browser/layoutService.js';
 import { KeyCode } from '../../../../base/common/keyCodes.js';
@@ -77,8 +76,12 @@ type OnboardingActionEvent = {
 
 type EnterpriseSignInUiState = 'options' | 'instance' | 'progress';
 
-assertDefined(product.defaultChatAgent, 'Onboarding requires a default chat agent product configuration.');
-const defaultChat = product.defaultChatAgent;
+// GlyphSpek branding strips the Copilot `defaultChatAgent` block from product.json.
+// This module must still load (the contribution registers IOnboardingService, which
+// startupPage.ts depends on via DI), so we avoid throwing at module-evaluation time.
+// The non-null assertion keeps the field accesses below compiling; `show()` early-returns
+// when `product.defaultChatAgent` is absent so none of those accesses are ever reached.
+const defaultChat = product.defaultChatAgent!;
 
 /**
  * Variation A — Classic Wizard Modal
@@ -167,6 +170,13 @@ export class OnboardingVariationA extends Disposable implements IOnboardingServi
 	}
 
 	show(): void {
+		// GlyphSpek ships no Copilot, so product.json has no `defaultChatAgent`. The
+		// Copilot-onboarding wizard renders sign-in/disclaimer UI from that config, so
+		// with no chat agent it must be a safe no-op rather than dereferencing `defaultChat`.
+		if (!product.defaultChatAgent) {
+			return;
+		}
+
 		if (this.overlay) {
 			return;
 		}
