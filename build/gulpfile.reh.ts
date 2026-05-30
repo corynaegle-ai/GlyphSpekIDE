@@ -29,7 +29,7 @@ import * as cp from 'child_process';
 import log from 'fancy-log';
 import buildfile from './buildfile.ts';
 import { fetchUrls, fetchGithub } from './lib/fetch.ts';
-import { getCopilotExcludeFilter, getCopilotRuntimePrebuildFiles, getRipgrepExcludeFilter, prepareBuiltInCopilotRipgrepShim } from './lib/copilot.ts';
+import { getRipgrepExcludeFilter, prepareBuiltInCopilotRipgrepShim } from './lib/copilot.ts';
 
 
 const rcedit = promisify(rceditCallback);
@@ -335,9 +335,12 @@ function packageTask(type: string, platform: string, arch: string, sourceFolderN
 			.pipe(filter(['**', '!**/package-lock.json', '!**/*.{js,css}.map']))
 			.pipe(util.cleanNodeModules(path.join(import.meta.dirname, '.moduleignore')))
 			.pipe(util.cleanNodeModules(path.join(import.meta.dirname, `.moduleignore.${process.platform}`)));
-		const copilotRuntimePrebuilds = gulp.src(getCopilotRuntimePrebuildFiles(platform, arch, 'remote/node_modules'), { base: 'remote', dot: true, allowEmpty: true });
-		const deps = es.merge(cleanedDeps, copilotRuntimePrebuilds)
-			.pipe(filter(getCopilotExcludeFilter(platform, arch)))
+		// GlyphSpek (SECURITY-PATCHES.md GATE-002): the real GitHub Copilot runtime
+		// (@github/copilot*, @github/copilot-sdk) is removed from the build graph, so
+		// there are no Copilot runtime prebuilds to merge and no wrong-arch Copilot
+		// platform packages to filter. The Agent Host's Copilot imports are redirected
+		// to inert stubs at bundle time.
+		const deps = cleanedDeps
 			.pipe(filter(getRipgrepExcludeFilter(platform, arch)))
 			.pipe(jsFilter)
 			.pipe(util.stripSourceMappingURL())

@@ -131,6 +131,19 @@ function bundleESMTask(opts: IBundleESMTaskOpts): NodeJS.ReadWriteStream {
 					build.onResolve({ filter: /^minimist$/ }, () => {
 						return { path: path.join(REPO_ROOT_PATH, 'node_modules', 'minimist', 'index.js'), external: false };
 					});
+					// GlyphSpek (SECURITY-PATCHES.md GATE-002): the real GitHub Copilot
+					// runtime (`@github/copilot-sdk`, `@vscode/copilot-api`) is removed
+					// from the build graph. The Agent Host still imports these symbols, so
+					// inline GlyphSpek's INERT stubs into the bundle here (they would
+					// otherwise be left as external bare specifiers that resolve to a
+					// missing node_modules package at runtime). This keeps the packaged app
+					// Copilot-runtime-free while the Agent Host's Copilot path stays inert.
+					build.onResolve({ filter: /^@github\/copilot-sdk$/ }, () => {
+						return { path: path.join(REPO_ROOT_PATH, 'build', 'glyphspek', 'copilot-stubs', 'github-copilot-sdk', 'dist', 'index.js'), external: false };
+					});
+					build.onResolve({ filter: /^@vscode\/copilot-api$/ }, () => {
+						return { path: path.join(REPO_ROOT_PATH, 'build', 'glyphspek', 'copilot-stubs', 'vscode-copilot-api', 'dist', 'index.js'), external: false };
+					});
 				},
 			};
 

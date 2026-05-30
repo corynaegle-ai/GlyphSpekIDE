@@ -15,6 +15,14 @@
 		"forceConsistentCasingInFileNames": true,
 		"target": "ES2024",
 		"useDefineForClassFields": false,
+		"paths": {
+			"@github/copilot-sdk": [
+				"../build/glyphspek/copilot-stubs/github-copilot-sdk/dist/index.d.ts"
+			],
+			"@vscode/copilot-api": [
+				"../build/glyphspek/copilot-stubs/vscode-copilot-api/dist/index.d.ts"
+			]
+		},
 		"lib": [
 			"ES2024",
 			"ESNext.Disposable",

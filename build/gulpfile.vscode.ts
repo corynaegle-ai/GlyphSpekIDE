@@ -28,7 +28,7 @@ import minimist from 'minimist';
 import { compileBuildWithoutManglingTask, compileBuildWithManglingTask } from './gulpfile.compile.ts';
 import { compileNonNativeExtensionsBuildTask, compileNativeExtensionsBuildTask, compileAllExtensionsBuildTask, compileExtensionMediaBuildTask, cleanExtensionsBuildTask } from './gulpfile.extensions.ts';
 import { copyCodiconsTask } from './lib/compilation.ts';
-import { getCopilotExcludeFilter, getCopilotRuntimePrebuildFiles, getRipgrepExcludeFilter } from './lib/copilot.ts';
+import { getRipgrepExcludeFilter } from './lib/copilot.ts';
 import { useEsbuildTranspile } from './buildConfig.ts';
 import { promisify } from 'util';
 import globCallback from 'glob';
@@ -337,9 +337,12 @@ function packageTask(platform: string, arch: string, sourceFolderName: string, d
 			.pipe(filter(depFilterPattern))
 			.pipe(util.cleanNodeModules(path.join(import.meta.dirname, '.moduleignore')))
 			.pipe(util.cleanNodeModules(path.join(import.meta.dirname, `.moduleignore.${process.platform}`)));
-		const copilotRuntimePrebuilds = gulp.src(getCopilotRuntimePrebuildFiles(platform, arch), { base: '.', dot: true, allowEmpty: true });
-		const deps = es.merge(cleanedDeps, copilotRuntimePrebuilds)
-			.pipe(filter(getCopilotExcludeFilter(platform, arch)))
+		// GlyphSpek (SECURITY-PATCHES.md GATE-002): the real GitHub Copilot runtime
+		// (@github/copilot*, @github/copilot-sdk) is removed from the build graph, so
+		// there are no Copilot runtime prebuilds to merge and no wrong-arch Copilot
+		// platform packages to filter or force-unpack from node_modules.asar. The
+		// Agent Host's Copilot imports are redirected to inert stubs at bundle time.
+		const deps = cleanedDeps
 			.pipe(filter(getRipgrepExcludeFilter(platform, arch)))
 			.pipe(jsFilter)
 			.pipe(util.rewriteSourceMappingURL(sourceMappingURLBase))
@@ -347,7 +350,6 @@ function packageTask(platform: string, arch: string, sourceFolderName: string, d
 			.pipe(createAsar(path.join(process.cwd(), 'node_modules'), [
 				'**/*.node',
 				'**/@vscode/ripgrep-universal/bin/**',
-				'**/@github/copilot-*/**',
 				'**/node-pty/build/Release/*',
 				'**/node-pty/build/Release/conpty/*',
 				'**/node-pty/lib/worker/conoutSocketWorker.js',

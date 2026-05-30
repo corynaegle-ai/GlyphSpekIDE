@@ -178,14 +178,121 @@ key is added at apply time by whoever applies the patch.
 
 ---
 
-## GATE-002 — No-Copilot-runtime deny gate + Copilot-removal entanglement record
+## GATE-002 — No-Copilot-runtime deny gate + Copilot-runtime removal (STUBBED)
 
-- **Status:** `APPLIED` (2026-05-30) for the gate (Part 1). Full Copilot-runtime removal
-  (Part 2) is **BLOCKED** and intentionally **NOT** applied — see entanglement below.
+- **Status:** `APPLIED` (2026-05-30) — Part 1 (the honest deny gate) AND Part 2 (full
+  Copilot-runtime removal via inert SDK stubs). The gate now **PASSES** on a packaged app
+  that ships **no** Copilot runtime. Part 2 was previously recorded as BLOCKED; it is now
+  resolved by stubbing the Agent Host's Copilot SDK rather than ripping out the subsystem.
 - **Origin:** Sweep-20 Finding 1 (Critical) — the packaged app shipped Copilot RUNTIME
   libraries under `Contents/Resources/app/node_modules` (`@github/copilot`,
   `@github/copilot-sdk`, `@vscode/copilot-api`) while the only deny gate
   (`verify-bundled-extensions.sh`) scanned `extensions/` only and reported a false **PASS**.
+
+### Part 2 (APPLIED 2026-05-30) — de-Copilot the Agent Host via inert SDK stubs
+
+The fork's Agent Host imports the Copilot SDK as load-bearing runtime values in shipped
+source. Rather than delete the subsystem (high blast radius across `vs/sessions/**` and the
+main/shared processes), the real Copilot packages were replaced with **inert, differently-named
+stubs** whose every Copilot entry point throws `"Copilot is not available in GlyphSpek"` or
+no-ops. The Agent Host still compiles and loads; its Copilot agent path is dead-but-safe.
+
+**Stub approach + exact symbol surface stubbed**
+
+- **Stub packages (new):** `build/glyphspek/copilot-stubs/`
+  - `github-copilot-sdk/` — `dist/index.js` (inert runtime) + the SDK's real `*.d.ts`
+    type-declaration files copied verbatim (pure types, zero Copilot runtime) so `tsc`
+    type-checks against exact shapes under `skipLibCheck`. `package.json` named
+    `@glyphspek/copilot-sdk-stub` (NOT `@github/copilot-sdk`, so the deny gate cannot
+    match it).
+  - `vscode-copilot-api/` — `dist/index.js` (inert) + `dist/index.d.ts` (the agent-host
+    subset, lifted from the former `src/typings/copilot-api.d.ts`).
+- **Runtime VALUES that had to exist + be callable** (everything else is type-only):
+  - `@github/copilot-sdk`: `CopilotClient` (constructs; `start()`/`createSession()`/
+    `resumeSession()`/RPC all throw `COPILOT_UNAVAILABLE`; `listSessions()`/`listModels()`
+    return `[]`; `stop()` no-ops), `RuntimeConnection` (`forStdio`/`forTcp`/`forUri` return
+    inert descriptors), plus exported-for-resolution inert `CopilotSession`, `Canvas`,
+    `createCanvas`, `defineTool`, `approveAll`, `convertMcpCallToolResult`,
+    `createSessionFsAdapter`, `SYSTEM_MESSAGE_SECTIONS`.
+  - `@vscode/copilot-api`: `RequestType` (frozen enum-shaped object:
+    `CopilotToken`/`ChatCompletions`/`ChatResponses`/`ChatMessages`/`Models`), `CAPIClient`
+    (constructs; `makeRequest()` throws `COPILOT_UNAVAILABLE`; `updateDomains()` returns
+    all-false).
+  - **Type-only** imports satisfied purely by the vendored `.d.ts`: `CopilotClientOptions`,
+    `SessionConfig`, `ResumeSessionConfig`, `SessionEventPayload`, `SessionEventType`,
+    `MessageOptions`, `CustomAgentConfig`, `MCPServerConfig`, `PermissionRequest`, `Tool`,
+    `ToolResultObject`, `PermissionRequestResult`, `TelemetryConfig` (copilot-sdk);
+    `CCAModel`, `IExtensionInformation` (copilot-api). 12 source files import these (the 4
+    load-bearing files in the recipe plus `copilotPluginConverters/ToolDisplay/ShellTools/
+    AgentSession/SystemNotification`, `node/otel/agentHostOTelService`, and the 2 `claude/*`
+    files using `CCAModel`) — **none were edited**.
+
+**Redirect (both tsc AND the esbuild bundler resolve to the stub)**
+
+- `src/tsconfig.base.json` — added `compilerOptions.paths` mapping `@github/copilot-sdk` and
+  `@vscode/copilot-api` to the stub `dist/index.d.ts`. This covers BOTH
+  `compile-check-ts-native` (tsgo) and the gulp build compile (gulp-tsb both load
+  `src/tsconfig.json`). The 4 / 12 source files are untouched.
+- `build/next/index.ts` (the authoritative `[bundle] src → out-vscode` esbuild bundler that
+  builds `agentHostMain`, NOT the legacy `build/lib/optimize.ts` path) — new
+  `inlineCopilotStubsPlugin()` `onResolve` redirects both bare specifiers to the stub
+  `index.js` with `external: false`, so the inert stub is **inlined** into the bundle
+  instead of being left as an external bare specifier that would resolve to a now-missing
+  `node_modules` package at runtime. (`build/lib/optimize.ts` got a mirror override too, for
+  completeness, but `build/next/index.ts` is the one that matters for the desktop build.)
+  Because esbuild drops type-only named imports, the type-only symbols never hit `onResolve`.
+- `src/typings/copilot-api.d.ts` → renamed to `…d.ts.glyphspek-removed` (the stub's
+  `index.d.ts` now carries those types; keeping the ambient `declare module` would
+  double-declare the module once `paths` redirects it).
+
+**Root deps + build machinery removed**
+
+- `package.json` — removed `@github/copilot`, `@github/copilot-sdk`, `@vscode/copilot-api`
+  from `dependencies`. `npm install` regenerated `package-lock.json` (removed 9 packages);
+  `node_modules` has no `@github/copilot*` or `@vscode/copilot-api`.
+- `build/gulpfile.vscode.ts` + `build/gulpfile.reh.ts` — removed the Copilot runtime-prebuild
+  merge (`getCopilotRuntimePrebuildFiles`), the wrong-arch Copilot package filter
+  (`getCopilotExcludeFilter`), and the `**/@github/copilot-*/**` ASAR force-unpack pattern
+  (desktop only). Imports trimmed to the still-used helpers. The now-dead exports
+  `getCopilotExcludeFilter` / `getCopilotRuntimePrebuildFiles` remain in `build/lib/copilot.ts`
+  (harmless unused exports; `prepareBuiltInCopilotRipgrepShim` / `getRipgrepExcludeFilter` are
+  still referenced).
+
+**Verification (all PASS)**
+
+1. `npm run compile-check-ts-native` — clean (with the real Copilot packages absent, so the
+   stub `paths` is doing the work). `build/` `npm run typecheck` — clean.
+2. `npm run gulp vscode-darwin-arm64` — full build succeeds; esbuild bundles 23 bundles with
+   the stub inlined and no "no matching export" errors.
+3. `build/glyphspek/verify-no-copilot.sh` → **PASS** (exit 0); `find …GlyphSpek.app -path
+   '*@github/copilot*' -o -path '*@vscode/copilot-api*'` → empty. The packaged
+   `agentHostMain.js` contains the `COPILOT_UNAVAILABLE` marker and **zero** real
+   `import`/`require` of either Copilot package (the only residual text is in the `.js.map`
+   source map and a JSDoc comment — neither is executable nor scanned by the gate).
+4. **Render / runtime:** app launches with no bootstrap exception; main log shows
+   `AgentHostProcessManager: agent host started` and the Agent Host registers the `copilotcli`
+   provider cleanly. The Sessions/agent layer queries it and the stub degrades gracefully —
+   `listSessions` hits `_ensureClient`, which throws the normal `AHP_AUTH_REQUIRED`
+   ("Authentication is required to use Copilot") **before** touching the stubbed client, so
+   there is **no** `ERR_MODULE_NOT_FOUND` / uncaught exception. Workbench renders, welcome
+   walkthrough renders, and **"GlyphSpek: Open Trust Panel" opens and renders fully** (all
+   sections: live runs, run trust state, actor plan & claims, verifier verdict, live trace
+   timeline, changed files). Screenshots in `/tmp/glyphspek-decopilot/`.
+
+**Sessions-window degradation:** as designed — there is no working Copilot agent (it would
+require GitHub auth + the real CLI, both removed). The agent panel still renders; selecting
+the Copilot agent and trying to run would surface the inert "Copilot is not available in
+GlyphSpek" / auth-required error rather than crash. GlyphSpek's own trust/agent layer is
+unaffected.
+
+**Rollback:** restore `package.json` + `package-lock.json` (`npm install`); revert
+`src/tsconfig.base.json` paths, `build/next/index.ts`, `build/lib/optimize.ts`,
+`build/gulpfile.vscode.ts`, `build/gulpfile.reh.ts`; restore
+`src/typings/copilot-api.d.ts`; delete `build/glyphspek/copilot-stubs/`.
+
+---
+
+#### Historical entanglement record (why Part 2 was previously BLOCKED — now resolved by stubbing)
 
 ### Part 1 (APPLIED) — make the "ships no Copilot" gate honest
 
@@ -248,9 +355,12 @@ native Copilot SDK at runtime. This is load-bearing, not vestigial:
   runtime; removing them without first removing the Agent Host's SDK use would break that
   subsystem.
 
-**Decision:** do not ship a broken build. Part 2 is left unapplied (root deps untouched).
-Part 1 (the honest, now-FAILING gate) stands as the release guardrail until the Agent Host's
-Copilot-SDK coupling is resolved.
+**Original decision (superseded):** do not ship a broken build; leave Part 2 unapplied.
+**Resolution (2026-05-30):** the coupling above is real, but it did not require ripping out
+the subsystem. It was resolved by replacing the real Copilot packages with inert,
+differently-named stubs (vendored `.d.ts` for exact types + inert `.js` runtime), redirected
+via `tsconfig` `paths` (tsc) and a `build/next/index.ts` esbuild `onResolve` (bundler). See
+**Part 2 (APPLIED)** above for the full record. The gate now PASSES on a real packaged build.
 
 ### What full Copilot removal would require (future work)
 

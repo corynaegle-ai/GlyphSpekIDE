@@ -616,6 +616,28 @@ function inlineMinimistPlugin(): esbuild.Plugin {
 	};
 }
 
+/**
+ * GlyphSpek (SECURITY-PATCHES.md GATE-002): the real GitHub Copilot runtime
+ * (`@github/copilot-sdk`, `@vscode/copilot-api`) is removed from the build graph
+ * because GlyphSpek ships NO Copilot. Microsoft's Agent Host still imports these
+ * symbols as load-bearing runtime values, so redirect those bare specifiers to
+ * GlyphSpek's INERT stubs and inline them into the bundle (otherwise they would
+ * be left as external bare specifiers resolving to a now-missing node_modules
+ * package at runtime). The stubs keep the Agent Host's Copilot path inert
+ * (every Copilot entry point throws "Copilot is not available in GlyphSpek").
+ */
+function inlineCopilotStubsPlugin(): esbuild.Plugin {
+	const sdkStub = path.join(REPO_ROOT, 'build/glyphspek/copilot-stubs/github-copilot-sdk/dist/index.js');
+	const apiStub = path.join(REPO_ROOT, 'build/glyphspek/copilot-stubs/vscode-copilot-api/dist/index.js');
+	return {
+		name: 'inline-copilot-stubs',
+		setup(build) {
+			build.onResolve({ filter: /^@github\/copilot-sdk$/ }, () => ({ path: sdkStub, external: false }));
+			build.onResolve({ filter: /^@vscode\/copilot-api$/ }, () => ({ path: apiStub, external: false }));
+		},
+	};
+}
+
 function cssExternalPlugin(): esbuild.Plugin {
 	// Mark CSS imports as external so they stay as import statements
 	// The CSS files are copied separately and loaded by the browser at runtime
@@ -832,6 +854,8 @@ ${tslib}`,
 
 		// Use CSS external plugin for entry points that don't need bundled CSS
 		const plugins: esbuild.Plugin[] = bundleCssEntryPoints.has(entryPoint) ? [] : [cssExternalPlugin()];
+		// GlyphSpek: redirect Copilot SDK/API imports to inert stubs (GATE-002).
+		plugins.push(inlineCopilotStubsPlugin());
 		// Add content mapper plugin to inject product config and builtin extensions
 		plugins.push(contentMapperPlugin);
 		if (doNls) {
