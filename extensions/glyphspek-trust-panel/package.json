@@ -5,7 +5,7 @@
   "version": "0.0.1",
   "publisher": "glyphspek",
   "private": true,
-  "license": "MIT",
+  "license": "SEE LICENSE IN ../LICENSE",
   "engines": {
     "vscode": "^1.85.0"
   },
@@ -17,6 +17,8 @@
     "onCommand:glyphspek.openTrustPanel",
     "onCommand:glyphspek.loadRunBundle",
     "onCommand:glyphspek.runGovernedTask",
+    "onCommand:glyphspek.bridgeSupervisedRun",
+    "onCommand:glyphspek.startLiveRun",
     "onCommand:glyphspek.demoLiveRun",
     "onCommand:glyphspek.openChat",
     "onCommand:glyphspek.inlineEdit"
@@ -34,6 +36,14 @@
       {
         "command": "glyphspek.runGovernedTask",
         "title": "GlyphSpek: Run Governed Task…"
+      },
+      {
+        "command": "glyphspek.bridgeSupervisedRun",
+        "title": "GlyphSpek: Create Supervised Run (Bridge)"
+      },
+      {
+        "command": "glyphspek.startLiveRun",
+        "title": "GlyphSpek: Start Live Supervised Run (Trust Panel)"
       },
       {
         "command": "glyphspek.demoLiveRun",
@@ -109,5 +119,18 @@
       }
     }
   },
-  "scripts": {}
+  "scripts": {
+    "bundle:supervisor": "node scripts/build-supervisor.mjs",
+    "compile": "npm run bundle:supervisor && tsc -p .",
+    "test": "npm run bundle:supervisor && tsc -p . && node --test test/inlineScript.test.mjs test/configScope.test.mjs test/supervisorRunner.test.mjs test/policyHash.test.mjs test/bridgeProtocol.test.mjs test/bridgeContractConformance.test.mjs test/bridge.test.mjs test/bridgeServerSpawn.test.mjs test/liveRunStream.test.mjs test/runEventProtocol.test.mjs test/liveRunModel.test.mjs test/mockRunStream.test.mjs test/liveReducerGolden.test.mjs test/chatViewModel.test.mjs test/chatDemoState.test.mjs test/chatModelSelection.test.mjs test/operatorGesture.test.mjs test/runGovernedTaskGate.test.mjs test/webviewGestureGate.test.mjs test/liveSchemaGate.test.mjs",
+    "package": "npm run bundle:supervisor && tsc -p . && vsce package --no-dependencies"
+  },
+  "devDependencies": {
+    "@types/node": "^22",
+    "@types/vscode": "^1.85.0",
+    "@vscode/vsce": "^3.2.0",
+    "esbuild": "^0.28.0",
+    "ovsx": "^0.10.0",
+    "typescript": "^5.7.0"
+  }
 }

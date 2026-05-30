@@ -1897,6 +1897,21 @@ function ingestPostedFiles(files) {
   loadBundle({ events: events || [], claims, verifierPublicKey, verdict }, names.join(' + '));
 }
 
+/**
+ * The trusted-run KIND the host last asked us to offer (sweep-20 High #3), if any.
+ * Posting `startTrustedRun` with this kind is the first-party operator gesture that
+ * the host turns into a product-trusted run. A third-party extension cannot reach
+ * this state because it cannot post into our webview.
+ */
+let pendingTrustedRunKind = null;
+
+/** Show/hide the first-party "Start run" affordance for a given run kind. */
+function showTrustedRunOffer(kind) {
+  pendingTrustedRunKind = kind || null;
+  const offer = document.getElementById('trusted-run-offer');
+  if (offer) offer.hidden = !pendingTrustedRunKind;
+}
+
 /** Wire the host→webview message channel. Idempotent / safe if no host. */
 function wireHostBridge() {
   window.addEventListener('message', function (event) {
@@ -1904,6 +1919,11 @@ function wireHostBridge() {
     if (!msg || typeof msg !== 'object') return;
     if (msg.type === 'loadBundleFiles') {
       ingestPostedFiles(msg.files);
+    } else if (msg.type === 'offerTrustedRun') {
+      // A GlyphSpek command asked to start a trusted run. Surface the first-party
+      // "Start run" button; the operator clicking it is the gesture that the host
+      // (and ONLY a webview message) turns into a product-trusted run.
+      showTrustedRunOffer(msg.kind);
     }
   });
   // Tell the host the panel is ready (so a load requested before the webview
@@ -1945,6 +1965,19 @@ function wireControls() {
       if (vscodeApi) {
         vscodeApi.postMessage({ type: 'requestLoadBundle' });
       }
+    });
+  }
+
+  // FIRST-PARTY TRUSTED-RUN GESTURE (sweep-20 High #3). Clicking "Start run" posts
+  // `startTrustedRun` to the host — the ONLY path that mints an operator gesture and
+  // creates a product-trusted run. We clear the offer after posting (single click).
+  const startRunBtn = document.getElementById('trusted-run-start-btn');
+  if (startRunBtn) {
+    startRunBtn.addEventListener('click', function () {
+      if (vscodeApi && pendingTrustedRunKind) {
+        vscodeApi.postMessage({ type: 'startTrustedRun', kind: pendingTrustedRunKind });
+      }
+      showTrustedRunOffer(null);
     });
   }
 

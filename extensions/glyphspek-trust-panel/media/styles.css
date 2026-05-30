@@ -168,6 +168,24 @@ input[type="file"] {
   flex-wrap: wrap;
 }
 
+/*
+ * DEMO / STUB banner (sweep-20 High #4). A clearly-cautionary amber frame so the
+ * operator can never mistake stubbed, un-brokered chat for a real governed call.
+ */
+.chat-demo-banner {
+  border: 1px dashed var(--warn);
+  background: rgba(217, 164, 65, 0.08);
+  margin: 0 0 12px;
+}
+
+.chat-demo-banner .card-title {
+  color: var(--warn);
+}
+
+.chat-demo-banner[hidden] {
+  display: none;
+}
+
 .panel-caption {
   margin: 0 0 12px;
   color: var(--text-dim);

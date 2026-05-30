@@ -1,0 +1,1427 @@
+"use strict";
+/*
+ * GlyphSpek Trust Panel — VS Code / Code-OSS extension host.
+ *
+ * This is the charter's Workstream-4 IDE surface (W1-19 / W1-27 / W1-28),
+ * delivered as a PLAIN extension — no deep fork of the editor, no Microsoft
+ * Marketplace dependency, Open-VSX-distributable, and no telemetry. It hosts the
+ * existing standalone Trust Panel prototype verbatim inside a WebviewPanel.
+ *
+ * Division of trust:
+ *   - The extension HOST (this file, Node) only reads run-bundle files off disk
+ *     with node:fs and ships their RAW bytes to the webview. It deliberately
+ *     does NOT parse, judge, or vouch for them.
+ *   - The WEBVIEW (media/app.js) parses the trace, separates the actor's CLAIMS
+ *     from the verifier's VERDICT, and VERIFIES the verifier's Ed25519 signature
+ *     in-browser with Web Crypto BEFORE presenting any verdict as authoritative.
+ *     The signature-before-display gate lives there and is unchanged.
+ */
+var __createBinding = (this && this.__createBinding) || (Object.create ? (function(o, m, k, k2) {
+    if (k2 === undefined) k2 = k;
+    var desc = Object.getOwnPropertyDescriptor(m, k);
+    if (!desc || ("get" in desc ? !m.__esModule : desc.writable || desc.configurable)) {
+      desc = { enumerable: true, get: function() { return m[k]; } };
+    }
+    Object.defineProperty(o, k2, desc);
+}) : (function(o, m, k, k2) {
+    if (k2 === undefined) k2 = k;
+    o[k2] = m[k];
+}));
+var __setModuleDefault = (this && this.__setModuleDefault) || (Object.create ? (function(o, v) {
+    Object.defineProperty(o, "default", { enumerable: true, value: v });
+}) : function(o, v) {
+    o["default"] = v;
+});
+var __importStar = (this && this.__importStar) || (function () {
+    var ownKeys = function(o) {
+        ownKeys = Object.getOwnPropertyNames || function (o) {
+            var ar = [];
+            for (var k in o) if (Object.prototype.hasOwnProperty.call(o, k)) ar[ar.length] = k;
+            return ar;
+        };
+        return ownKeys(o);
+    };
+    return function (mod) {
+        if (mod && mod.__esModule) return mod;
+        var result = {};
+        if (mod != null) for (var k = ownKeys(mod), i = 0; i < k.length; i++) if (k[i] !== "default") __createBinding(result, mod, k[i]);
+        __setModuleDefault(result, mod);
+        return result;
+    };
+})();
+Object.defineProperty(exports, "__esModule", { value: true });
+exports.activate = activate;
+exports.deactivate = deactivate;
+const vscode = __importStar(require("vscode"));
+const fs = __importStar(require("node:fs"));
+const os = __importStar(require("node:os"));
+const path = __importStar(require("node:path"));
+const crypto = __importStar(require("node:crypto"));
+const node_child_process_1 = require("node:child_process");
+const supervisorRunner_1 = require("./supervisorRunner");
+const supervisorBridgeRunner_1 = require("./supervisorBridgeRunner");
+const inlineScript_1 = require("./inlineScript");
+const policyHash_1 = require("./policyHash");
+const runEventProtocol_1 = require("./runEventProtocol");
+const mockRunStream_1 = require("./mockRunStream");
+const webviewGestureGate_1 = require("./webviewGestureGate");
+const configScope_1 = require("./configScope");
+/** The file names that make up a run bundle, in load order. */
+const BUNDLE_FILE_NAMES = [
+    'trace.jsonl',
+    'verdict.json',
+    'verifier-public-key.pem',
+    'actor-claims.json',
+];
+/**
+ * Per-file size cap (bytes). A single bundle file larger than this aborts the
+ * load: the host reads each file fully into memory and posts it to the webview in
+ * one message, so an incident-scale trace.jsonl could otherwise block the host
+ * and then the webview while it parses/renders. 8 MiB is generous for a normal
+ * run bundle while still bounding the synchronous read.
+ */
+const MAX_BUNDLE_FILE_BYTES = 8 * 1024 * 1024;
+/**
+ * Total-bundle size cap (bytes) across all files in one load. Bounds the single
+ * postMessage payload to the webview. 32 MiB covers a large multi-file bundle.
+ */
+const MAX_BUNDLE_TOTAL_BYTES = 32 * 1024 * 1024;
+/**
+ * The module-private first-party webview gesture gate (sweep-20 High #3). One
+ * instance per extension process, created on first use. It owns the operator-
+ * gesture registry AND the trusted-run launchers, and is NEVER exported on the
+ * public surface. Trusted-run launchers are reached ONLY via
+ * gate.launchFromWebview, which TrustPanel calls from its webview message handler —
+ * so only a genuine first-party webview gesture (the operator clicking a GlyphSpek
+ * Trust Panel button) can start a product-trusted run. A globally-invokable command
+ * cannot mint a gesture or reach a launcher.
+ */
+let webviewGestureGate;
+function getWebviewGestureGate() {
+    if (!webviewGestureGate)
+        webviewGestureGate = new webviewGestureGate_1.WebviewGestureGate();
+    return webviewGestureGate;
+}
+/** Human-readable byte size for size-cap error messages. */
+function formatBytes(bytes) {
+    if (bytes < 1024)
+        return `${bytes} B`;
+    const mib = bytes / (1024 * 1024);
+    if (mib >= 1)
+        return `${mib.toFixed(1)} MiB`;
+    return `${(bytes / 1024).toFixed(1)} KiB`;
+}
+/** Absolute path to the verifier keystore directory. */
+function verifierKeystoreDir() {
+    return path.join(os.homedir(), '.glyphspek', 'verifier');
+}
+/**
+ * Ensure ~/.glyphspek/verifier/{private.pem,public.pem} exists, generating a
+ * fresh Ed25519 keypair (PKCS8 private + SPKI public, both PEM) on first use.
+ * Idempotent: if both files already exist they are read and returned as-is, so
+ * the operator's pinned trust root is STABLE across runs and sessions.
+ *
+ * Returns the paths plus the public PEM. Throws only on a genuine filesystem
+ * failure (the caller surfaces that as an error toast and aborts the run rather
+ * than silently running unpinned).
+ */
+function ensureVerifierKeystore() {
+    const dir = verifierKeystoreDir();
+    const privateKeyPath = path.join(dir, 'private.pem');
+    const publicKeyPath = path.join(dir, 'public.pem');
+    const haveBoth = fs.existsSync(privateKeyPath) && fs.existsSync(publicKeyPath);
+    if (!haveBoth) {
+        fs.mkdirSync(dir, { recursive: true });
+        const { privateKey, publicKey } = crypto.generateKeyPairSync('ed25519');
+        const privatePem = privateKey.export({ type: 'pkcs8', format: 'pem' });
+        const publicPem = publicKey.export({ type: 'spki', format: 'pem' });
+        // Write the private key with owner-only perms; best-effort on platforms
+        // that ignore mode. The public key is non-secret.
+        fs.writeFileSync(privateKeyPath, privatePem, { encoding: 'utf8', mode: 0o600 });
+        fs.writeFileSync(publicKeyPath, publicPem, 'utf8');
+    }
+    const publicKeyPem = fs.readFileSync(publicKeyPath, 'utf8');
+    return { dir, privateKeyPath, publicKeyPath, publicKeyPem };
+}
+/**
+ * Resolve the operator's full trusted-verifier-key set for injection into the
+ * webview: the OPERATOR-controlled `glyphspek.trustedVerifierKeys` value PLUS the
+ * keystore's pinned public key (when the keystore exists). The keystore key is
+ * the out-of-band trust root for runs launched from this extension. We never read
+ * a key from a run bundle here — app.js intentionally ignores bundle-embedded
+ * keys.
+ *
+ * SECURITY (sweep-07 Critical #1): we read the setting via inspect() and accept
+ * ONLY the default + user/global scopes, EXCLUDING workspaceValue and
+ * workspaceFolderValue. getConfiguration().get() would merge a repo's
+ * .vscode/settings.json value and let it win — a repository could then inject its
+ * own verifier public key and drive a verdict to AUTHORITATIVE. Combined with the
+ * `"scope": "machine"` declaration in package.json (which makes VS Code refuse
+ * workspace/folder values for this key), this is defense in depth. The selection
+ * itself lives in the pure, headlessly-testable selectGlobalScopedTrustKeys().
+ */
+function resolveTrustedVerifierKeys() {
+    const inspect = vscode.workspace
+        .getConfiguration('glyphspek')
+        .inspect('trustedVerifierKeys');
+    // Read the keystore public key if it already exists. We do NOT generate it
+    // here — generation happens on demand when a run is launched — so merely
+    // opening the panel never creates key material. It is machine-local and
+    // provisioned out-of-band, so it is NOT workspace-controlled.
+    let keystorePublicKeyPem;
+    try {
+        const publicKeyPath = path.join(verifierKeystoreDir(), 'public.pem');
+        if (fs.existsSync(publicKeyPath)) {
+            keystorePublicKeyPem = fs.readFileSync(publicKeyPath, 'utf8');
+        }
+    }
+    catch {
+        // Unreadable keystore is non-fatal: fall back to the setting-only set.
+    }
+    return (0, configScope_1.selectGlobalScopedTrustKeys)(inspect, keystorePublicKeyPem);
+}
+/**
+ * Singleton Trust Panel manager. Keeps at most one webview panel alive, builds
+ * its CSP-locked HTML, and bridges host<->webview messages.
+ */
+class TrustPanel {
+    static createOrShow(extensionUri, gate) {
+        const column = vscode.window.activeTextEditor?.viewColumn ?? vscode.ViewColumn.One;
+        if (TrustPanel.current) {
+            TrustPanel.current.panel.reveal(column);
+            return TrustPanel.current;
+        }
+        const panel = vscode.window.createWebviewPanel('glyphspekTrustPanel', 'GlyphSpek Trust Panel', column, {
+            enableScripts: true,
+            retainContextWhenHidden: true,
+            // Lock the webview to loading resources only from the extension's media dir.
+            localResourceRoots: [vscode.Uri.joinPath(extensionUri, 'media')],
+        });
+        TrustPanel.current = new TrustPanel(panel, extensionUri, gate);
+        return TrustPanel.current;
+    }
+    constructor(panel, extensionUri, gate) {
+        this.disposables = [];
+        this.ready = false;
+        /**
+         * Run-events received before the webview signalled ready; replayed IN ORDER on
+         * ready so the live stream is never dropped during webview boot.
+         */
+        this.pendingRunEvents = [];
+        this.panel = panel;
+        this.extensionUri = extensionUri;
+        this.gate = gate;
+        this.panel.webview.html = this.getWebviewContent(this.panel.webview);
+        this.panel.onDidDispose(() => this.dispose(), null, this.disposables);
+        this.panel.webview.onDidReceiveMessage(
+        // Returns void for most messages; for `startTrustedRun` it RETURNS the launch
+        // promise. VS Code ignores a handler's return value, but returning it lets a
+        // test await the (otherwise fire-and-forget) trusted-run launch deterministically.
+        (msg) => {
+            if (!msg || typeof msg !== 'object') {
+                return;
+            }
+            if (msg.type === 'ready') {
+                this.ready = true;
+                if (this.pendingFiles) {
+                    const files = this.pendingFiles;
+                    this.pendingFiles = undefined;
+                    this.postBundle(files);
+                }
+                // Replay any run-events buffered during webview boot, in order.
+                if (this.pendingRunEvents.length > 0) {
+                    const events = this.pendingRunEvents;
+                    this.pendingRunEvents = [];
+                    void this.panel.webview.postMessage({ type: 'runEvents', events });
+                }
+                // Replay a pending "offer trusted run" so the in-webview affordance shows.
+                if (this.pendingOfferKind) {
+                    const kind = this.pendingOfferKind;
+                    this.pendingOfferKind = undefined;
+                    void this.panel.webview.postMessage({ type: 'offerTrustedRun', kind });
+                }
+            }
+            else if (msg.type === 'requestLoadBundle') {
+                // The webview's "Load run bundle…" button delegates to the host command.
+                void vscode.commands.executeCommand('glyphspek.loadRunBundle');
+            }
+            else if (msg.type === 'startTrustedRun') {
+                // FIRST-PARTY OPERATOR GESTURE (sweep-20 High #3). This message can ONLY
+                // come from our own webview (the operator clicked a GlyphSpek Trust Panel
+                // button) — a third-party extension cannot post into our webview. ONLY
+                // here do we mint+consume a gesture and reach a trusted-run launcher.
+                if ((0, webviewGestureGate_1.isTrustedRunKind)(msg.kind)) {
+                    return this.gate.launchFromWebview(msg.kind);
+                }
+            }
+        }, null, this.disposables);
+    }
+    /**
+     * Surface the first-party in-webview "Start run" affordance for `kind`. Called by
+     * a command-palette handler: the command itself does NOT start a trusted run
+     * (commands have no caller attribution); it reveals the panel and asks the webview
+     * to show a button. The operator clicking that button posts `startTrustedRun`
+     * back — the ONLY path that mints a gesture and runs a launcher.
+     */
+    offerTrustedRun(kind) {
+        if (!this.ready) {
+            this.pendingOfferKind = kind;
+            return;
+        }
+        void this.panel.webview.postMessage({ type: 'offerTrustedRun', kind });
+    }
+    /** Read a run-bundle directory and post its files into the webview. */
+    loadBundleFromDirectory(dir) {
+        const files = [];
+        const missing = [];
+        let totalBytes = 0;
+        for (const name of BUNDLE_FILE_NAMES) {
+            const full = path.join(dir, name);
+            let size;
+            try {
+                size = fs.statSync(full).size;
+            }
+            catch {
+                // Absent/unreadable file: treated as "missing" exactly as before.
+                missing.push(name);
+                continue;
+            }
+            // Cap per file BEFORE reading, so an oversized file never gets loaded into
+            // memory or posted to the webview.
+            if (size > MAX_BUNDLE_FILE_BYTES) {
+                void vscode.window.showErrorMessage(`GlyphSpek: ${name} is ${formatBytes(size)} which exceeds the ` +
+                    `${formatBytes(MAX_BUNDLE_FILE_BYTES)} per-file limit. Bundle load aborted.`);
+                return;
+            }
+            // Cap the total bundle size across files, so the single webview message
+            // payload stays bounded.
+            if (totalBytes + size > MAX_BUNDLE_TOTAL_BYTES) {
+                void vscode.window.showErrorMessage(`GlyphSpek: run bundle in ${dir} exceeds the ` +
+                    `${formatBytes(MAX_BUNDLE_TOTAL_BYTES)} total-size limit. Bundle load aborted.`);
+                return;
+            }
+            try {
+                const text = fs.readFileSync(full, 'utf8');
+                files.push({ name, text });
+                totalBytes += size;
+            }
+            catch {
+                missing.push(name);
+            }
+        }
+        if (files.length === 0) {
+            void vscode.window.showErrorMessage(`GlyphSpek: no run-bundle files found in ${dir}. Expected at least one of: ${BUNDLE_FILE_NAMES.join(', ')}.`);
+            return;
+        }
+        // trace.jsonl or verdict.json is required to render anything meaningful.
+        const hasTraceOrVerdict = files.some((f) => f.name === 'trace.jsonl' || f.name === 'verdict.json');
+        if (!hasTraceOrVerdict) {
+            void vscode.window.showErrorMessage(`GlyphSpek: ${dir} has no trace.jsonl or verdict.json — nothing to verify.`);
+            return;
+        }
+        if (missing.length && missing.includes('verifier-public-key.pem')) {
+            void vscode.window.showWarningMessage('GlyphSpek: no verifier-public-key.pem in this bundle — the verdict cannot be verified and will show as UNTRUSTED.');
+        }
+        this.postBundle(files);
+    }
+    /** Post bundle files to the webview, or queue them until it is ready. */
+    postBundle(files) {
+        if (!this.ready) {
+            this.pendingFiles = files;
+            return;
+        }
+        void this.panel.webview.postMessage({ type: 'loadBundleFiles', files });
+    }
+    reveal() {
+        const column = vscode.window.activeTextEditor?.viewColumn ?? vscode.ViewColumn.One;
+        this.panel.reveal(column);
+    }
+    dispose() {
+        TrustPanel.current = undefined;
+        while (this.disposables.length) {
+            this.disposables.pop()?.dispose();
+        }
+    }
+    /**
+     * Build the webview HTML from media/index.html: inject a per-load nonce, the
+     * webview cspSource, and asWebviewUri()-rewritten URIs for the bundled CSS/JS.
+     * Scripts execute only with the nonce; styles only from the extension media
+     * dir; no remote origins. The Web Crypto Ed25519 verify runs client-side.
+     */
+    getWebviewContent(webview) {
+        const mediaUri = vscode.Uri.joinPath(this.extensionUri, 'media');
+        const htmlPath = vscode.Uri.joinPath(mediaUri, 'index.html');
+        let html = fs.readFileSync(htmlPath.fsPath, 'utf8');
+        const stylesUri = webview.asWebviewUri(vscode.Uri.joinPath(mediaUri, 'styles.css'));
+        const sampleBundleUri = webview.asWebviewUri(vscode.Uri.joinPath(mediaUri, 'sample-bundle.js'));
+        const appUri = webview.asWebviewUri(vscode.Uri.joinPath(mediaUri, 'app.js'));
+        const liveUri = webview.asWebviewUri(vscode.Uri.joinPath(mediaUri, 'live.js'));
+        const nonce = crypto.randomBytes(16).toString('base64');
+        // Out-of-band trust-root seam (sweep-05 Critical). Resolve the operator's
+        // trusted verifier public keys and inject them as a global the webview reads
+        // BEFORE app.js loads. The set is the `glyphspek.trustedVerifierKeys` setting
+        // PLUS the extension-managed keystore public key (~/.glyphspek/verifier/
+        // public.pem) — the out-of-band pinning that makes a real run launched from
+        // here show AUTHORITATIVE. The host injects key MATERIAL only; it never tells
+        // the webview a verdict is trusted — the Ed25519 verify still runs in the
+        // webview (the trust division at the top of this file). app.js treats these
+        // (plus its built-in demo key) as the trust root; a bundle's embedded
+        // verifierPublicKey is NEVER trusted, and the keystore key NEVER comes from
+        // the run bundle.
+        const trusted = resolveTrustedVerifierKeys();
+        // escapeForInlineScript (not bare JSON.stringify): a key value containing the
+        // closing-script sequence must NOT be able to terminate this inline <script>
+        // and inject markup before app.js loads.
+        const trustedKeysScript = `<script nonce="${nonce}">window.GLYPHSPEK_TRUSTED_VERIFIER_KEYS = ${(0, inlineScript_1.escapeForInlineScript)(trusted)};</script>`;
+        return html
+            .replace(/\{\{cspSource\}\}/g, webview.cspSource)
+            .replace(/\{\{nonce\}\}/g, nonce)
+            .replace(/\{\{stylesUri\}\}/g, stylesUri.toString())
+            .replace(/\{\{sampleBundleUri\}\}/g, sampleBundleUri.toString())
+            .replace(/\{\{appUri\}\}/g, appUri.toString())
+            .replace(/\{\{liveUri\}\}/g, liveUri.toString())
+            .replace(/\{\{trustedKeysScript\}\}/g, trustedKeysScript);
+    }
+    /**
+     * Forward a validated supervisor `run/event` envelope to the webview's live
+     * view. The host does NOT judge or vouch for the event — it validates the
+     * envelope SHAPE (so a malformed message never reaches the renderer) and posts
+     * the raw event; all rendering + the Ed25519 signature-before-display gate run
+     * in the webview. Events that arrive before the webview signals 'ready' are
+     * queued and replayed, preserving order — the same pattern as bundle loads.
+     */
+    postRunEvent(rawEvent) {
+        const validation = (0, runEventProtocol_1.validateRunEvent)(rawEvent);
+        if (!validation.ok) {
+            // SCHEMA-VERSION MISMATCH (sweep-19 Medium #6 — FAIL CLOSED). A `rev` problem
+            // means the envelope is from a future/foreign run-event schema. Do NOT render
+            // it as a current event; instead synthesize a DISTINCT bridge-mismatch failure
+            // so the panel de-authoritates that run with a clear, honest card (the §14
+            // bridge_mismatch state) rather than silently dropping a foreign stream.
+            if (validation.problems.includes('rev') && validation.problems.length === 1) {
+                const runId = rawEvent && typeof rawEvent === 'object' && typeof rawEvent.runId === 'string'
+                    ? rawEvent.runId
+                    : 'unknown-run';
+                const mismatch = {
+                    rev: runEventProtocol_1.RUN_EVENT_PROTOCOL_VERSION,
+                    runId,
+                    kind: runEventProtocol_1.RunEventKind.Failure,
+                    failure: runEventProtocol_1.RunFailureKind.BridgeMismatch,
+                    message: 'unsupported run-event schema (rev mismatch) — refusing to render a foreign/future ' +
+                        `stream as current (expected rev ${runEventProtocol_1.RUN_EVENT_PROTOCOL_VERSION}).`,
+                };
+                if (!this.ready) {
+                    this.pendingRunEvents.push(mismatch);
+                }
+                else {
+                    void this.panel.webview.postMessage({ type: 'runEvent', event: mismatch });
+                }
+                return;
+            }
+            // Drop any other malformed envelope rather than mis-render it; surface it for
+            // the operator without blocking the stream.
+            void vscode.window.showWarningMessage(`GlyphSpek: ignored a malformed run/event (problems: ${validation.problems.join(', ')}).`);
+            return;
+        }
+        if (!this.ready) {
+            this.pendingRunEvents.push(validation.event);
+            return;
+        }
+        void this.panel.webview.postMessage({ type: 'runEvent', event: validation.event });
+    }
+}
+/* ================================================================== *
+ * GOVERNED-RUN COMMAND (glyphspek.runGovernedTask).
+ *
+ * Resolves the target repo, policy, output dir and verifier keystore, then
+ * launches the supervisor's governed-run-cli.ts via supervisorRunner under a
+ * cancellable progress notification. On success it opens the Trust Panel and
+ * hands the bundle directory to the EXISTING loadBundleFromDirectory() seam. On
+ * any failure (docker unavailable, CLI error, cancel) it shows a clear message
+ * and leaves any currently-loaded panel untouched.
+ * ================================================================== */
+/**
+ * Resolve the DEV-OVERRIDE spikes root, if any, that hosts the un-bundled
+ * supervisor exec (the child cwd for the dev path).
+ *
+ * SECURITY (sweep-07 Critical #2): the un-bundled supervisor is spawned with
+ * `--import tsx` and (optionally) the verifier PRIVATE key + host env. If a
+ * repository could set glyphspek.supervisorPath via .vscode/settings.json,
+ * opening that repo would redirect the spawned process to attacker code (RCE) and
+ * leak the verifier private key. We read via inspect() and accept ONLY the
+ * user/global value (falling back to the default empty), IGNORING workspace and
+ * workspace-folder values. Combined with `"scope": "machine"` in package.json
+ * (VS Code refuses workspace/folder values for this key) this is defense in
+ * depth. The pure, testable selection lives in selectSupervisorPath(); when a
+ * workspace value was present and ignored, the caller warns the operator.
+ *
+ * This is now an OPT-IN dev override: when empty (the default), the extension
+ * launches the bundled, hash-pinned supervisor instead.
+ */
+function resolveSupervisorPath() {
+    const inspect = vscode.workspace
+        .getConfiguration('glyphspek')
+        .inspect('supervisorPath');
+    return (0, configScope_1.selectSupervisorPath)(inspect);
+}
+/**
+ * Absolute path to the BUNDLED, hash-pinned supervisor shipped in the .vsix.
+ * This is the DEFAULT exec: no setting needed. supervisorRunner verifies its
+ * sha256 against the build-time constant before spawning.
+ */
+function resolveBundledSupervisorPath(context) {
+    return vscode.Uri.joinPath(context.extensionUri, 'dist-supervisor', 'governed-run.mjs').fsPath;
+}
+/**
+ * Absolute path to the BUNDLED, hash-pinned supervisor BRIDGE-SERVER shipped in
+ * the .vsix. This is the spawnable stdio JSON-RPC server the SupervisorBridge
+ * client connects to (spawn → hash-pin → handshake → run/create). The bridge
+ * verifies its sha256 against the build-time constant before spawning.
+ */
+function resolveBundledBridgeServerPath(context) {
+    return vscode.Uri.joinPath(context.extensionUri, 'dist-supervisor', 'bridge-server.mjs').fsPath;
+}
+/** The un-bundled governed-run CLI entry, relative to the dev-override spikes root. */
+function resolveCliPath(supervisorPath) {
+    return path.join(supervisorPath, 'p0-supervisor', 'governed-run-cli.ts');
+}
+/**
+ * Resolve the runs/worktree base passed to the supervisor as --runs-base. Uses
+ * the machine-scoped glyphspek.runOutputRoot setting when set, else a stable
+ * $HOME-based default (~/.glyphspek/runs). The bundled supervisor cwds here and
+ * writes all run state under it, so it never writes under the install dir.
+ */
+function resolveRunsBase() {
+    const configured = vscode.workspace
+        .getConfiguration('glyphspek')
+        .get('runOutputRoot', '');
+    const root = configured && configured.trim() ? configured.trim() : '';
+    return root || path.join(os.homedir(), '.glyphspek', 'runs');
+}
+/** Configured run mode, defaulting to the safe verify-only path. */
+function resolveSupervisorMode() {
+    const mode = vscode.workspace
+        .getConfiguration('glyphspek')
+        .get('supervisorMode', 'verify-only');
+    return mode === 'autonomous' ? 'autonomous' : 'verify-only';
+}
+/**
+ * Resolve the repo to govern: the single workspace folder if there is exactly
+ * one, otherwise a folder picker. Returns undefined if the user cancels.
+ */
+async function resolveTargetRepo() {
+    const folders = vscode.workspace.workspaceFolders ?? [];
+    if (folders.length === 1) {
+        return folders[0].uri.fsPath;
+    }
+    const picked = await vscode.window.showOpenDialog({
+        canSelectFiles: false,
+        canSelectFolders: true,
+        canSelectMany: false,
+        openLabel: 'Govern this repo',
+        title: 'Select the repository to run the governed task against',
+        ...(folders.length > 1 ? { defaultUri: folders[0].uri } : {}),
+    });
+    return picked && picked.length ? picked[0].fsPath : undefined;
+}
+/**
+ * Resolve the policy file. SECURITY (sweep-08 Medium #1 — PROVENANCE, not
+ * lockdown): a repo-local policy is LEGITIMATE under policy-as-code, so unlike
+ * the supervisor path we do NOT machine-scope or ignore workspace values. We DO
+ * read via inspect() and classify the SCOPE the value came from, so the caller
+ * can surface the provenance: a 'workspace'/'workspaceFolder' policy is reported
+ * (and confirmed) rather than silently winning via merged get().
+ *
+ * When no scope supplies a value, fall back to a file picker (scope 'picker').
+ * CANCELLING the picker returns undefined and aborts the run — it must NOT fall
+ * through to a relative fixture (sweep-15 Medium): on the bundled path the
+ * supervisorPath is empty, so a relative '.glyphspek-fixtures/...' would resolve
+ * against the host cwd, not a real policy. The capstone fixture is only offered
+ * as the picker DEFAULT when a real dev supervisorPath is set AND the fixture
+ * actually exists (see resolveDefaultPolicyCandidate); otherwise the picker has
+ * no default and cancel => undefined => clean abort.
+ */
+async function resolvePolicyPath(supervisorPath) {
+    const inspect = vscode.workspace
+        .getConfiguration('glyphspek')
+        .inspect('policyPath');
+    const classified = (0, configScope_1.classifyPolicyPath)(inspect);
+    if (classified.scope !== 'none') {
+        return { path: classified.path, scope: classified.scope };
+    }
+    const defaultCandidate = (0, configScope_1.resolveDefaultPolicyCandidate)(supervisorPath, fs.existsSync);
+    const defaultUri = defaultCandidate ? vscode.Uri.file(defaultCandidate) : undefined;
+    const picked = await vscode.window.showOpenDialog({
+        canSelectFiles: true,
+        canSelectFolders: false,
+        canSelectMany: false,
+        openLabel: 'Use this policy',
+        title: defaultCandidate
+            ? 'Select the GlyphSpek policy file (defaults to the bundled capstone policy)'
+            : 'Select the GlyphSpek policy file',
+        filters: { 'Policy JSON': ['json'], 'All files': ['*'] },
+        ...(defaultUri ? { defaultUri } : {}),
+    });
+    // Picker CANCELLED — return undefined so the caller aborts the run, rather
+    // than silently falling back to a (possibly host-cwd-relative) fixture path.
+    if (!picked || picked.length === 0) {
+        return undefined;
+    }
+    return { path: picked[0].fsPath, scope: 'picker' };
+}
+/**
+ * Resolve the output directory for this run's bundle under the configured
+ * run-output root (default: <workspace>/.glyphspek/runs), timestamped per run.
+ * Falls back to the OS temp dir when there is no workspace folder.
+ */
+function resolveOutputDir(repo) {
+    const configuredRoot = vscode.workspace
+        .getConfiguration('glyphspek')
+        .get('runOutputRoot', '');
+    let root = configuredRoot && configuredRoot.trim() ? configuredRoot.trim() : '';
+    if (!root) {
+        const ws = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+        // Prefer a workspace-local root; else the repo itself; else temp.
+        root = path.join(ws ?? repo, '.glyphspek', 'runs');
+    }
+    const stamp = new Date().toISOString().replace(/[:.]/g, '-');
+    return path.join(root, stamp);
+}
+/**
+ * A STUB ModelGateway. CLEARLY MARKED: it performs NO real provider call and dials
+ * NO supervisor — it exists so the governed-chat UI is demoable before the
+ * supervisor's stdio bridge server is packaged. It offers a small fixed allowlist
+ * and answers an allowlisted call with a synthetic completion; a non-allowlisted
+ * model is DENIED (mirroring the broker's default-deny); an untrusted-provenance
+ * call surfaces force_ask (mirroring the taint firewall). It NEVER holds, reads, or
+ * returns a credential. Replace with the real SupervisorBridge gateway once packaged.
+ *
+ * NOT exported (spec §9): module-private, reachable only by the first-party
+ * command handlers below.
+ */
+function stubModelGateway() {
+    const allowed = [
+        {
+            provider: 'anthropic',
+            model: 'claude-3-7-sonnet',
+            endpointHost: 'api.anthropic.com',
+            label: 'anthropic / claude-3-7-sonnet',
+        },
+        {
+            provider: 'openai',
+            model: 'gpt-4o',
+            endpointHost: 'api.openai.com',
+            label: 'openai / gpt-4o',
+        },
+    ];
+    return {
+        // DEMO POSTURE (sweep-20 High #4): this gateway makes NO supervisor call. The
+        // webview reads this and renders the demo/unbrokered state instead of claiming
+        // the call was brokered/auditable/traced.
+        mode: 'stub',
+        async allowlist() {
+            return allowed.slice();
+        },
+        async call(params) {
+            const onList = allowed.some((m) => m.provider === params.provider && m.model === params.model);
+            if (!onList) {
+                return {
+                    decision: 'deny',
+                    ok: false,
+                    error: `model ${params.provider}/${params.model} not on allowlist (default-deny)`,
+                };
+            }
+            const untrusted = params.provenanceLabel !== 'user' && params.provenanceLabel !== 'system';
+            if (untrusted) {
+                return {
+                    decision: 'force_ask',
+                    ok: false,
+                    error: `model call requires confirmation (untrusted provenance '${params.provenanceLabel}')`,
+                };
+            }
+            const turns = params.messages.length;
+            return {
+                decision: 'allow',
+                ok: true,
+                completion: `[stub model:${params.model}] received ${turns} turn(s). This is a synthetic ` +
+                    'completion — no real provider was called. Package the supervisor bridge ' +
+                    'server to broker a real model call.',
+                usage: { inputTokens: turns * 8, outputTokens: 24, costMicroUsd: 0 },
+                traceEventRef: `stub-${Date.now().toString(36)}`,
+            };
+        },
+    };
+}
+/**
+ * Singleton governed-chat webview. Hosts the chat + inline-edit surface, surfaces
+ * ONLY the supervisor's allowlisted models, renders decision/completion/usage/
+ * traceRef, handles deny + force_ask, and DIFF-GATES any edit it applies to a file.
+ * The provider credential never reaches this panel — it only ever sees the
+ * redacted result from the gateway.
+ */
+class ChatPanel {
+    static createOrShow(extensionUri, gateway) {
+        const column = vscode.window.activeTextEditor?.viewColumn ?? vscode.ViewColumn.One;
+        if (ChatPanel.current) {
+            ChatPanel.current.panel.reveal(column);
+            return ChatPanel.current;
+        }
+        const panel = vscode.window.createWebviewPanel('glyphspekChat', 'GlyphSpek Chat', column, {
+            enableScripts: true,
+            retainContextWhenHidden: true,
+            localResourceRoots: [vscode.Uri.joinPath(extensionUri, 'media')],
+        });
+        ChatPanel.current = new ChatPanel(panel, extensionUri, gateway);
+        return ChatPanel.current;
+    }
+    constructor(panel, extensionUri, gateway) {
+        this.disposables = [];
+        this.ready = false;
+        this.panel = panel;
+        this.extensionUri = extensionUri;
+        this.gateway = gateway;
+        this.panel.webview.html = this.getWebviewContent(this.panel.webview);
+        this.panel.onDidDispose(() => this.dispose(), null, this.disposables);
+        this.panel.webview.onDidReceiveMessage(
+        // RETURN the onMessage promise (VS Code ignores it) so a test can await an
+        // otherwise fire-and-forget message handler deterministically.
+        (msg) => this.onMessage(msg), null, this.disposables);
+    }
+    reveal() {
+        const column = vscode.window.activeTextEditor?.viewColumn ?? vscode.ViewColumn.One;
+        this.panel.reveal(column);
+    }
+    /** Set the active run id the chat brokers calls against. */
+    setRunId(runId) {
+        this.runId = runId;
+        if (this.ready)
+            void this.panel.webview.postMessage({ type: 'chatRunId', runId });
+    }
+    /**
+     * Seed an inline-edit: stash the selection (with its provenance) as context to
+     * fold into the next user turn, and prefill the input via a status message.
+     */
+    seedInlineEdit(filePath, selection, instruction) {
+        this.pendingContext = [
+            {
+                ref: filePath,
+                kind: 'workspace-file',
+                content: selection,
+                provenanceLabel: 'workspace',
+            },
+        ];
+        void this.panel.webview.postMessage({
+            type: 'chatStatus',
+            status: `inline-edit context staged from ${filePath} (${selection.length} chars). Your next message edits it.`,
+        });
+        if (instruction) {
+            // Treat the instruction as an immediate user turn against the selection.
+            void this.handleSend(instruction, true, 'user');
+        }
+    }
+    async onMessage(msg) {
+        if (!msg || typeof msg !== 'object')
+            return;
+        if (msg.type === 'ready') {
+            this.ready = true;
+            // Tell the webview the gateway's honesty posture FIRST (sweep-20 High #4): on
+            // the stub gateway it renders an explicit demo/unbrokered banner and must not
+            // claim the call was brokered/auditable/traced. The webview defaults to the
+            // demo posture until this arrives, so it never over-claims during boot.
+            void this.panel.webview.postMessage({ type: 'chatGatewayMode', mode: this.gateway.mode });
+            const models = await this.gateway.allowlist();
+            // Guard: never forward a credential-shaped field to the webview.
+            void this.panel.webview.postMessage({ type: 'chatAllowlist', models });
+            if (this.runId) {
+                void this.panel.webview.postMessage({ type: 'chatRunId', runId: this.runId });
+            }
+            return;
+        }
+        if (msg.type === 'chatSelectModel') {
+            // Record the operator's model selection (sweep-20 Medium #5). It is RE-VALIDATED
+            // against the current allowlist at send time, so recording a label here is safe
+            // even if the allowlist changes before the next send.
+            const label = typeof msg.label === 'string' ? msg.label : undefined;
+            this.selectedLabel = label && label.length > 0 ? label : undefined;
+            return;
+        }
+        if (msg.type === 'chatSend') {
+            await this.handleSend(String(msg.text ?? ''), Boolean(msg.includeSelection), 'user');
+            return;
+        }
+        if (msg.type === 'chatApproveRetry') {
+            // The operator approved a force_ask: retry as a TRUSTED (user) provenance
+            // turn so the taint firewall permits it (the human is now in the loop).
+            await this.handleSend(String(msg.text ?? ''), Boolean(msg.includeSelection), 'user');
+            return;
+        }
+    }
+    /**
+     * Broker one chat turn. Assembles the {@link ModelCallParams} (WITH any staged
+     * inline-edit context / active selection), calls the gateway, and posts the
+     * redacted result back to the webview. If the result is an allowed completion AND
+     * an inline-edit context was staged, it DIFF-GATES the edit (shows the proposed
+     * change and only applies on explicit confirmation).
+     */
+    async handleSend(text, includeSelection, provenance) {
+        if (!text.trim())
+            return;
+        if (!this.runId) {
+            void this.panel.webview.postMessage({
+                type: 'chatStatus',
+                status: 'no active run — open a governed run first (GlyphSpek: Run Governed Task).',
+            });
+            return;
+        }
+        const contextSources = [];
+        if (this.pendingContext)
+            contextSources.push(...this.pendingContext);
+        if (includeSelection) {
+            const sel = activeEditorSelection();
+            if (sel) {
+                contextSources.push({
+                    ref: sel.ref,
+                    kind: 'workspace-file',
+                    content: sel.text,
+                    provenanceLabel: 'workspace',
+                });
+            }
+        }
+        // Resolve the model THE OPERATOR SELECTED, re-validated against the CURRENT
+        // supervisor allowlist immediately before the call (sweep-20 Medium #5). The
+        // selection wins when still allowlisted; otherwise we fall back to the first
+        // allowlisted model (a single allowlist read covers both branches). This stops
+        // the host calling one model while the operator selected another.
+        const chosen = await this.resolveModelForCall();
+        if (!chosen) {
+            void this.panel.webview.postMessage({
+                type: 'chatStatus',
+                status: 'no allowlisted model is available — the supervisor offered none.',
+            });
+            return;
+        }
+        const params = {
+            runId: this.runId,
+            provider: chosen.provider,
+            model: chosen.model,
+            messages: [{ role: 'user', content: text }],
+            provenanceLabel: provenance,
+            ...(contextSources.length ? { contextSources } : {}),
+        };
+        const result = await this.gateway.call(params);
+        void this.panel.webview.postMessage({ type: 'chatResult', result });
+        // DIFF-GATE an inline edit: if this turn carried file context AND the model
+        // produced an allowed completion, offer to apply it as a diff (never auto-apply).
+        if (this.pendingContext &&
+            result.ok &&
+            result.decision === 'allow' &&
+            typeof result.completion === 'string') {
+            const ctx = this.pendingContext[0];
+            this.pendingContext = undefined;
+            await this.offerDiffGatedEdit(ctx.ref, ctx.content ?? '', result.completion);
+        }
+    }
+    /**
+     * Resolve the model to call (sweep-20 Medium #5). Reads the CURRENT supervisor
+     * allowlist ONCE and honors the operator's selected label when it is STILL
+     * allowlisted; otherwise falls back to the first allowlisted model. Returns
+     * undefined only when the allowlist is empty (the UI then cannot send). Validating
+     * the selection against the live allowlist right before the call means a model the
+     * supervisor has since dropped can never be used just because it was selected.
+     */
+    async resolveModelForCall() {
+        const models = await this.gateway.allowlist();
+        if (models.length === 0)
+            return undefined;
+        if (this.selectedLabel) {
+            const selected = models.find((m) => m.label === this.selectedLabel);
+            if (selected)
+                return selected;
+        }
+        return models[0];
+    }
+    /**
+     * DIFF-GATE a proposed inline edit: show the operator the before/after as a diff
+     * and apply the edit to the file ONLY on explicit confirmation. We never write
+     * the file without the operator choosing "Apply edit".
+     */
+    async offerDiffGatedEdit(ref, before, after) {
+        if (before === after)
+            return;
+        const choice = await vscode.window.showInformationMessage(`GlyphSpek: the model proposed an edit to ${ref}. Review and apply?`, { modal: true }, 'Show diff', 'Apply edit');
+        if (choice === 'Show diff') {
+            // Open a read-only diff between the current selection and the proposal.
+            const left = vscode.Uri.parse(`untitled:${ref} (current)`);
+            const right = vscode.Uri.parse(`untitled:${ref} (proposed)`);
+            const leftDoc = await vscode.workspace.openTextDocument({ content: before });
+            const rightDoc = await vscode.workspace.openTextDocument({ content: after });
+            void left;
+            void right;
+            await vscode.commands.executeCommand('vscode.diff', leftDoc.uri, rightDoc.uri, `GlyphSpek edit · ${ref}`);
+            return;
+        }
+        if (choice === 'Apply edit') {
+            const editor = vscode.window.activeTextEditor;
+            if (editor && !editor.selection.isEmpty) {
+                await editor.edit((b) => b.replace(editor.selection, after));
+            }
+            else {
+                void vscode.window.showWarningMessage('GlyphSpek: no active selection to apply the edit to — edit not applied.');
+            }
+        }
+    }
+    dispose() {
+        ChatPanel.current = undefined;
+        while (this.disposables.length)
+            this.disposables.pop()?.dispose();
+    }
+    getWebviewContent(webview) {
+        const mediaUri = vscode.Uri.joinPath(this.extensionUri, 'media');
+        const htmlPath = vscode.Uri.joinPath(mediaUri, 'chat.html');
+        let html = fs.readFileSync(htmlPath.fsPath, 'utf8');
+        const stylesUri = webview.asWebviewUri(vscode.Uri.joinPath(mediaUri, 'styles.css'));
+        const chatViewUri = webview.asWebviewUri(vscode.Uri.joinPath(mediaUri, 'chatView.js'));
+        const chatUri = webview.asWebviewUri(vscode.Uri.joinPath(mediaUri, 'chat.js'));
+        const nonce = crypto.randomBytes(16).toString('base64');
+        return html
+            .replace(/\{\{cspSource\}\}/g, webview.cspSource)
+            .replace(/\{\{nonce\}\}/g, nonce)
+            .replace(/\{\{stylesUri\}\}/g, stylesUri.toString())
+            .replace(/\{\{chatViewUri\}\}/g, chatViewUri.toString())
+            .replace(/\{\{chatUri\}\}/g, chatUri.toString());
+    }
+}
+/** The active editor's selection (or whole document) + its workspace ref. */
+function activeEditorSelection() {
+    const editor = vscode.window.activeTextEditor;
+    if (!editor)
+        return undefined;
+    const doc = editor.document;
+    const ref = vscode.workspace.asRelativePath(doc.uri);
+    const text = editor.selection.isEmpty
+        ? doc.getText()
+        : doc.getText(editor.selection);
+    return { ref, text };
+}
+function activate(context) {
+    const gate = getWebviewGestureGate();
+    context.subscriptions.push(vscode.commands.registerCommand('glyphspek.openTrustPanel', () => {
+        TrustPanel.createOrShow(context.extensionUri, gate);
+    }));
+    // Governed chat (M6). Opens the chat surface; every model call is brokered
+    // through the supervisor (provider credential held supervisor-side). Until the
+    // supervisor stdio bridge server is packaged, a clearly-marked stub gateway
+    // backs the UI so it is demoable. A demo run id is set so the UI can send.
+    context.subscriptions.push(vscode.commands.registerCommand('glyphspek.openChat', () => {
+        const panel = ChatPanel.createOrShow(context.extensionUri, stubModelGateway());
+        panel.reveal();
+        panel.setRunId(`chat-${Date.now().toString(36)}`);
+    }));
+    // Inline edit (Cmd-K-style). Takes the active editor selection + an instruction,
+    // sends it through the SAME brokered model.call, and DIFF-GATES the proposed edit.
+    context.subscriptions.push(vscode.commands.registerCommand('glyphspek.inlineEdit', async () => {
+        const sel = activeEditorSelection();
+        if (!sel) {
+            void vscode.window.showWarningMessage('GlyphSpek: open a file (and optionally select a region) to use inline edit.');
+            return;
+        }
+        const instruction = await vscode.window.showInputBox({
+            prompt: `GlyphSpek inline edit — instruction for ${sel.ref}`,
+            placeHolder: 'e.g. "add input validation" — the model call is brokered + diff-gated',
+        });
+        if (instruction === undefined)
+            return; // cancelled
+        const panel = ChatPanel.createOrShow(context.extensionUri, stubModelGateway());
+        panel.reveal();
+        panel.setRunId(`inline-${Date.now().toString(36)}`);
+        panel.seedInlineEdit(sel.ref, sel.text, instruction);
+    }));
+    context.subscriptions.push(vscode.commands.registerCommand('glyphspek.loadRunBundle', async () => {
+        const picked = await vscode.window.showOpenDialog({
+            canSelectFiles: false,
+            canSelectFolders: true,
+            canSelectMany: false,
+            openLabel: 'Load run bundle',
+            title: 'Select a GlyphSpek run bundle directory (trace.jsonl + verdict.json + verifier-public-key.pem)',
+        });
+        if (!picked || picked.length === 0) {
+            return;
+        }
+        const panel = TrustPanel.createOrShow(context.extensionUri, gate);
+        panel.reveal();
+        panel.loadBundleFromDirectory(picked[0].fsPath);
+    }));
+    // Live Trust Panel demo (milestone M5). Opens the panel and streams a mock
+    // run/event sequence through the SAME host→webview seam (postRunEvent) the real
+    // supervisor stream will use. A scenario can be passed as the command argument
+    // (one of MOCK_SCENARIOS) to exercise a specific failure state; default is the
+    // isolated-native happy path. This is the stub event source the design calls for
+    // until the supervisor-side stdio server is wired.
+    context.subscriptions.push(vscode.commands.registerCommand('glyphspek.demoLiveRun', async (scenarioArg) => {
+        const scenario = mockRunStream_1.MOCK_SCENARIOS.includes(scenarioArg)
+            ? scenarioArg
+            : 'isolated-native';
+        const panel = TrustPanel.createOrShow(context.extensionUri, gate);
+        panel.reveal();
+        const runId = `demo-${scenario}-${Date.now().toString(36)}`;
+        const events = (0, mockRunStream_1.mockRunStream)(scenario, runId);
+        // Stream the envelopes with a small delay so the panel renders them as a
+        // live feed rather than all at once. postRunEvent buffers any that arrive
+        // before the webview signals ready.
+        let i = 0;
+        const tick = () => {
+            if (i >= events.length)
+                return;
+            panel.postRunEvent(events[i]);
+            i += 1;
+            setTimeout(tick, 200);
+        };
+        tick();
+    }));
+    // Output channel for the supervisor's human-readable progress (stderr). One
+    // per session; disposed with the extension.
+    const supervisorOutput = vscode.window.createOutputChannel('GlyphSpek Governed Run');
+    context.subscriptions.push(supervisorOutput);
+    // FIRST-PARTY WEBVIEW GESTURE GATE (sweep-20 High #3 — rework of sweep-19).
+    //
+    // ALL THREE trusted-run paths (governed / bridge / live) are PRODUCT-TRUSTED:
+    // they prepare the verifier private key or accept the supervisor's
+    // trust:'trusted'. Commands carry NO caller attribution, so a third-party
+    // extension's executeCommand must NOT be able to start any of them. We register a
+    // LAUNCHER per kind on the gate; a launcher receives a gesture token and forwards
+    // it to the trusted-run creator, which consumes it and REFUSES without a valid
+    // CURRENT first-party gesture. The ONLY thing that mints a gesture and invokes a
+    // launcher is gate.launchFromWebview — called from the Trust Panel's webview
+    // message handler when the operator clicks an in-panel "Start run" button. A
+    // third-party extension cannot post into our webview, so it can never reach a
+    // launcher; the worst a global command can do is OPEN the panel and surface the
+    // first-party button (no trusted run until the operator clicks it in OUR webview).
+    gate.registerLauncher('governed', (gestureToken) => createTrustedGovernedRun(context, supervisorOutput, gate.gestures, gestureToken));
+    gate.registerLauncher('bridge', (gestureToken) => bridgeCreateRun(context, supervisorOutput, gate.gestures, gestureToken));
+    gate.registerLauncher('live', (gestureToken) => startLiveRun(context, supervisorOutput, gate.gestures, gestureToken));
+    // The VISIBLE commands do NOT start a trusted run. They reveal the Trust Panel and
+    // ask the webview to surface the first-party "Start run" affordance; the operator
+    // clicking it posts `startTrustedRun` back, which is the ONLY path that mints a
+    // gesture and runs a launcher. A third-party executeCommand of any of these can,
+    // at most, open the panel — it cannot forge the in-webview click.
+    const offerTrustedRun = (kind) => {
+        const panel = TrustPanel.createOrShow(context.extensionUri, gate);
+        panel.reveal();
+        panel.offerTrustedRun(kind);
+    };
+    context.subscriptions.push(vscode.commands.registerCommand('glyphspek.runGovernedTask', () => {
+        offerTrustedRun('governed');
+    }));
+    context.subscriptions.push(vscode.commands.registerCommand('glyphspek.bridgeSupervisedRun', () => {
+        offerTrustedRun('bridge');
+    }));
+    context.subscriptions.push(vscode.commands.registerCommand('glyphspek.startLiveRun', () => {
+        offerTrustedRun('live');
+    }));
+}
+/**
+ * Resolve the source-commit provenance anchor for a run request: the workspace's
+ * git HEAD sha when it is a git checkout, else undefined. A non-git / detached
+ * workspace supplies `worktreeBase` instead (see assembleRunRequest). Best-effort:
+ * git missing or a non-repo returns undefined rather than throwing.
+ */
+function resolveSourceCommit(repoRoot) {
+    try {
+        const res = (0, node_child_process_1.spawnSync)('git', ['-C', repoRoot, 'rev-parse', 'HEAD'], {
+            encoding: 'utf8',
+        });
+        if (res && res.status === 0 && typeof res.stdout === 'string') {
+            const sha = res.stdout.trim();
+            if (sha.length > 0)
+                return sha;
+        }
+    }
+    catch {
+        /* git missing / not a repo — fall back to a worktree base anchor */
+    }
+    return undefined;
+}
+/**
+ * Spawn the PACKAGED bridge-server and create a REAL run via the actual spawned
+ * supervisor, returning the supervisor-minted {runId, trust}. This is the M2
+ * end-to-end path: hash-pin → handshake → run/create against the spawned
+ * supervisor (not a mock/stub). It reveals the Trust Panel and surfaces the run's
+ * trust posture. Streaming live run/event from this created run into the panel is
+ * the documented follow-up; for now the panel keeps its embedded sample feed.
+ */
+/**
+ * Resolve the repo + policy and assemble the full §10.3 run request shared by the
+ * bridge create-run and live-run command paths. Returns undefined (after surfacing
+ * the reason) when the operator cancelled or the policy could not be fingerprinted.
+ */
+async function assembleBridgeRunRequest(output) {
+    // Resolve the repo to govern (single folder, else a picker).
+    const repo = await resolveTargetRepo();
+    if (!repo) {
+        output.appendLine('[host] bridge run aborted: no target repo selected.');
+        return undefined;
+    }
+    // Resolve the policy (operator-pinned / repo-provided / picker) and fingerprint
+    // its bytes for the §10.3 policyHash provenance pin.
+    const resolvedPolicy = await resolvePolicyPath(resolveSupervisorPath().path);
+    if (!resolvedPolicy) {
+        output.appendLine('[host] bridge run aborted: no policy selected.');
+        return undefined;
+    }
+    const policyFp = (0, policyHash_1.policyFileSha256)(resolvedPolicy.path);
+    if (!policyFp.sha256) {
+        void vscode.window.showErrorMessage(`GlyphSpek: could not fingerprint the policy file (${policyFp.note}); cannot create a run.`);
+        return undefined;
+    }
+    // Assemble the full §10.3 run request. Exactly one provenance anchor:
+    // sourceCommit (git HEAD) when available, else worktreeBase (the repo root).
+    const sourceCommit = resolveSourceCommit(repo);
+    const runtimeProfile = vscode.workspace
+        .getConfiguration('glyphspek')
+        .get('runtime', 'docker');
+    return {
+        actorType: 'native',
+        autonomyTier: 'allowlist',
+        policyPath: resolvedPolicy.path,
+        policyHash: policyFp.sha256,
+        workspaceRoot: repo,
+        runtimeProfile,
+        extensionPosture: 'sovereign',
+        ...(sourceCommit ? { sourceCommit } : { worktreeBase: repo }),
+    };
+}
+/** The first-party extension's product version, reported in the handshake. */
+function resolveExtensionVersion(context) {
+    return (context.extension?.packageJSON?.version ?? '0.0.1');
+}
+/**
+ * Consume the first-party operator gesture that gates a PRODUCT-TRUSTED run
+ * (sweep-20 High #3). Returns true ONLY when `gestureToken` consumes as a CURRENT,
+ * unspent first-party gesture from `gestures`. A request lacking one (e.g. a path
+ * that did not originate from a Trust-Panel webview click) is REFUSED here — before
+ * any trusted work (keystore / verifier key / run/create) — so it can never produce
+ * a `trust:'trusted'` run. Surfaces an honest refusal to the operator + the log.
+ */
+function consumeTrustedRunGesture(gestures, gestureToken, output) {
+    const gesture = gestures.consume(gestureToken);
+    if (!gesture.ok) {
+        output.appendLine(`[host] trusted run REFUSED: missing/invalid first-party operator gesture (${gesture.reason}). ` +
+            'A trusted run can only be started by clicking a GlyphSpek Trust Panel button (a first-party ' +
+            'webview gesture a third-party extension cannot forge).');
+        void vscode.window.showErrorMessage('GlyphSpek: refused to start a trusted run — it must be initiated by clicking "Start run" ' +
+            'inside the GlyphSpek Trust Panel (a first-party operator gesture).');
+        return false;
+    }
+    return true;
+}
+async function bridgeCreateRun(context, output, gestures, gestureToken) {
+    output.show(true);
+    // GATE: a product-trusted bridge run requires a CURRENT first-party webview
+    // gesture. Without it, refuse before connecting to the supervisor — so an
+    // ungated (e.g. third-party command) invocation can never create a trusted run.
+    if (!consumeTrustedRunGesture(gestures, gestureToken, output))
+        return;
+    const request = await assembleBridgeRunRequest(output);
+    if (!request)
+        return;
+    const extensionVersion = resolveExtensionVersion(context);
+    const result = await (0, supervisorBridgeRunner_1.createRunViaBridge)({
+        bridgeServerPath: resolveBundledBridgeServerPath(context),
+        extensionVersion,
+        runsBase: resolveRunsBase(),
+        request,
+        output,
+    });
+    if (!result.connected) {
+        void vscode.window.showErrorMessage(`GlyphSpek: bridge run not created — ${result.message}`);
+        return;
+    }
+    // Reveal the Trust Panel for the (future) live feed and report the real run.
+    const panel = TrustPanel.createOrShow(context.extensionUri, getWebviewGestureGate());
+    panel.reveal();
+    if (result.trust === 'trusted') {
+        void vscode.window.showInformationMessage(`GlyphSpek: created a TRUSTED run (${result.runId}) via the spawned supervisor` +
+            (result.supervisorVersion ? ` ${result.supervisorVersion}` : '') + '.');
+    }
+    else {
+        void vscode.window.showWarningMessage(`GlyphSpek: created an ${result.trust.toUpperCase()} run (${result.runId ?? 'no id'}) — ${result.message}`);
+    }
+}
+/**
+ * Spawn the PACKAGED bridge-server, create a REAL run, KEEP THE CHILD ALIVE, and
+ * DRIVE it so the supervisor streams the LIVE `run/event` sequence into the Trust
+ * Panel — a real run streaming in, not the embedded sample. The panel's
+ * postRunEvent runs validateRunEvent + the fail-closed schema gate on every
+ * streamed envelope before rendering. The child disposes once the run closes.
+ *
+ * This is the M5 end-to-end live path. The events are REAL supervisor output
+ * (real lifecycle FSM + real hash-chained trace + real policy decisions + a real
+ * signed verdict); only the actor's tool steps are scripted server-side. A real
+ * model-driven agent loop replaces the scripted actor (scripted-run-driver.ts's
+ * REAL-MODEL PLUG-IN POINT) without changing this host path or the wire grammar.
+ */
+async function startLiveRun(context, output, gestures, gestureToken) {
+    output.show(true);
+    // GATE: a product-trusted LIVE run requires a CURRENT first-party webview gesture.
+    // Refuse before connecting so an ungated invocation can never stream a trusted run.
+    if (!consumeTrustedRunGesture(gestures, gestureToken, output))
+        return;
+    const request = await assembleBridgeRunRequest(output);
+    if (!request)
+        return;
+    // Open + reveal the Trust Panel FIRST so it is ready to receive the live stream.
+    // postRunEvent buffers any events that arrive before the webview signals ready,
+    // so opening here loses nothing even if the first envelope races the webview.
+    const panel = TrustPanel.createOrShow(context.extensionUri, getWebviewGestureGate());
+    panel.reveal();
+    const result = await vscode.window.withProgress({
+        location: vscode.ProgressLocation.Notification,
+        cancellable: false,
+        title: 'GlyphSpek: live supervised run…',
+    }, () => (0, supervisorBridgeRunner_1.startRunViaBridge)({
+        bridgeServerPath: resolveBundledBridgeServerPath(context),
+        extensionVersion: resolveExtensionVersion(context),
+        runsBase: resolveRunsBase(),
+        request,
+        output,
+        // The supervisor's streamed envelopes flow straight into the panel's
+        // validated feed. postRunEvent fail-closes on a schema-version mismatch.
+        onRunEvent: (raw) => panel.postRunEvent(raw),
+    }));
+    if (!result.connected) {
+        void vscode.window.showErrorMessage(`GlyphSpek: live run not started — ${result.message}`);
+        return;
+    }
+    if (!result.started) {
+        void vscode.window.showWarningMessage(`GlyphSpek: run ${result.runId ?? '(no id)'} was created but did not stream — ${result.message}`);
+        return;
+    }
+    const trustLabel = result.trust.toUpperCase();
+    const finalState = result.finalState ? ` (${result.finalState})` : '';
+    if (result.trust === 'trusted') {
+        void vscode.window.showInformationMessage(`GlyphSpek: streamed a LIVE TRUSTED run (${result.runId})${finalState} into the Trust Panel` +
+            (result.supervisorVersion ? ` — supervisor ${result.supervisorVersion}` : '') + '.');
+    }
+    else {
+        void vscode.window.showWarningMessage(`GlyphSpek: streamed a LIVE ${trustLabel} run (${result.runId})${finalState} into the Trust Panel — ${result.message}`);
+    }
+}
+/**
+ * Create + launch a TRUSTED governed run. SECURITY (sweep-19 High #3): this is the
+ * trusted-run creation path that prepares the verifier keystore and hands the
+ * verifier PRIVATE key to the hash-pinned supervisor so verdicts pin AUTHORITATIVE.
+ * It is module-private (never exported, never registered as a command) and it
+ * REFUSES unless `gestureToken` consumes as a CURRENT first-party operator gesture
+ * from `gestures`. A caller without a valid current-gesture token can never reach
+ * the keystore/private-key path — the run is refused before any trusted work.
+ */
+async function createTrustedGovernedRun(context, supervisorOutput, gestures, gestureToken) {
+    // GATE: require a valid CURRENT first-party operator gesture. A request lacking
+    // one (e.g. a third-party extension that somehow reached this function) is
+    // REFUSED here — before the keystore is touched or the verifier key is passed —
+    // so it can never produce a trusted run.
+    if (!consumeTrustedRunGesture(gestures, gestureToken, supervisorOutput))
+        return;
+    {
+        // DEV OVERRIDE detection. When glyphspek.supervisorPath is set (user/global
+        // only), the operator has explicitly opted into running the UN-BUNDLED,
+        // UN-PINNED supervisor from the spikes tree. Otherwise (the default) we run
+        // the BUNDLED, hash-pinned supervisor shipped in the .vsix.
+        const { path: devSupervisorPath, fromWorkspaceIgnored } = resolveSupervisorPath();
+        const isDevOverride = Boolean(devSupervisorPath);
+        // A workspace/folder value was supplied and DELIBERATELY ignored — surface
+        // it so a repo's silently-overridden setting is visible to the operator
+        // (Critical #2: a repo must not redirect the supervisor exec path).
+        if (fromWorkspaceIgnored) {
+            void vscode.window.showWarningMessage('GlyphSpek: a workspace setting tried to set "glyphspek.supervisorPath" and was ignored ' +
+                'for security. The supervisor path is taken only from USER (global) settings.');
+        }
+        // Resolve the actual exec for this run: bundled (default) or dev override.
+        const bundledPath = resolveBundledSupervisorPath(context);
+        let cliPath;
+        if (isDevOverride) {
+            cliPath = resolveCliPath(devSupervisorPath);
+            // Sanity-check the dev entry up front so a misconfigured override fails
+            // loudly with a clear message rather than as an opaque spawn error.
+            if (!fs.existsSync(cliPath)) {
+                void vscode.window.showErrorMessage(`GlyphSpek: dev-override supervisor CLI not found at ${cliPath}. ` +
+                    'Fix or clear "glyphspek.supervisorPath" in USER settings (clear it to use the bundled supervisor).');
+                return;
+            }
+            void vscode.window.showWarningMessage('GlyphSpek: running the UN-PINNED dev supervisor from "glyphspek.supervisorPath" ' +
+                '(not the bundled, hash-pinned one). The verifier key is withheld unless ' +
+                '"glyphspek.devSupervisorTrustKey" is enabled.');
+        }
+        else if (!fs.existsSync(bundledPath)) {
+            // The bundled supervisor must ship in the .vsix; a missing bundle is a
+            // packaging fault, not an operator misconfiguration.
+            void vscode.window.showErrorMessage(`GlyphSpek: bundled supervisor missing at ${bundledPath}. ` +
+                'This .vsix appears to be packaged incorrectly (run "npm run bundle:supervisor" before packaging).');
+            return;
+        }
+        const repo = await resolveTargetRepo();
+        if (!repo)
+            return; // user cancelled
+        // The picker's policy default is the spikes capstone fixture, which exists
+        // only on the dev path; on the bundled path there is no preset default and
+        // the operator picks a policy (passing '' yields no defaultUri).
+        const resolvedPolicy = await resolvePolicyPath(devSupervisorPath);
+        if (!resolvedPolicy)
+            return; // user cancelled
+        const policy = resolvedPolicy.path;
+        // Medium #1 — policy provenance. Always log WHICH policy bytes govern this
+        // run (path + sha256) so the run's provenance is visible. A repo-provided
+        // policy is legitimate under policy-as-code, but it must not silently win:
+        // when the effective value came from a WORKSPACE / WORKSPACE-FOLDER scope
+        // (a repo's .vscode/settings.json), require an explicit modal confirmation
+        // naming the policy path and its sha256 before launching.
+        const policyFp = (0, policyHash_1.policyFileSha256)(policy);
+        const policyShaLabel = policyFp.sha256 ?? `(${policyFp.note})`;
+        supervisorOutput.appendLine(`[host] policy provenance: scope=${resolvedPolicy.scope} path=${policy} sha256=${policyShaLabel}`);
+        if (resolvedPolicy.scope === 'workspace' || resolvedPolicy.scope === 'workspaceFolder') {
+            const proceed = await vscode.window.showWarningMessage('GlyphSpek: about to run under a REPO-PROVIDED policy (not operator-pinned):\n' +
+                `${policy}\n` +
+                `sha256: ${policyShaLabel}\n` +
+                'Proceed?', { modal: true }, 'Run');
+            if (proceed !== 'Run') {
+                supervisorOutput.appendLine('[host] run aborted: operator declined the repo-provided policy.');
+                return;
+            }
+        }
+        // Mode. The BUNDLED path only runs verify-only this increment; autonomous
+        // is gated to the dev-override path (which runs from the spikes tree where
+        // its DEFAULT_RUNS_BASE_DIR is user-writable — see governed-run-cli.ts
+        // runAutonomous note). A configured 'autonomous' on the bundled path is
+        // coerced to verify-only with a heads-up rather than silently doing nothing.
+        const requestedMode = resolveSupervisorMode();
+        let mode = requestedMode;
+        if (!isDevOverride && requestedMode === 'autonomous') {
+            mode = 'verify-only';
+            void vscode.window.showWarningMessage('GlyphSpek: autonomous mode is not yet available on the bundled supervisor; ' +
+                'running verify-only. (Autonomous requires the dev-override path this increment.)');
+        }
+        const outDir = resolveOutputDir(repo);
+        const runsBase = resolveRunsBase();
+        // Ensure the out-of-band keystore exists and pass its STABLE private key to
+        // the CLI so the verifier signs with a key we pin into the panel. A failure
+        // here aborts the run (better than running with an unpinned, never-trusted
+        // verdict).
+        let keystore;
+        try {
+            keystore = ensureVerifierKeystore();
+        }
+        catch (err) {
+            void vscode.window.showErrorMessage(`GlyphSpek: could not prepare the verifier keystore at ${verifierKeystoreDir()}: ` +
+                `${String(err?.message ?? err)}`);
+            return;
+        }
+        // Create the output dir AND the runs base up front so the CLI's --out and
+        // the child's cwd (=runsBase on the bundled path) always exist.
+        try {
+            fs.mkdirSync(outDir, { recursive: true });
+            fs.mkdirSync(runsBase, { recursive: true });
+        }
+        catch (err) {
+            void vscode.window.showErrorMessage(`GlyphSpek: could not create run directories (${outDir} / ${runsBase}): ` +
+                `${String(err?.message ?? err)}`);
+            return;
+        }
+        supervisorOutput.show(true);
+        // Verifier-key custody.
+        //   BUNDLED path: the exec is hash-pinned (supervisorRunner refuses a
+        //     mismatched bundle), so its code is trusted by construction — always
+        //     hand it the verifier private key so verdicts pin as AUTHORITATIVE.
+        //   DEV-OVERRIDE path: the un-pinned spikes-tree exec gets the key ONLY when
+        //     the operator explicitly opts in via glyphspek.devSupervisorTrustKey;
+        //     otherwise the key is withheld (verdicts fall back to ephemeral and
+        //     show UNTRUSTED). A workspace override that was ignored also withholds.
+        let passVerifierKey;
+        if (!isDevOverride) {
+            passVerifierKey = true;
+        }
+        else {
+            // Critical (sweep-15): read the opt-in via inspect() and accept ONLY the
+            // user/global (else default) scope — a repo's .vscode/settings.json must
+            // never be able to flip this flag true and hand the verifier PRIVATE key
+            // to the un-pinned dev supervisor. The merged get() would let a workspace
+            // value win; selectGlobalScopedBool() ignores workspace/folder scopes
+            // (defense in depth alongside `"scope": "machine"` in package.json).
+            const devTrustInspect = vscode.workspace
+                .getConfiguration('glyphspek')
+                .inspect('devSupervisorTrustKey');
+            const devTrust = (0, configScope_1.selectGlobalScopedBool)(devTrustInspect, false);
+            const devTrustWorkspaceIgnored = typeof devTrustInspect?.workspaceValue === 'boolean' ||
+                typeof devTrustInspect?.workspaceFolderValue === 'boolean';
+            if (devTrustWorkspaceIgnored) {
+                supervisorOutput.appendLine('[host] a workspace setting tried to set "glyphspek.devSupervisorTrustKey" and was ' +
+                    'IGNORED for security — the verifier-key opt-in is honored only from USER (global) settings.');
+            }
+            passVerifierKey = devTrust === true && !fromWorkspaceIgnored;
+            if (!passVerifierKey) {
+                supervisorOutput.appendLine('[host] dev-override supervisor: withholding the verifier private key from the ' +
+                    'un-pinned exec (enable "glyphspek.devSupervisorTrustKey" to opt in).');
+            }
+            else {
+                supervisorOutput.appendLine('[host] dev-override supervisor: verifier key opt-in is ENABLED — handing the key to ' +
+                    'the un-pinned exec (dev only).');
+            }
+        }
+        const result = await vscode.window.withProgress({
+            location: vscode.ProgressLocation.Notification,
+            cancellable: true,
+            title: `GlyphSpek: governed run (${mode})…`,
+        }, (progress, token) => {
+            progress.report({ message: 'launching supervisor…' });
+            return (0, supervisorRunner_1.runSupervisor)({
+                ...(isDevOverride
+                    ? { cliPath: cliPath, cwd: devSupervisorPath }
+                    : { bundlePath: bundledPath }),
+                repo,
+                policy,
+                out: outDir,
+                mode,
+                runsBase,
+                ...(passVerifierKey ? { verifierKeyPath: keystore.privateKeyPath } : {}),
+                output: supervisorOutput,
+                token,
+            });
+        });
+        // Cancellation: do NOT clobber whatever the panel is currently showing.
+        if (result.cancelled) {
+            void vscode.window.showWarningMessage('GlyphSpek: governed run cancelled.');
+            return;
+        }
+        if (result.spawnFailed) {
+            // Covers both an actual spawn failure AND the bundled-supervisor hash-gate
+            // refusal (supervisorRunner returns spawnFailed with a clear message).
+            const hint = isDevOverride
+                ? 'Verify Node/tsx are available and "glyphspek.supervisorPath" is correct (or clear it to use the bundled supervisor). '
+                : 'If this is a hash mismatch, re-run "npm run bundle:supervisor" and re-package the .vsix. ';
+            void vscode.window.showErrorMessage(`GlyphSpek: could not start the supervisor. ${result.message} ` +
+                hint +
+                'See the "GlyphSpek Governed Run" output channel for details.');
+            return;
+        }
+        if (result.exitCode !== 0) {
+            // A non-zero exit often means Docker is unavailable, or the run errored.
+            // The full reason is in the output channel; offer a one-click open.
+            const choice = await vscode.window.showErrorMessage(`GlyphSpek: governed run failed (exit ${result.exitCode}). ` +
+                'A common cause is no reachable Docker daemon. ' +
+                'See the output channel for the supervisor log.', 'Show Log');
+            if (choice === 'Show Log')
+                supervisorOutput.show(true);
+            return;
+        }
+        // Success: open the panel and load the freshly written bundle via the
+        // EXISTING seam. The panel re-injects the keystore public key on (re)build,
+        // so a verdict signed with the keystore key shows AUTHORITATIVE.
+        const panel = TrustPanel.createOrShow(context.extensionUri, getWebviewGestureGate());
+        panel.reveal();
+        panel.loadBundleFromDirectory(result.bundleDir);
+        void vscode.window.showInformationMessage(`GlyphSpek: governed run complete — bundle at ${result.bundleDir}.`);
+    }
+}
+function deactivate() {
+    /* no-op: webview panel disposal is handled per-panel. */
+}
+//# sourceMappingURL=extension.js.map

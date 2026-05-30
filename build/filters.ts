@@ -67,6 +67,12 @@ export const unicodeFilter = Object.freeze<string[]>([
 	// extensions/copilot has its own code style
 	'!extensions/copilot/**',
 
+	// GlyphSpek overlay: vendored scripts/configs and the vendored pre-built
+	// extension snapshot are built out-of-band and may carry unicode glyphs
+	// (e.g. set-membership markers in the Trust Panel webview).
+	'!build/glyphspek/**',
+	'!extensions/glyphspek-trust-panel/**',
+
 	'!src/vs/base/browser/dompurify/**',
 	'!src/vs/workbench/services/keybinding/browser/keyboardLayouts/**',
 	'!src/vs/workbench/contrib/terminal/common/scripts/psreadline/**',
@@ -132,6 +138,13 @@ export const indentationFilter = Object.freeze<string[]>([
 
 	// extensions/copilot has its own code style
 	'!extensions/copilot/**',
+
+	// GlyphSpek overlay: build/glyphspek/** are vendored scripts/configs and
+	// extensions/glyphspek-trust-panel/** is a vendored, pre-built snapshot of
+	// the first-party extension (built out-of-band from ../extension). Neither
+	// follows VS Code core indentation hygiene.
+	'!build/glyphspek/**',
+	'!extensions/glyphspek-trust-panel/**',
 
 	// except specific file types
 	'!src/vs/*/**/*.d.ts',
@@ -212,6 +225,12 @@ export const copyrightFilter = Object.freeze<string[]>([
 
 	// extensions/copilot has its own code style
 	'!extensions/copilot/**',
+
+	// GlyphSpek overlay: vendored scripts/configs under build/glyphspek/** and
+	// the vendored pre-built extension snapshot under
+	// extensions/glyphspek-trust-panel/** do not carry the MS copyright header.
+	'!build/glyphspek/**',
+	'!extensions/glyphspek-trust-panel/**',
 ]);
 
 export const tsFormattingFilter = Object.freeze<string[]>([

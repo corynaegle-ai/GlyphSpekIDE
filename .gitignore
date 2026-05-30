@@ -47,3 +47,7 @@ dist
 .github/prompts/*.local.prompt.md
 .agents/skills/.local/
 .github/skills/.local/
+
+# GlyphSpek vendored/built overlay artifacts must be tracked (override the global dist/ ignore so a fresh clone builds)
+!build/glyphspek/copilot-stubs/**
+!extensions/glyphspek-trust-panel/dist/**

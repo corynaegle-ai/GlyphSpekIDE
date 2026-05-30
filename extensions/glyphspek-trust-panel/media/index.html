@@ -35,6 +35,22 @@
     <div id="load-status" class="load-status"></div>
 
     <!--
+      FIRST-PARTY TRUSTED-RUN GESTURE (sweep-20 High #3). Hidden until the host posts
+      `offerTrustedRun` (a GlyphSpek command asked to start a trusted run). Clicking
+      "Start run" posts `startTrustedRun` back to the host — the ONLY path that mints
+      an operator gesture and creates a PRODUCT-TRUSTED run. A third-party extension
+      cannot post into this webview, so it cannot forge this click.
+    -->
+    <section id="trusted-run-offer" class="card trusted-run-offer" hidden>
+      <h2 class="card-title">Start a governed run</h2>
+      <p class="panel-caption" id="trusted-run-offer-caption">
+        A GlyphSpek command asked to start a governed run. Starting a product-trusted
+        run requires this first-party gesture: click below to confirm.
+      </p>
+      <button id="trusted-run-start-btn" type="button" class="btn btn-primary">Start run</button>
+    </section>
+
+    <!--
       LIVE RUN VIEW (milestone M5). Hidden until the first run/event arrives (from
       the supervisor stream or the in-webview mock driver). Renders the run list,
       the current run's badges (runtime trust / extension posture / CLI fidelity),

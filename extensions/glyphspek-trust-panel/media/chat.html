@@ -21,7 +21,7 @@
     <header class="topbar">
       <div class="topbar-title">
         <span class="logo">GlyphSpek</span>
-        <span class="topbar-sub">Governed chat &amp; inline edit · every model call is brokered</span>
+        <span id="chat-subtitle" class="topbar-sub">Governed chat &amp; inline edit</span>
       </div>
       <div class="topbar-controls">
         <label class="chat-model-label" for="chat-model">Model</label>
@@ -29,6 +29,24 @@
         <span id="chat-totals" class="chat-totals"></span>
       </div>
     </header>
+
+    <!--
+      DEMO / STUB BANNER (sweep-20 High #4). Shown whenever the host is on the STUB
+      gateway: responses are synthetic and are NOT brokered through the supervisor,
+      NOT audited, and NOT traced. The webview defaults to showing this until the
+      host posts a `chatGatewayMode` of 'brokered' (a real wired gateway), so the UI
+      never over-claims. Hidden only when a real supervisor-backed gateway is wired.
+    -->
+    <section id="chat-demo-banner" class="card chat-demo-banner">
+      <h2 class="card-title">Demo — not yet wired to the supervisor</h2>
+      <p class="panel-caption">
+        Responses below are <strong>stubbed</strong>: they are
+        <strong>not brokered</strong> through the supervisor, <strong>not audited</strong>,
+        and <strong>not traced</strong>. Trace refs shown are placeholder stub ids, not
+        auditable Trust&nbsp;Panel references. Wiring the real model bridge restores the
+        brokered/auditable/traced guarantees.
+      </p>
+    </section>
 
     <div id="chat-status" class="load-status"></div>
 
@@ -49,12 +67,12 @@
     <main class="chat-layout">
       <section class="card chat-transcript-card">
         <h2 class="card-title">Conversation</h2>
-        <p class="panel-caption">
-          Each reply shows its policy <strong>decision</strong>, the
-          <strong>redacted</strong> completion, token/cost <strong>usage</strong>,
-          and a <strong>trace ref</strong> auditable in the Trust Panel. The
-          provider credential is held supervisor-side and never reaches this view.
-        </p>
+        <!--
+          Caption text is mode-dependent (sweep-20 High #4): the brokered/auditable/
+          traced claim is rendered by chat.js ONLY when the host reports a real
+          ('brokered') gateway. On the stub gateway it shows the honest demo caption.
+        -->
+        <p id="chat-transcript-caption" class="panel-caption"></p>
         <div id="chat-transcript" class="chat-transcript"></div>
       </section>
 
@@ -75,12 +93,7 @@
       </section>
     </main>
 
-    <footer class="footer">
-      Governed chat surface. Only models the supervisor allowlists are selectable;
-      a denied call renders a blocked card and a <code>force_ask</code> raises an
-      approval prompt. Inline edits are diff-gated. No credential is stored or
-      displayed in this view.
-    </footer>
+    <footer id="chat-footer" class="footer"></footer>
 
     <script nonce="{{nonce}}" src="{{chatViewUri}}"></script>
     <script nonce="{{nonce}}" src="{{chatUri}}"></script>

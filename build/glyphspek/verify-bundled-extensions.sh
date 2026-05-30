@@ -156,8 +156,28 @@ else
   echo
 fi
 
+# ---- chain the source<->embedded conformance gate (Sweep-20 F2) -------------
+# The bundled extensions/glyphspek-trust-panel/ is a vendored snapshot of the
+# canonical SOURCE tree (../extension). It can silently go stale — missing a new
+# command, a renamed dist/ file, or a supervisor bundle whose hash no longer
+# matches the pinned one. verify-embedded-extension.sh fails on any such drift so
+# a stale embedded copy can't ship a different app than the green source tree.
+embedded_conformance_fail=0
+EMBEDDED_GATE="$REPO_ROOT/build/glyphspek/verify-embedded-extension.sh"
+if [ -f "$EMBEDDED_GATE" ]; then
+  echo "--- source<->embedded conformance gate ---"
+  if ! bash "$EMBEDDED_GATE"; then
+    embedded_conformance_fail=1
+  fi
+  echo
+else
+  echo "WARN: verify-embedded-extension.sh not found at $EMBEDDED_GATE —" >&2
+  echo "      the embedded extension is NOT being checked for drift vs source." >&2
+  echo
+fi
+
 echo "=== verdict ==="
-if [ "$violations" -gt 0 ] || [ "$copilot_runtime_fail" -gt 0 ]; then
+if [ "$violations" -gt 0 ] || [ "$copilot_runtime_fail" -gt 0 ] || [ "$embedded_conformance_fail" -gt 0 ]; then
   if [ "$violations" -gt 0 ]; then
     echo "RESULT: FAIL — $violations denylisted extension(s) shipped in the packaged app:"
     printf '%s' "$matched_list" | sed '/^$/d' | sed 's/^/        - extensions\//'
@@ -166,6 +186,11 @@ if [ "$violations" -gt 0 ] || [ "$copilot_runtime_fail" -gt 0 ]; then
   if [ "$copilot_runtime_fail" -gt 0 ]; then
     echo "RESULT: FAIL — Copilot RUNTIME libraries present in the packaged app"
     echo "        (see the no-Copilot-runtime gate above). GlyphSpek must ship no Copilot."
+  fi
+  if [ "$embedded_conformance_fail" -gt 0 ]; then
+    echo "RESULT: FAIL — the embedded GlyphSpek extension drifted from its source"
+    echo "        (see the source<->embedded conformance gate above). Re-bundle the"
+    echo "        fresh built artifacts into extensions/glyphspek-trust-panel/."
   fi
   exit 1
 fi
