@@ -1,0 +1,18 @@
+{
+  "_comment": "GlyphSpek SOVEREIGN default-settings overlay (STUB — NOT yet wired). These are DEFAULTS, not locked policy. The HARD allowlist guarantee travels separately as the 'AllowedExtensions' policy (see sovereign-policy.json) — that is what cannot be overridden. The values below are defaults the workbench should boot with. extensions.allowed is intentionally OMITTED here because it must be delivered as policy, not as an overridable default. See README.md 'What is NOT wired' for how this overlay is meant to be applied (no build wiring exists yet).",
+
+  "telemetry.telemetryLevel": "off",
+  "telemetry.enableCrashReporter": false,
+
+  "extensions.autoUpdate": false,
+  "extensions.autoCheckUpdates": false,
+
+  "update.mode": "none",
+
+  "workbench.enableExperiments": false,
+
+  "glyphspek.extensions.mode": "sovereign",
+  "glyphspek.extensions.ambientWarning": true,
+
+  "_galleryNote": "Gallery (Open VSX) is configured via product.json extensionsGallery, NOT via settings — already wired in product.json. Listed here only for review completeness; do not add an extensionsGallery key to settings."
+}
