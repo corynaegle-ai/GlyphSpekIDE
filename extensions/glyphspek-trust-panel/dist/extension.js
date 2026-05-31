@@ -63,6 +63,7 @@ const supervisorBridgeRunner_1 = require("./supervisorBridgeRunner");
 const governedTerminalEnv_1 = require("./governedTerminalEnv");
 const agentCli_1 = require("./agentCli");
 const inlineScript_1 = require("./inlineScript");
+const bridgeProtocol_1 = require("./bridgeProtocol");
 const policyHash_1 = require("./policyHash");
 const runEventProtocol_1 = require("./runEventProtocol");
 const mockRunStream_1 = require("./mockRunStream");
@@ -437,6 +438,14 @@ class TrustPanel {
         // closing-script sequence must NOT be able to terminate this inline <script>
         // and inject markup before app.js loads.
         const trustedKeysScript = `<script nonce="${nonce}">window.GLYPHSPEK_TRUSTED_VERIFIER_KEYS = ${(0, inlineScript_1.escapeForInlineScript)(trusted)};</script>`;
+        // CANONICAL RunTrust SET (sweep-25 #1). Inject the bridgeProtocol RUN_TRUSTS
+        // list — the SAME constant the host's validateRunEvent uses — as a nonce-guarded
+        // global so the webview's run-event gate (media/live.js) validates
+        // run_opened.trust against the canonical five-value vocabulary instead of a
+        // hand-kept allowlist that drifted and dropped governed-unsandboxed /
+        // sandboxed-soft-egress runs. escapeForInlineScript (not bare JSON.stringify)
+        // keeps the inline <script> un-breakable, matching the trusted-keys seam.
+        const runTrustsScript = `<script nonce="${nonce}">window.GLYPHSPEK_RUN_TRUSTS = ${(0, inlineScript_1.escapeForInlineScript)(bridgeProtocol_1.RUN_TRUSTS)};</script>`;
         return html
             .replace('{{iconsSprite}}', iconsSprite)
             .replace(/\{\{cspSource\}\}/g, webview.cspSource)
@@ -445,7 +454,8 @@ class TrustPanel {
             .replace(/\{\{sampleBundleUri\}\}/g, sampleBundleUri.toString())
             .replace(/\{\{appUri\}\}/g, appUri.toString())
             .replace(/\{\{liveUri\}\}/g, liveUri.toString())
-            .replace(/\{\{trustedKeysScript\}\}/g, trustedKeysScript);
+            .replace(/\{\{trustedKeysScript\}\}/g, trustedKeysScript)
+            .replace(/\{\{runTrustsScript\}\}/g, runTrustsScript);
     }
     /**
      * Forward a validated supervisor `run/event` envelope to the webview's live
@@ -480,6 +490,13 @@ class TrustPanel {
                     message: 'unsupported run-event schema (rev mismatch) — refusing to render a foreign/future ' +
                         `stream as current (expected rev ${runEventProtocol_1.RUN_EVENT_PROTOCOL_VERSION}).`,
                 };
+                // Mirror the synthesized mismatch into the SIDEBAR model too (sweep-25 #2).
+                // The original foreign-rev envelope was ignored by the model above (it fails
+                // validateRunEvent on `rev`), so without this the Governed Runs view would be
+                // EMPTY while the panel shows a bridge_mismatch card. The synthesized failure
+                // is current-rev and valid, so the model accepts it and produces a row with a
+                // refused posture — the same de-authoritated signal, in both surfaces.
+                getGovernedRunsModel().ingest(mismatch);
                 if (!this.ready) {
                     this.pendingRunEvents.push(mismatch);
                 }

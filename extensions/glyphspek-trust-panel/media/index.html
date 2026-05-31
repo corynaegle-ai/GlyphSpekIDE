@@ -258,6 +258,16 @@
       is NEVER trusted. Empty when unset.
     -->
     {{trustedKeysScript}}
+    <!--
+      CANONICAL RunTrust SET (sweep-25 #1). The host injects the bridgeProtocol
+      RUN_TRUSTS array as a nonce-guarded global BEFORE live.js runs, so the live
+      Trust Panel's run-event gate validates run_opened.trust against the SAME
+      five-value vocabulary the contract defines — never a hand-kept allowlist that
+      drifts and silently drops a real governed posture (governed-unsandboxed,
+      sandboxed-soft-egress). Injected as MATERIAL only (the value list); the panel
+      still renders every posture's honest badge via CREATION_TRUST_BADGE.
+    -->
+    {{runTrustsScript}}
     <script nonce="{{nonce}}" src="{{sampleBundleUri}}"></script>
     <script nonce="{{nonce}}" src="{{appUri}}"></script>
     <script nonce="{{nonce}}" src="{{liveUri}}"></script>

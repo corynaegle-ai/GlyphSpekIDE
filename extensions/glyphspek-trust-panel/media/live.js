@@ -35,6 +35,19 @@
   // mismatch: a foreign/future stream is never rendered as a current event; it
   // surfaces a distinct bridge-mismatch failure instead.
   var RUN_EVENT_PROTOCOL_VERSION = 1;
+
+  // CANONICAL RunTrust SET (sweep-25 #1 — kill the duplication). The host injects
+  // bridgeProtocol's RUN_TRUSTS as window.GLYPHSPEK_RUN_TRUSTS (a nonce-guarded
+  // global, set BEFORE this script runs) so the run_opened gate below validates
+  // `trust` against the EXACT same five-value vocabulary the contract defines —
+  // never a hand-kept array that drifts and silently drops a real governed posture
+  // (governed-unsandboxed, sandboxed-soft-egress). The literal here is only a
+  // fail-safe MIRROR of bridgeProtocol.RUN_TRUSTS for the (test/edge) case where the
+  // global is absent; it is the same five values, so a dropped injection still
+  // accepts every canonical posture rather than failing closed on valid runs.
+  var RUN_TRUSTS = (typeof window !== 'undefined' && Array.isArray(window.GLYPHSPEK_RUN_TRUSTS))
+    ? window.GLYPHSPEK_RUN_TRUSTS
+    : ['trusted', 'sandboxed-soft-egress', 'governed-unsandboxed', 'untrusted', 'refused'];
   var RUN_EVENT_KIND = {
     RunOpened: 'run_opened',
     TraceEvent: 'trace_event',
@@ -343,7 +356,13 @@
     var kinds = ['run_opened', 'trace_event', 'state_changed', 'actor_claims', 'verifier_verdict', 'run_closed', 'failure'];
     if (kinds.indexOf(e.kind) === -1) return { ok: false, reason: 'malformed' };
     if (e.kind === 'run_opened') {
-      if (['trusted', 'untrusted', 'refused'].indexOf(e.trust) === -1) return { ok: false, reason: 'malformed' };
+      // Validate `trust` against the INJECTED canonical RUN_TRUSTS set (sweep-25 #1)
+      // rather than a hardcoded array, so EVERY valid posture is accepted — including
+      // governed-unsandboxed (the governed-terminal demo posture) and
+      // sandboxed-soft-egress. Product-trust is gated SEPARATELY by
+      // isProductTrustEligible (strict 'trusted'), so accepting the value here never
+      // confers product authority. Mirrors src/runEventProtocol.ts validateRunEvent.
+      if (RUN_TRUSTS.indexOf(e.trust) === -1) return { ok: false, reason: 'malformed' };
       if (['trusted', 'untrusted'].indexOf(e.runtimeTrust) === -1) return { ok: false, reason: 'malformed' };
       if (['sovereign', 'developer'].indexOf(e.extensionPosture) === -1) return { ok: false, reason: 'malformed' };
       if (['per-tool-brokered', 'boundary-only', 'n/a'].indexOf(e.cliFidelity) === -1) return { ok: false, reason: 'malformed' };
@@ -1115,6 +1134,12 @@
       getRunView: function (runId) { return runs[runId] || null; },
       runIds: function () { return order.slice(); },
       protocolVersion: RUN_EVENT_PROTOCOL_VERSION,
+      // The canonical RunTrust set the run_opened gate validates against (the
+      // injected window.GLYPHSPEK_RUN_TRUSTS, or the fail-safe mirror). Exposed so
+      // the ingestion test (test/liveRunTrustIngestion.test.mjs) iterates EXACTLY
+      // what the webview accepts, so a future new posture that is injected but not
+      // handled is caught.
+      runTrusts: RUN_TRUSTS.slice(),
       // Read-only trust summary over a run view (view-only, NOT a security surface).
       // Exposed so the golden-fixture conformance test (test/liveReducerGolden.test.mjs)
       // compares the WEBVIEW's OWN failure-severity ordering + eligibility against the

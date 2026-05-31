@@ -86,9 +86,25 @@ class GovernedRunsModel {
                 changed = this.set(summary, 'status', event.finalState) || changed;
                 changed = this.set(summary, 'closed', true) || changed;
                 break;
+            case runEventProtocol_1.RunEventKind.Failure: {
+                // A BRIDGE-MISMATCH failure DE-AUTHORITATES the run in BOTH surfaces
+                // (sweep-25 #2). The host synthesizes this current-rev failure when it
+                // refuses a foreign/future-rev envelope (extension.ts postRunEvent) and
+                // routes it here too, so the sidebar is not EMPTY while the Trust Panel
+                // shows a bridge_mismatch card. We surface it as a 'refused' creation
+                // posture (the run could not be admitted under a known schema) and mark the
+                // row's status so the operator sees WHY in the list. Other failure kinds
+                // (tamper, stale, etc.) are surfaced in the Trust Panel, not the row summary.
+                const f = event;
+                if (f.failure === runEventProtocol_1.RunFailureKind.BridgeMismatch) {
+                    changed = this.set(summary, 'creationTrust', 'refused') || changed;
+                    changed = this.set(summary, 'status', 'bridge_mismatch') || changed;
+                }
+                break;
+            }
             default:
-                // ActorClaims / VerifierVerdict / Failure don't change the row SUMMARY
-                // (actor/posture/status); they're surfaced in the Trust Panel, not the list.
+                // ActorClaims / VerifierVerdict don't change the row SUMMARY (actor/posture/
+                // status); they're surfaced in the Trust Panel, not the list.
                 break;
         }
         this.runs.set(runId, summary);
