@@ -1224,6 +1224,13 @@ var DEFAULT_MODEL_ENDPOINTS = [
     originAssurance: "narrow-api"
   }
 ];
+var AGENT_SUPPORT_HOSTS = {
+  "claude-code-cli": ["claude.ai", "console.anthropic.com", "downloads.claude.ai", "statsig.anthropic.com"],
+  "codex-cli": ["auth.openai.com"]
+};
+function agentSupportAllowEntries(actorType) {
+  return (AGENT_SUPPORT_HOSTS[actorType] ?? []).map((h) => `${h}:443`);
+}
 function classifyModelEndpoint(endpoints, host) {
   const target = host.trim().toLowerCase();
   return endpoints.find((e) => e.host.trim().toLowerCase() === target);
@@ -1321,7 +1328,10 @@ async function startTerminalSession(opts) {
   const sink = opts.sink ?? createTraceWriter(join4(runSubdirPath(runDir, "trace"), "trace.jsonl"));
   const endpoints = opts.modelEndpoints ?? DEFAULT_MODEL_ENDPOINTS;
   const isolation = opts.isolation;
-  const allow = endpoints.map((e) => `${e.host}:${e.port ?? 443}`);
+  const allow = [
+    ...endpoints.map((e) => `${e.host}:${e.port ?? 443}`),
+    ...agentSupportAllowEntries(facts.actorType)
+  ];
   const appendAndStream = (type, payload, source) => {
     const appended = sink.append({
       v: TRACE_EVENT_VERSION,
