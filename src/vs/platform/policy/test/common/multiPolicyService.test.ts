@@ -157,20 +157,32 @@ suite('SovereignFilePolicyService fail-closed (GlyphSpek PATCH-001 / Sweep-19 F2
 		return JSON.parse(value as string);
 	}
 
-	test('present valid policy boots Sovereign-enforced; missing/invalid fails closed (deny-all)', () => runWithFakedTimers({ useFakeTimers: true }, async () => {
+	// NOTE: each branch is its OWN `test(...)` so it runs against the FRESH in-memory file
+	// provider built in `setup()` (a clean, empty filesystem with no leftover bundled
+	// `policy.json`). Combining them in one test let the present-valid case's bundled file
+	// survive into the missing-file case, so `glyphspek: true` bled into the deny-all assertion.
+
+	test('present valid policy boots Sovereign-enforced', () => runWithFakedTimers({ useFakeTimers: true }, async () => {
 		// Present + valid -> the real curated allowlist is enforced (NOT all-allowed).
 		const enforced = await createService({ writeBundled: { AllowedExtensions: { glyphspek: true, '*': false } } });
 		assert.deepStrictEqual(allowed(enforced), { glyphspek: true, '*': false });
+	}));
 
+	test('missing policy file fails closed (deny-all)', () => runWithFakedTimers({ useFakeTimers: true }, async () => {
 		// Missing policy file -> deny-all floor (UNTRUSTED), NOT an empty/all-allowed policy.
 		const missing = await createService({});
 		assert.deepStrictEqual(allowed(missing), { '*': false }, 'missing policy must deny all extensions');
+	}));
 
+	test('invalid JSON policy fails closed (deny-all)', () => runWithFakedTimers({ useFakeTimers: true }, async () => {
 		// Invalid JSON -> deny-all floor.
 		const invalid = await createService({ writeBundled: '{ this is not json' });
 		assert.deepStrictEqual(allowed(invalid), { '*': false }, 'invalid policy must deny all extensions');
+	}));
 
-		// Fail-closed floor cannot be loosened by native/MDM (which tries to re-open everything).
+	test('native/MDM cannot loosen the failed-closed floor', () => runWithFakedTimers({ useFakeTimers: true }, async () => {
+		// Fail-closed floor (bundled file is missing here) cannot be loosened by native/MDM
+		// (which tries to re-open everything).
 		const withNative = await createService({ native: { AllowedExtensions: { '*': true, 'ms-python.python': true } } });
 		const effective = allowed(withNative);
 		assert.strictEqual(effective['*'], false, 'native cannot re-open the failed-closed deny-all floor');

@@ -127,7 +127,8 @@ suite('CopilotApiService', () => {
 
 	// #region Endpoint Discovery
 
-	suite('Endpoint Discovery', () => {
+	// GATE-002 (de-Copilot): Copilot CAPI live path is inert (throws COPILOT_UNAVAILABLE); live-path assertion obsolete. See SECURITY-PATCHES.md.
+	suite.skip('Endpoint Discovery', () => {
 
 		test('runs endpoint discovery on first request', async () => {
 			let mintCount = 0;
@@ -378,7 +379,8 @@ suite('CopilotApiService', () => {
 
 	// #region Request Format
 
-	suite('Request Format', () => {
+	// GATE-002 (de-Copilot): Copilot CAPI live path is inert (throws COPILOT_UNAVAILABLE); live-path assertion obsolete. See SECURITY-PATCHES.md.
+	suite.skip('Request Format', () => {
 
 		test('sends system as a top-level text-block array', async () => {
 			const { fetch: fetchFn, captured } = routingFetch(
@@ -543,7 +545,8 @@ suite('CopilotApiService', () => {
 
 	// #region Non-Streaming Responses
 
-	suite('Non-Streaming Responses', () => {
+	// GATE-002 (de-Copilot): Copilot CAPI live path is inert (throws COPILOT_UNAVAILABLE); live-path assertion obsolete. See SECURITY-PATCHES.md.
+	suite.skip('Non-Streaming Responses', () => {
 
 		test('returns text content from a single text block', async () => {
 			const { fetch: fetchFn } = routingFetch(
@@ -647,7 +650,8 @@ suite('CopilotApiService', () => {
 
 	// #region Streaming Responses
 
-	suite('Streaming Responses', () => {
+	// GATE-002 (de-Copilot): Copilot CAPI live path is inert (throws COPILOT_UNAVAILABLE); live-path assertion obsolete. See SECURITY-PATCHES.md.
+	suite.skip('Streaming Responses', () => {
 
 		function collectTextDeltas(events: Anthropic.MessageStreamEvent[]): string[] {
 			return events
@@ -810,7 +814,8 @@ suite('CopilotApiService', () => {
 
 	// #region Raw Event Stream (messages())
 
-	suite('Raw Event Stream (messages())', () => {
+	// GATE-002 (de-Copilot): Copilot CAPI live path is inert (throws COPILOT_UNAVAILABLE); live-path assertion obsolete. See SECURITY-PATCHES.md.
+	suite.skip('Raw Event Stream (messages())', () => {
 
 		test('yields all six protocol event types in order', async () => {
 			const service = streamService([
@@ -966,9 +971,46 @@ suite('CopilotApiService', () => {
 
 	// #endregion
 
+	// #region GATE-002 de-Copilot invariant
+
+	// GATE-002 (de-Copilot): GlyphSpek ships NO Copilot runtime. The inert `@vscode/copilot-api`
+	// compat layer's `CAPIClient.makeRequest` throws COPILOT_UNAVAILABLE, so every live-CAPI call
+	// route (messages, models, utilityChatCompletion) fails closed. The obsolete-by-design live-path
+	// suites above are skipped; THIS suite is the standing regression coverage that the de-Copilot
+	// invariant holds. See SECURITY-PATCHES.md.
+	suite('GATE-002 de-Copilot invariant (CAPI live path is inert)', () => {
+
+		// Endpoint discovery (which uses the injected fetch directly) is allowed to succeed so we
+		// reach the real CAPI request — the throw must come from the inert CAPIClient, not discovery.
+		const COPILOT_UNAVAILABLE = /Copilot is not available in GlyphSpek/;
+
+		test('messages() (non-streaming) fails closed with COPILOT_UNAVAILABLE', async () => {
+			const { fetch: fetchFn } = routingFetch(() => anthropicResponse([{ type: 'text', text: 'unreachable' }]));
+			const service = createService(fetchFn);
+			await assert.rejects(() => service.messages('gh-tok', baseRequest), COPILOT_UNAVAILABLE);
+		});
+
+		test('messages() (streaming) fails closed with COPILOT_UNAVAILABLE', async () => {
+			const service = streamService([sseLines('data: {"type":"message_stop"}')]);
+			await assert.rejects(
+				() => collect(service.messages('gh-tok', { ...baseRequest, stream: true as const })),
+				COPILOT_UNAVAILABLE,
+			);
+		});
+
+		test('models() fails closed with COPILOT_UNAVAILABLE', async () => {
+			const { fetch: fetchFn } = routingFetch(() => modelsResponse([]));
+			const service = createService(fetchFn);
+			await assert.rejects(() => service.models('gh-tok'), COPILOT_UNAVAILABLE);
+		});
+	});
+
+	// #endregion
+
 	// #region Streaming + Non-Streaming Shared Behavior
 
-	suite('Shared Behavior', () => {
+	// GATE-002 (de-Copilot): Copilot CAPI live path is inert (throws COPILOT_UNAVAILABLE); live-path assertion obsolete. See SECURITY-PATCHES.md.
+	suite.skip('Shared Behavior', () => {
 
 		test('streaming and non-streaming hit the same /v1/messages endpoint', async () => {
 			const urls: string[] = [];
@@ -1013,7 +1055,8 @@ suite('CopilotApiService', () => {
 
 	// #region CopilotApiError contract
 
-	suite('CopilotApiError contract', () => {
+	// GATE-002 (de-Copilot): Copilot CAPI live path is inert (throws COPILOT_UNAVAILABLE); live-path assertion obsolete. See SECURITY-PATCHES.md.
+	suite.skip('CopilotApiError contract', () => {
 
 		async function captureCopilotApiError(promise: Promise<unknown>): Promise<CopilotApiError> {
 			try {
@@ -1281,7 +1324,8 @@ suite('CopilotApiService', () => {
 
 	// #region Cancellation
 
-	suite('Cancellation', () => {
+	// GATE-002 (de-Copilot): Copilot CAPI live path is inert (throws COPILOT_UNAVAILABLE); live-path assertion obsolete. See SECURITY-PATCHES.md.
+	suite.skip('Cancellation', () => {
 
 		test('forwards AbortSignal to fetch for messages', async () => {
 			const controller = new AbortController();
@@ -1414,7 +1458,8 @@ suite('CopilotApiService', () => {
 
 	// #region Models
 
-	suite('Models', () => {
+	// GATE-002 (de-Copilot): Copilot CAPI live path is inert (throws COPILOT_UNAVAILABLE); live-path assertion obsolete. See SECURITY-PATCHES.md.
+	suite.skip('Models', () => {
 
 		test('returns models from the data array', async () => {
 			const fakeModels = [
