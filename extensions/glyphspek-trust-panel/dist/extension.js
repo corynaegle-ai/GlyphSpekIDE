@@ -68,6 +68,8 @@ const runEventProtocol_1 = require("./runEventProtocol");
 const mockRunStream_1 = require("./mockRunStream");
 const webviewGestureGate_1 = require("./webviewGestureGate");
 const configScope_1 = require("./configScope");
+const governedRunsModel_1 = require("./governedRunsModel");
+const governedRunsTree_1 = require("./governedRunsTree");
 /** The file names that make up a run bundle, in load order. */
 const BUNDLE_FILE_NAMES = [
     'trace.jsonl',
@@ -103,6 +105,21 @@ function getWebviewGestureGate() {
     if (!webviewGestureGate)
         webviewGestureGate = new webviewGestureGate_1.WebviewGestureGate();
     return webviewGestureGate;
+}
+/**
+ * The module-private GOVERNED-RUNS MODEL backing the activity-bar "Governed Runs"
+ * tree (governedRunsModel.ts / governedRunsTree.ts). One instance per extension
+ * process. It is fed the SAME raw `run/event` envelopes the Trust Panel renders —
+ * TrustPanel.postRunEvent feeds it on every event — so the sidebar lists exactly
+ * the runs the extension actually observed (live bridge runs, governed terminals,
+ * the demo feed), never an invented placeholder. The tree subscribes to its
+ * onDidChange to refresh.
+ */
+let governedRunsModel;
+function getGovernedRunsModel() {
+    if (!governedRunsModel)
+        governedRunsModel = new governedRunsModel_1.GovernedRunsModel();
+    return governedRunsModel;
 }
 /** Human-readable byte size for size-cap error messages. */
 function formatBytes(bytes) {
@@ -260,6 +277,13 @@ class TrustPanel {
                     this.pendingOfferKind = undefined;
                     void this.panel.webview.postMessage({ type: 'offerTrustedRun', kind });
                 }
+                // Replay a pending run-focus so a tree-row click that raced the webview
+                // boot still focuses the run the operator selected.
+                if (this.pendingSelectRunId) {
+                    const runId = this.pendingSelectRunId;
+                    this.pendingSelectRunId = undefined;
+                    void this.panel.webview.postMessage({ type: 'selectRun', runId });
+                }
             }
             else if (msg.type === 'requestLoadBundle') {
                 // The webview's "Load run bundle…" button delegates to the host command.
@@ -289,6 +313,20 @@ class TrustPanel {
             return;
         }
         void this.panel.webview.postMessage({ type: 'offerTrustedRun', kind });
+    }
+    /**
+     * Focus the panel on a specific run (the Governed Runs tree-row click path). The
+     * webview already tracks `selectedRunId`; this posts a `selectRun` message it
+     * honors by selecting that run and re-rendering. View-only navigation — it
+     * confers NO trust and starts no run. Buffered until the webview is ready so a
+     * click that raced the boot is not lost.
+     */
+    selectRun(runId) {
+        if (!this.ready) {
+            this.pendingSelectRunId = runId;
+            return;
+        }
+        void this.panel.webview.postMessage({ type: 'selectRun', runId });
     }
     /** Read a run-bundle directory and post its files into the webview. */
     loadBundleFromDirectory(dir) {
@@ -418,6 +456,11 @@ class TrustPanel {
      * queued and replayed, preserving order — the same pattern as bundle loads.
      */
     postRunEvent(rawEvent) {
+        // Feed the activity-bar Governed Runs model FIRST so the sidebar lists every
+        // run the panel is asked to render. The model does its own validate-then-fold
+        // and silently ignores a malformed/foreign envelope, so this never fabricates a
+        // row — it mirrors exactly what reaches the panel below.
+        getGovernedRunsModel().ingest(rawEvent);
         const validation = (0, runEventProtocol_1.validateRunEvent)(rawEvent);
         if (!validation.ok) {
             // SCHEMA-VERSION MISMATCH (sweep-19 Medium #6 — FAIL CLOSED). A `rev` problem
@@ -935,6 +978,39 @@ function activeEditorSelection() {
 }
 function activate(context) {
     const gate = getWebviewGestureGate();
+    // ACTIVITY-BAR "Governed Runs" view (first GlyphSpek sidebar surface). A real
+    // TreeView backed by the run model, which is fed the SAME run/event stream the
+    // Trust Panel renders (TrustPanel.postRunEvent feeds it). The view title carries
+    // the "New Governed Terminal" + "Open Trust Panel" actions; an empty model shows
+    // the viewsWelcome (declared in package.json) with the New Governed Terminal CTA.
+    const runsModel = getGovernedRunsModel();
+    const runsTree = new governedRunsTree_1.GovernedRunsTreeProvider(runsModel, context.extensionUri);
+    context.subscriptions.push(runsTree);
+    context.subscriptions.push(vscode.window.createTreeView('glyphspek.runs', {
+        treeDataProvider: runsTree,
+        showCollapseAll: false,
+    }));
+    // Tree-row click → focus the Trust Panel on that run (view-only navigation;
+    // confers no trust and starts nothing). Opens/reveals the panel, then selects
+    // the run; the panel buffers the selection if the webview is still booting.
+    context.subscriptions.push(vscode.commands.registerCommand(governedRunsTree_1.OPEN_RUN_COMMAND, (runId) => {
+        const panel = TrustPanel.createOrShow(context.extensionUri, gate);
+        panel.reveal();
+        if (typeof runId === 'string' && runId.length > 0) {
+            panel.selectRun(runId);
+        }
+    }));
+    // Title-bar action on the Governed Runs view: New Governed Terminal. Delegates to
+    // the EXISTING governed-terminal command so the sidebar button and the command
+    // palette share one code path (no duplicated launch logic).
+    context.subscriptions.push(vscode.commands.registerCommand('glyphspek.runs.newGovernedTerminal', () => vscode.commands.executeCommand('glyphspek.openGovernedTerminal')));
+    // Title-bar action: Open Trust Panel. Surfaces the existing Trust Panel webview
+    // from the sidebar (the lower-risk path: the panel stays a WebviewPanel; the
+    // sidebar contributes a prominent action to reveal it).
+    context.subscriptions.push(vscode.commands.registerCommand('glyphspek.runs.openTrustPanel', () => {
+        const panel = TrustPanel.createOrShow(context.extensionUri, gate);
+        panel.reveal();
+    }));
     context.subscriptions.push(vscode.commands.registerCommand('glyphspek.openTrustPanel', () => {
         TrustPanel.createOrShow(context.extensionUri, gate);
     }));

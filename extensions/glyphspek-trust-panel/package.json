@@ -14,6 +14,7 @@
   ],
   "main": "./dist/extension.js",
   "activationEvents": [
+    "onView:glyphspek.runs",
     "onCommand:glyphspek.openTrustPanel",
     "onCommand:glyphspek.loadRunBundle",
     "onCommand:glyphspek.runGovernedTask",
@@ -55,6 +56,22 @@
         "title": "GlyphSpek: Open Governed Terminal"
       },
       {
+        "command": "glyphspek.runs.newGovernedTerminal",
+        "title": "GlyphSpek: New Governed Terminal",
+        "category": "GlyphSpek",
+        "icon": "media/icons/gs-terminal.svg"
+      },
+      {
+        "command": "glyphspek.runs.openTrustPanel",
+        "title": "GlyphSpek: Open Trust Panel",
+        "category": "GlyphSpek",
+        "icon": "media/icons/gs-verifier.svg"
+      },
+      {
+        "command": "glyphspek.runs.openRun",
+        "title": "GlyphSpek: Open Trust Panel for Run"
+      },
+      {
         "command": "glyphspek.openChat",
         "title": "GlyphSpek: Open Chat (Demo)"
       },
@@ -63,6 +80,45 @@
         "title": "GlyphSpek: Inline Edit (Demo)"
       }
     ],
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "glyphspek",
+          "title": "GlyphSpek",
+          "icon": "media/icons/gs-verifier.svg"
+        }
+      ]
+    },
+    "views": {
+      "glyphspek": [
+        {
+          "id": "glyphspek.runs",
+          "name": "Governed Runs",
+          "icon": "media/icons/gs-run.svg",
+          "contextualTitle": "GlyphSpek Governed Runs"
+        }
+      ]
+    },
+    "viewsWelcome": [
+      {
+        "view": "glyphspek.runs",
+        "contents": "No governed runs yet.\n\nGlyphSpek governs an agent's egress (metadata-only) and signs a tamper-evident trace. Open a Governed Terminal to start an honest, governed (soft, unsandboxed) session.\n\n[New Governed Terminal](command:glyphspek.runs.newGovernedTerminal)\n\nOr open the Trust Panel to load an existing run bundle.\n[Open Trust Panel](command:glyphspek.runs.openTrustPanel)"
+      }
+    ],
+    "menus": {
+      "view/title": [
+        {
+          "command": "glyphspek.runs.newGovernedTerminal",
+          "when": "view == glyphspek.runs",
+          "group": "navigation@1"
+        },
+        {
+          "command": "glyphspek.runs.openTrustPanel",
+          "when": "view == glyphspek.runs",
+          "group": "navigation@2"
+        }
+      ]
+    },
     "configuration": {
       "title": "GlyphSpek",
       "properties": {
@@ -127,7 +183,7 @@
   "scripts": {
     "bundle:supervisor": "node scripts/build-supervisor.mjs",
     "compile": "npm run bundle:supervisor && tsc -p .",
-    "test": "npm run bundle:supervisor && tsc -p . && node --test test/inlineScript.test.mjs test/configScope.test.mjs test/supervisorRunner.test.mjs test/policyHash.test.mjs test/bridgeProtocol.test.mjs test/bridgeContractConformance.test.mjs test/bridge.test.mjs test/bridgeServerSpawn.test.mjs test/liveRunStream.test.mjs test/runEventProtocol.test.mjs test/liveRunModel.test.mjs test/mockRunStream.test.mjs test/liveReducerGolden.test.mjs test/chatViewModel.test.mjs test/chatDemoState.test.mjs test/chatModelSelection.test.mjs test/operatorGesture.test.mjs test/runGovernedTaskGate.test.mjs test/webviewGestureGate.test.mjs test/liveSchemaGate.test.mjs test/governedTerminalEnv.test.mjs test/governedTerminalSession.test.mjs test/openGovernedTerminalCommand.test.mjs test/agentCliCodex.test.mjs test/iconSpriteInjection.test.mjs test/livePanelLabels.test.mjs",
+    "test": "npm run bundle:supervisor && tsc -p . && node --test test/inlineScript.test.mjs test/configScope.test.mjs test/supervisorRunner.test.mjs test/policyHash.test.mjs test/bridgeProtocol.test.mjs test/bridgeContractConformance.test.mjs test/bridge.test.mjs test/bridgeServerSpawn.test.mjs test/liveRunStream.test.mjs test/runEventProtocol.test.mjs test/liveRunModel.test.mjs test/mockRunStream.test.mjs test/liveReducerGolden.test.mjs test/chatViewModel.test.mjs test/chatDemoState.test.mjs test/chatModelSelection.test.mjs test/operatorGesture.test.mjs test/runGovernedTaskGate.test.mjs test/webviewGestureGate.test.mjs test/liveSchemaGate.test.mjs test/governedTerminalEnv.test.mjs test/governedTerminalSession.test.mjs test/openGovernedTerminalCommand.test.mjs test/agentCliCodex.test.mjs test/iconSpriteInjection.test.mjs test/livePanelLabels.test.mjs test/runTrustBadge.test.mjs test/governedRunsModel.test.mjs test/governedRunsView.test.mjs",
     "package": "npm run bundle:supervisor && tsc -p . && vsce package --no-dependencies"
   },
   "devDependencies": {

@@ -67,6 +67,9 @@
   var runs = Object.create(null);
   var order = [];
   var selectedRunId = null;
+  // A runId the host asked to focus (Governed Runs tree click) before it streamed.
+  // Adopted the moment that run first appears in ingestRunEvent. View-only nav.
+  var pendingHostSelection = null;
 
   function emptyRunView(runId) {
     return {
@@ -359,9 +362,16 @@
     var view = getRun(raw.runId);
     reduce(view, raw);
     showLiveView();
-    // Auto-select the most recently opened/active run if none chosen yet.
-    if (!selectedRunId) selectedRunId = raw.runId;
-    if (raw.kind === 'run_opened') selectedRunId = raw.runId;
+    // If the host asked to focus a run that has now arrived, honor that selection
+    // and stop auto-advancing selection to other newly-opened runs.
+    if (pendingHostSelection && raw.runId === pendingHostSelection) {
+      selectedRunId = pendingHostSelection;
+      pendingHostSelection = null;
+    } else if (!pendingHostSelection) {
+      // Auto-select the most recently opened/active run if none chosen yet.
+      if (!selectedRunId) selectedRunId = raw.runId;
+      if (raw.kind === 'run_opened') selectedRunId = raw.runId;
+    }
     renderRunList();
     if (selectedRunId === raw.runId) renderSelectedRun();
   }
@@ -397,6 +407,27 @@
   function renderIfSelected(runId) {
     if (selectedRunId === runId) renderSelectedRun();
     renderRunList();
+  }
+
+  /*
+   * Focus a run requested by the host (the activity-bar Governed Runs tree). If the
+   * run is already known, select + render it; otherwise record it as the desired
+   * selection so the next event that creates it focuses it (ingestRunEvent only
+   * auto-selects when nothing is selected, so set it directly here). View-only.
+   */
+  function selectRunFromHost(runId) {
+    showLiveView();
+    if (runs[runId]) {
+      selectedRunId = runId;
+      pendingHostSelection = null;
+      renderRunList();
+      renderSelectedRun();
+    } else {
+      // Not streamed yet: remember it and adopt it the moment it appears.
+      pendingHostSelection = runId;
+      selectedRunId = runId;
+      renderRunList();
+    }
   }
 
   function deriveTrustSummary(view) {
@@ -1061,6 +1092,12 @@
         ingestRunEvent(msg.event);
       } else if (msg.type === 'runEvents' && Array.isArray(msg.events)) {
         for (var i = 0; i < msg.events.length; i++) ingestRunEvent(msg.events[i]);
+      } else if (msg.type === 'selectRun' && typeof msg.runId === 'string') {
+        // FOCUS a run from the activity-bar Governed Runs tree (view-only nav: it
+        // confers no trust and starts nothing). Select the run if we know it and
+        // re-render; if it has not streamed yet, remember it so the next event for
+        // that run auto-selects it (ingestRunEvent already selects the first run).
+        selectRunFromHost(msg.runId);
       }
     });
 
