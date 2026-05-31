@@ -62,6 +62,7 @@ const supervisorRunner_1 = require("./supervisorRunner");
 const supervisorBridgeRunner_1 = require("./supervisorBridgeRunner");
 const governedTerminalEnv_1 = require("./governedTerminalEnv");
 const agentCli_1 = require("./agentCli");
+const agentLaunch_1 = require("./agentLaunch");
 const inlineScript_1 = require("./inlineScript");
 const bridgeProtocol_1 = require("./bridgeProtocol");
 const policyHash_1 = require("./policyHash");
@@ -1506,6 +1507,15 @@ function assembleGovernedTerminalRequest(context, output, actorType) {
     };
 }
 /**
+ * The absolute fsPaths of the current workspace folders (empty if none). Used to flag
+ * a WORKSPACE-LOCAL agent-CLI resolution (sweep-27): a CLI binary living inside the
+ * repo being worked on is the red flag for a swapped/planted shim, so the governed
+ * chat refuses to auto-run it.
+ */
+function workspaceFolderPaths() {
+    return (vscode.workspace.workspaceFolders ?? []).map((f) => f.uri.fsPath);
+}
+/**
  * The SHARED governed-terminal core. Starts the supervised session over the bridge
  * (terminal/start — NO client egress field, egress is supervisor-owned), opens a VS
  * Code terminal whose env routes egress through the returned proxy and strips ambient
@@ -1606,22 +1616,49 @@ async function openGovernedTerminalSurface(context, output, surface, detected) {
         // CHAT = a governed terminal running INTERACTIVE Claude Code. The interactive TUI
         // IS the chat: it stays on the user's SUBSCRIPTION (interactive `claude` is exempt
         // from the 2026-06-15 headless `claude -p`/Agent-SDK metering carve-out), so it is
-        // cheap + durable. AUTO-RUN it (send the agent name + Enter) — the whole point of
-        // the chat surface is that the agent launches for you.
+        // cheap + durable. AUTO-RUN it — the whole point of the chat surface is that the
+        // agent launches for you.
+        //
+        // BINARY-SWAP GUARD (sweep-27 High). We do NOT send the BARE name `detected.agent`:
+        // the governed terminal PRESERVES PATH (for HOME-based auth), so a bare name is
+        // RE-RESOLVED by the shell at exec time — a workspace-local `./claude` or a
+        // PATH-injected shim could swap the binary between the modal confirm and the
+        // launch. Instead we send the CANONICALIZED ABSOLUTE path detection already
+        // resolved, shell-QUOTED, so the EXACT inode that was detected/confirmed is the
+        // one that runs regardless of any PATH mutation. AND we REFUSE to auto-run a
+        // canonical path that resolves UNDER a workspace folder (the red flag for a
+        // repo-supplied shim) — instead we warn with the full path and leave the agent
+        // for the operator to launch by hand inside the already-governed terminal.
         if (detected) {
-            terminal.sendText(detected.agent, true);
-            void vscode.window.showInformationMessage(`GlyphSpek Chat: launched your interactive '${detected.agent}' on YOUR subscription. ` +
-                'Egress is governed (metadata-only) and streaming LIVE into the Trust Panel; this session is ' +
-                'UNSANDBOXED and never product-trusted. GlyphSpek holds no credential.');
+            const launch = (0, agentLaunch_1.resolveAgentLaunch)(detected.path, workspaceFolderPaths());
+            if (!launch.trustedForAutoRun) {
+                // UNTRUSTED resolved path: do NOT auto-run. Be honest — name the full path so
+                // the operator can decide. The terminal is already open + governed, so they
+                // can still run a trusted agent in it by hand.
+                void vscode.window.showWarningMessage(`GlyphSpek Chat: did NOT auto-run your '${detected.agent}' — it resolved to ` +
+                    `${launch.launchPath}, which is INSIDE your workspace. A workspace-local CLI ` +
+                    'could be a swapped/planted binary, so GlyphSpek will not launch it for you. ' +
+                    'The terminal is open and governed; run a trusted agent in it yourself if you intend to.');
+                return;
+            }
+            // Send the EXACT canonical absolute path, shell-quoted, + Enter (auto-run).
+            terminal.sendText(launch.launchCommand, true);
+            void vscode.window.showInformationMessage(`GlyphSpek Chat: launched ${launch.launchPath} (your interactive '${detected.agent}') on YOUR ` +
+                'subscription. Egress is governed (metadata-only) and streaming LIVE into the Trust Panel; this ' +
+                'session is UNSANDBOXED and never product-trusted. GlyphSpek holds no credential.');
         }
         // The no-CLI case never reaches here (the command shows the honest message and only
         // optionally opens this terminal; see openGovernedChat).
         return;
     }
     // surface === 'terminal': honest, non-coercive ergonomics. If an agent CLI is
-    // installed, PRE-TYPE its name (without sending) so the operator just hits Enter;
-    // never auto-run. Otherwise leave the terminal empty and tell the operator their
-    // egress is governed.
+    // installed, PRE-TYPE its BARE name (without sending) so the operator just hits
+    // Enter; never auto-run. We DELIBERATELY keep the bare name here (not the canonical
+    // absolute path used by chat auto-run): the operator EXPLICITLY runs it, SEES exactly
+    // what is on the command line, and controls when/whether to press Enter — so the
+    // binary-swap-between-confirm-and-launch window the chat auto-run closes does not
+    // apply (there is no silent auto-run gesture to protect). Otherwise leave the
+    // terminal empty and tell the operator their egress is governed.
     if (detected) {
         terminal.sendText(detected.agent, false);
         void vscode.window.showInformationMessage(`GlyphSpek: governed terminal ready. Your '${detected.agent}' CLI is pre-typed — press Enter to run it. ` +
@@ -1682,9 +1719,24 @@ async function openGovernedChat(context, output) {
     // is still governed + traced (governed-unsandboxed), never product-trusted. The
     // user-driven Governed Terminal stays one-step (it only PRE-TYPES, never auto-runs,
     // so the operator's Enter is itself the gesture).
+    // Resolve the EXACT binary the chat would auto-run NOW (canonicalized absolute path,
+    // workspace-local trust decision) so the modal names what will run and so a
+    // workspace-local resolution is caught BEFORE the operator even confirms (sweep-27).
+    const launch = (0, agentLaunch_1.resolveAgentLaunch)(detected.path, workspaceFolderPaths());
+    if (!launch.trustedForAutoRun) {
+        // The detected CLI resolves to a workspace-local path — the red flag for a planted
+        // shim. Do NOT offer a one-click auto-run launch. Tell the operator the full path
+        // honestly and refuse to auto-run; openGovernedTerminalSurface re-checks and would
+        // also refuse, but we stop here so no misleading "Open Chat" confirm is shown.
+        void vscode.window.showWarningMessage(`GlyphSpek Chat will NOT auto-run your '${detected.agent}': it resolves to ` +
+            `${launch.launchPath}, which is INSIDE your workspace. A workspace-local CLI could be a ` +
+            'swapped/planted binary. Open a Governed Terminal and run a trusted agent yourself if you intend to.');
+        return;
+    }
     const OPEN_CHAT = 'Open Chat';
-    const confirm = await vscode.window.showInformationMessage(`Launch GlyphSpek Chat? This opens a governed terminal and runs your '${detected.agent}' ` +
-        'on YOUR subscription — governed (metadata-only egress) + traced, UNSANDBOXED; GlyphSpek holds no key.', { modal: true }, OPEN_CHAT);
+    const confirm = await vscode.window.showInformationMessage(`Launch GlyphSpek Chat? This opens a governed terminal and runs ${launch.launchPath} ` +
+        `(your '${detected.agent}') on YOUR subscription — governed (metadata-only egress) + traced, ` +
+        'UNSANDBOXED; GlyphSpek holds no key.', { modal: true }, OPEN_CHAT);
     if (confirm !== OPEN_CHAT) {
         // Operator declined the launch gesture — nothing is opened or auto-run.
         return;
