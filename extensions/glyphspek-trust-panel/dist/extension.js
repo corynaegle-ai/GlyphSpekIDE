@@ -183,6 +183,24 @@ function resolveTrustedVerifierKeys() {
     return (0, configScope_1.selectGlobalScopedTrustKeys)(inspect, keystorePublicKeyPem);
 }
 /**
+ * Read the GlyphSpek icon symbol sprite (media/glyphspek-icons.svg) for inline
+ * injection into a webview body (docs/assets/ICON-USAGE.md). The sprite is a
+ * static, first-party product asset — never untrusted input — so inlining it is
+ * safe and lets same-document <use href="#gs-..."> resolve reliably across the
+ * Chromium/webview contexts where external `./file.svg#id` references break and
+ * lose `currentColor`. If the asset is ever missing, fall back to an empty string
+ * so the panel still renders (icons simply won't show) rather than throwing.
+ */
+function readIconsSprite(mediaUri) {
+    try {
+        const iconsPath = vscode.Uri.joinPath(mediaUri, 'glyphspek-icons.svg');
+        return fs.readFileSync(iconsPath.fsPath, 'utf8');
+    }
+    catch {
+        return '';
+    }
+}
+/**
  * Singleton Trust Panel manager. Keeps at most one webview panel alive, builds
  * its CSP-locked HTML, and bridges host<->webview messages.
  */
@@ -359,6 +377,12 @@ class TrustPanel {
         const appUri = webview.asWebviewUri(vscode.Uri.joinPath(mediaUri, 'app.js'));
         const liveUri = webview.asWebviewUri(vscode.Uri.joinPath(mediaUri, 'live.js'));
         const nonce = crypto.randomBytes(16).toString('base64');
+        // GlyphSpek icon system (docs/assets/ICON-USAGE.md). External SVG <use href>
+        // is unreliable in VS Code webviews, so we INLINE the symbol sprite into the
+        // body and reference it with same-document <use href="#gs-...">. The sprite is
+        // static product asset markup (no untrusted input), read from the extension's
+        // own media dir; CSS hides it (.gs-icons / first-child aria-hidden svg).
+        const iconsSprite = readIconsSprite(mediaUri);
         // Out-of-band trust-root seam (sweep-05 Critical). Resolve the operator's
         // trusted verifier public keys and inject them as a global the webview reads
         // BEFORE app.js loads. The set is the `glyphspek.trustedVerifierKeys` setting
@@ -376,6 +400,7 @@ class TrustPanel {
         // and inject markup before app.js loads.
         const trustedKeysScript = `<script nonce="${nonce}">window.GLYPHSPEK_TRUSTED_VERIFIER_KEYS = ${(0, inlineScript_1.escapeForInlineScript)(trusted)};</script>`;
         return html
+            .replace('{{iconsSprite}}', iconsSprite)
             .replace(/\{\{cspSource\}\}/g, webview.cspSource)
             .replace(/\{\{nonce\}\}/g, nonce)
             .replace(/\{\{stylesUri\}\}/g, stylesUri.toString())
@@ -885,7 +910,10 @@ class ChatPanel {
         const chatViewUri = webview.asWebviewUri(vscode.Uri.joinPath(mediaUri, 'chatView.js'));
         const chatUri = webview.asWebviewUri(vscode.Uri.joinPath(mediaUri, 'chat.js'));
         const nonce = crypto.randomBytes(16).toString('base64');
+        // Inline the GlyphSpek icon sprite (see readIconsSprite / ICON-USAGE.md).
+        const iconsSprite = readIconsSprite(mediaUri);
         return html
+            .replace('{{iconsSprite}}', iconsSprite)
             .replace(/\{\{cspSource\}\}/g, webview.cspSource)
             .replace(/\{\{nonce\}\}/g, nonce)
             .replace(/\{\{stylesUri\}\}/g, stylesUri.toString())

@@ -18,9 +18,18 @@
     <link rel="stylesheet" href="{{stylesUri}}" />
   </head>
   <body class="chat-body">
+    <!--
+      GlyphSpek icon sprite (docs/assets/ICON-USAGE.md). Inlined by the host so
+      same-document <use href="#gs-..."> resolves reliably in the webview. Hidden
+      by CSS (first-child aria-hidden <svg>).
+    -->
+    {{iconsSprite}}
     <header class="topbar">
       <div class="topbar-title">
-        <span class="logo">GlyphSpek</span>
+        <span class="logo">
+          <svg class="gs-icon gs-logo-icon" aria-hidden="true"><use href="#gs-verifier"></use></svg>
+          GlyphSpek
+        </span>
         <span id="chat-subtitle" class="topbar-sub">Governed chat &amp; inline edit</span>
       </div>
       <div class="topbar-controls">
@@ -38,7 +47,10 @@
       never over-claims. Hidden only when a real supervisor-backed gateway is wired.
     -->
     <section id="chat-demo-banner" class="card chat-demo-banner">
-      <h2 class="card-title">Demo — not yet wired to the supervisor</h2>
+      <h2 class="card-title">
+        <svg class="gs-icon gs-title-icon" aria-hidden="true"><use href="#gs-deny"></use></svg>
+        Demo — not yet wired to the supervisor
+      </h2>
       <p class="panel-caption">
         Responses below are <strong>stubbed</strong>: they are
         <strong>not brokered</strong> through the supervisor, <strong>not audited</strong>,
@@ -56,7 +68,10 @@
       reason only.
     -->
     <section id="chat-approval" class="card chat-approval" hidden>
-      <h2 class="card-title">Approval required</h2>
+      <h2 class="card-title">
+        <svg class="gs-icon gs-title-icon" aria-hidden="true"><use href="#gs-approval"></use></svg>
+        Approval required
+      </h2>
       <p id="chat-approval-reason" class="panel-caption"></p>
       <div class="chat-approval-actions">
         <button id="chat-approve" type="button" class="btn btn-primary">Approve &amp; retry</button>
@@ -66,7 +81,10 @@
 
     <main class="chat-layout">
       <section class="card chat-transcript-card">
-        <h2 class="card-title">Conversation</h2>
+        <h2 class="card-title">
+          <svg class="gs-icon gs-title-icon" aria-hidden="true"><use href="#gs-actors"></use></svg>
+          Conversation
+        </h2>
         <!--
           Caption text is mode-dependent (sweep-20 High #4): the brokered/auditable/
           traced claim is rendered by chat.js ONLY when the host reports a real

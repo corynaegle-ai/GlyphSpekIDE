@@ -58,6 +58,47 @@ code,
   font-size: 0.92em;
 }
 
+/* ----------------------------------------------------------------------------
+ * GlyphSpek icon system (docs/assets/ICON-USAGE.md).
+ *
+ * The symbol sprite (media/glyphspek-icons.svg) is inlined into the webview body
+ * by the host. It must take no layout space: the first-child aria-hidden <svg>
+ * (the injected sprite, which has no class of its own) and the explicit .gs-icons
+ * class are both collapsed to 0x0. Icons are referenced with same-document
+ * <use href="#gs-...">, inherit color via currentColor, and stay crisp at 16-20px.
+ * --------------------------------------------------------------------------- */
+.gs-icons,
+body > svg[aria-hidden="true"]:first-child {
+  position: absolute;
+  width: 0;
+  height: 0;
+  overflow: hidden;
+}
+
+.gs-icon {
+  width: 18px;
+  height: 18px;
+  color: currentColor;
+  fill: none;
+  flex: 0 0 auto;
+}
+
+/* Title-row glyphs read at the card-title scale; the dimmed accent keeps the
+ * icon from competing with the heading text. State-colored card titles (e.g. the
+ * amber demo banner, the verdict-state classes) re-tint the icon via currentColor. */
+.gs-title-icon {
+  width: 16px;
+  height: 16px;
+  opacity: 0.85;
+}
+
+/* Brand mark beside the GlyphSpek wordmark in the top bar. */
+.gs-logo-icon {
+  width: 18px;
+  height: 18px;
+  color: var(--verdict);
+}
+
 /* ---------- top bar ---------- */
 .topbar {
   display: flex;
@@ -80,6 +121,9 @@ code,
   font-weight: 700;
   font-size: 16px;
   letter-spacing: 0.5px;
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
 }
 
 .topbar-sub {

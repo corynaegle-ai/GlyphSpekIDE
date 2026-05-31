@@ -18,9 +18,19 @@
     <link rel="stylesheet" href="{{stylesUri}}" />
   </head>
   <body>
+    <!--
+      GlyphSpek icon sprite (docs/assets/ICON-USAGE.md). The host inlines the
+      symbol sprite here so same-document <use href="#gs-..."> resolves reliably
+      (external ./file.svg#id references are unreliable in VS Code webviews and
+      can break currentColor). CSS hides this first-child aria-hidden <svg>.
+    -->
+    {{iconsSprite}}
     <header class="topbar">
       <div class="topbar-title">
-        <span class="logo">GlyphSpek</span>
+        <span class="logo">
+          <svg class="gs-icon gs-logo-icon" aria-hidden="true"><use href="#gs-verifier"></use></svg>
+          GlyphSpek
+        </span>
         <span class="topbar-sub">Trust Panel · IDE extension (W1-19 / W1-27 / W4)</span>
       </div>
       <div class="topbar-controls">
@@ -42,7 +52,10 @@
       cannot post into this webview, so it cannot forge this click.
     -->
     <section id="trusted-run-offer" class="card trusted-run-offer" hidden>
-      <h2 class="card-title">Start a governed run</h2>
+      <h2 class="card-title">
+        <svg class="gs-icon gs-title-icon" aria-hidden="true"><use href="#gs-run"></use></svg>
+        Start a governed run
+      </h2>
       <p class="panel-caption" id="trusted-run-offer-caption">
         A GlyphSpek command asked to start a governed run. Starting a product-trusted
         run requires this first-party gesture: click below to confirm.
@@ -62,7 +75,10 @@
     -->
     <main class="layout live-layout" id="live-view" hidden>
       <section class="card" id="live-runlist-card">
-        <h2 class="card-title">Live runs</h2>
+        <h2 class="card-title">
+          <svg class="gs-icon gs-title-icon" aria-hidden="true"><use href="#gs-run"></use></svg>
+          Live runs
+        </h2>
         <p class="panel-caption">
           Governed runs streamed from the supervisor over the bridge
           <code>run/event</code> contract. Select a run to review it.
@@ -71,7 +87,10 @@
       </section>
 
       <section class="card" id="live-badges-card">
-        <h2 class="card-title">Run trust state</h2>
+        <h2 class="card-title">
+          <svg class="gs-icon gs-title-icon" aria-hidden="true"><use href="#gs-sandbox"></use></svg>
+          Run trust state
+        </h2>
         <div id="live-badges" class="badge-row"></div>
         <div id="live-failures" class="failure-stack"></div>
       </section>
@@ -79,6 +98,7 @@
       <section class="claims-verdict">
         <div class="card panel-claims" id="live-claims-card">
           <h2 class="card-title">
+            <svg class="gs-icon gs-title-icon" aria-hidden="true"><use href="#gs-actors"></use></svg>
             Actor plan &amp; claims
             <span class="panel-tag tag-claims">self-reported · NOT authoritative</span>
           </h2>
@@ -91,6 +111,7 @@
 
         <div class="card panel-verdict" id="live-verdict-card">
           <h2 class="card-title">
+            <svg class="gs-icon gs-title-icon" aria-hidden="true"><use href="#gs-verifier"></use></svg>
             Verifier verdict
             <span class="panel-tag tag-verdict">independent · signed · authoritative</span>
           </h2>
@@ -104,26 +125,41 @@
       </section>
 
       <section class="card">
-        <h2 class="card-title">Live trace timeline</h2>
+        <h2 class="card-title">
+          <svg class="gs-icon gs-title-icon" aria-hidden="true"><use href="#gs-trace"></use></svg>
+          Live trace timeline
+        </h2>
         <p class="panel-caption">Hash-chained events streamed in order. The chain is re-verified in-browser.</p>
         <div id="live-timeline" class="timeline"></div>
       </section>
 
       <section class="derived-grid">
         <div class="card">
-          <h2 class="card-title">Changed files (diff)</h2>
+          <h2 class="card-title">
+            <svg class="gs-icon gs-title-icon" aria-hidden="true"><use href="#gs-diff"></use></svg>
+            Changed files (diff)
+          </h2>
           <div id="live-files-body"></div>
         </div>
         <div class="card">
-          <h2 class="card-title">Commands run</h2>
+          <h2 class="card-title">
+            <svg class="gs-icon gs-title-icon" aria-hidden="true"><use href="#gs-terminal"></use></svg>
+            Commands run
+          </h2>
           <div id="live-commands-body"></div>
         </div>
         <div class="card">
-          <h2 class="card-title">Network destinations</h2>
+          <h2 class="card-title">
+            <svg class="gs-icon gs-title-icon" aria-hidden="true"><use href="#gs-network"></use></svg>
+            Network destinations
+          </h2>
           <div id="live-network-body"></div>
         </div>
         <div class="card derived-wide">
-          <h2 class="card-title">Policy decisions</h2>
+          <h2 class="card-title">
+            <svg class="gs-icon gs-title-icon" aria-hidden="true"><use href="#gs-policy"></use></svg>
+            Policy decisions
+          </h2>
           <div id="live-policy-body"></div>
         </div>
       </section>
@@ -132,7 +168,10 @@
     <main class="layout">
       <!-- Run header -->
       <section class="card" id="run-header-card">
-        <h2 class="card-title">Run</h2>
+        <h2 class="card-title">
+          <svg class="gs-icon gs-title-icon" aria-hidden="true"><use href="#gs-run"></use></svg>
+          Run
+        </h2>
         <div id="run-header"></div>
       </section>
 
@@ -140,6 +179,7 @@
       <section class="claims-verdict">
         <div class="card panel-claims" id="actor-claims-card">
           <h2 class="card-title">
+            <svg class="gs-icon gs-title-icon" aria-hidden="true"><use href="#gs-actors"></use></svg>
             Actor claims
             <span class="panel-tag tag-claims">self-reported · NOT authoritative</span>
           </h2>
@@ -152,6 +192,7 @@
 
         <div class="card panel-verdict" id="verifier-verdict-card">
           <h2 class="card-title">
+            <svg class="gs-icon gs-title-icon" aria-hidden="true"><use href="#gs-verifier"></use></svg>
             Verifier verdict
             <span class="panel-tag tag-verdict">independent · signed · authoritative</span>
           </h2>
@@ -166,7 +207,10 @@
 
       <!-- Trace timeline -->
       <section class="card">
-        <h2 class="card-title">Trace timeline</h2>
+        <h2 class="card-title">
+          <svg class="gs-icon gs-title-icon" aria-hidden="true"><use href="#gs-trace"></use></svg>
+          Trace timeline
+        </h2>
         <p class="panel-caption">Hash-chained events in order. Hashes shown are placeholders.</p>
         <div id="timeline" class="timeline"></div>
       </section>
@@ -174,15 +218,24 @@
       <!-- Derived sections -->
       <section class="derived-grid">
         <div class="card">
-          <h2 class="card-title">Commands run</h2>
+          <h2 class="card-title">
+            <svg class="gs-icon gs-title-icon" aria-hidden="true"><use href="#gs-terminal"></use></svg>
+            Commands run
+          </h2>
           <div id="commands-body"></div>
         </div>
         <div class="card">
-          <h2 class="card-title">Network destinations</h2>
+          <h2 class="card-title">
+            <svg class="gs-icon gs-title-icon" aria-hidden="true"><use href="#gs-network"></use></svg>
+            Network destinations
+          </h2>
           <div id="network-body"></div>
         </div>
         <div class="card derived-wide">
-          <h2 class="card-title">Policy decisions</h2>
+          <h2 class="card-title">
+            <svg class="gs-icon gs-title-icon" aria-hidden="true"><use href="#gs-policy"></use></svg>
+            Policy decisions
+          </h2>
           <div id="policy-body"></div>
         </div>
       </section>

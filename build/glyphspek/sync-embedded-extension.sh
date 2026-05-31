@@ -20,7 +20,7 @@
 #     README.md                    (kept in lockstep; not gate-checked)
 #     dist/*.js                    (the built .js set the gate compares — NO .map)
 #     dist-supervisor/*.mjs        (the bundled supervisor entrypoints)
-#     media/*                      (webview assets)
+#     media/**                     (webview assets, recursive — incl. media/icons/)
 #   It does NOT touch the embedded .vscodeignore: that file is intentionally
 #   DIFFERENT from source (the embedded copy ships pre-built, so it only needs to
 #   drop **/*.map and .DS_Store, not exclude src/test/scripts/node_modules).
@@ -253,6 +253,37 @@ sync_dir_glob() {
 	fi
 }
 
+# Recursively mirror a directory TREE (handles subdirectories, e.g. media/icons/).
+# Copies every source file preserving relative subdirs, and removes embedded files
+# that no longer exist in source. $1 = source dir, $2 = dest dir, $3 = label prefix.
+# (sync_dir_glob's `ls -1 *` flattened subdirs and broke on media/icons/ — use this
+#  for any tree that may contain subfolders.)
+sync_tree() {
+	local sdir="$1" ddir="$2" prefix="$3"
+	local f rel
+	# copy/check each source file (recursive; relative paths preserve subdirs)
+	while IFS= read -r f; do
+		[ -n "$f" ] || continue
+		rel="${f#"$sdir"/}"
+		sync_file "$f" "$ddir/$rel" "$prefix/$rel"
+	done < <(find "$sdir" -type f | sort)
+	# remove embedded files (recursive) that no longer exist in source
+	if [ -d "$ddir" ]; then
+		while IFS= read -r f; do
+			[ -n "$f" ] || continue
+			rel="${f#"$ddir"/}"
+			if [ ! -f "$sdir/$rel" ]; then
+				if [ "$CHECK_ONLY" -eq 1 ]; then
+					note_change "STALE:    $prefix/$rel (in embedded, not in source)"
+				else
+					rm -f "$ddir/$rel"
+					note_change "removed:  $prefix/$rel (stale, not in source)"
+				fi
+			fi
+		done < <(find "$ddir" -type f | sort)
+	fi
+}
+
 # ---- (4) sync the artifacts -------------------------------------------------
 sync_file "$SOURCE/package.json" "$EMBEDDED/package.json" "package.json"
 [ -f "$SOURCE/README.md" ] && sync_file "$SOURCE/README.md" "$EMBEDDED/README.md" "README.md"
@@ -260,8 +291,9 @@ sync_file "$SOURCE/package.json" "$EMBEDDED/package.json" "package.json"
 # and the gate's expectation.
 sync_dir_glob "$SOURCE/dist"            "$EMBEDDED/dist"            '*.js'  "dist"
 sync_dir_glob "$SOURCE/dist-supervisor" "$EMBEDDED/dist-supervisor" '*.mjs' "dist-supervisor"
-# media/: webview assets — copy everything (it's all shipped).
-sync_dir_glob "$SOURCE/media"           "$EMBEDDED/media"           '*'     "media"
+# media/: webview assets — mirror the whole tree recursively (incl. subdirs like
+# media/icons/), so a new asset subfolder can't silently fail to ship.
+sync_tree "$SOURCE/media" "$EMBEDDED/media" "media"
 
 # ---- verdict ----------------------------------------------------------------
 echo "=== verdict ==="
