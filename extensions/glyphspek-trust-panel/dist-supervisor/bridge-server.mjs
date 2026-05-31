@@ -1400,6 +1400,8 @@ async function startTerminalSession(opts) {
     runId,
     kind: "run_opened",
     actorType: facts.actorType,
+    ...facts.actorVersion ? { actorVersion: facts.actorVersion } : {},
+    ...facts.actorBinary ? { actorBinary: facts.actorBinary } : {},
     trust: openedTrust,
     runtimeProfile: facts.runtimeProfile,
     runtimeTrust: openedRuntimeTrust,
@@ -1412,7 +1414,8 @@ async function startTerminalSession(opts) {
     runDir,
     // A terminal-launched CLI is an external opaque actor: its egress is
     // boundary-observed (untrusted provenance), recorded honestly.
-    provenanceLabel: "tool-output"
+    provenanceLabel: "tool-output",
+    ...facts.actorBinary ? { actorBinary: facts.actorBinary } : {}
   };
   appendAndStream("run_created", runCreated);
   transition("worktree_ready", "governed terminal session opening");
@@ -2717,6 +2720,11 @@ var BridgeServer = class {
       runId: created.runId,
       runDir: created.dir,
       actorType: request.actorType,
+      // Binary-identity evidence (sweep-28 High), threaded ADDITIVELY from the
+      // terminal/start request into run_opened + the run_created trace. Both are
+      // OPTIONAL: a request without them is unchanged. Provenance on the soft path.
+      ...request.actorVersion ? { actorVersion: request.actorVersion } : {},
+      ...request.actorBinary ? { actorBinary: request.actorBinary } : {},
       runtimeProfile: request.runtimeProfile,
       runtimeTrust: isolation ? "trusted" : "untrusted",
       extensionPosture: request.extensionPosture,

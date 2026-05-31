@@ -63,6 +63,7 @@ const supervisorBridgeRunner_1 = require("./supervisorBridgeRunner");
 const governedTerminalEnv_1 = require("./governedTerminalEnv");
 const agentCli_1 = require("./agentCli");
 const agentLaunch_1 = require("./agentLaunch");
+const agentBinaryIdentity_1 = require("./agentBinaryIdentity");
 const inlineScript_1 = require("./inlineScript");
 const bridgeProtocol_1 = require("./bridgeProtocol");
 const policyHash_1 = require("./policyHash");
@@ -1541,6 +1542,44 @@ async function openGovernedTerminalSurface(context, output, surface, detected) {
     const request = assembleGovernedTerminalRequest(context, output, actorType);
     if (!request)
         return;
+    // CHAT BINARY-IDENTITY EVIDENCE (sweep-28 High). For the CHAT surface (which
+    // AUTO-RUNS the detected agent CLI) resolve the launch and CAPTURE the binary's
+    // identity NOW — immediately before launch — so the run records WHICH bytes/version
+    // ran (TOCTOU: bound to the exact on-disk binary about to execute). We thread the
+    // evidence ADDITIVELY into the terminal/start request (→ run_opened + trace) and
+    // REUSE the same resolution for the actual auto-run sendText below, so the evidence
+    // and the launched bytes are the same. A workspace-local resolution is refused HERE
+    // (no session opened) exactly as the chat branch would. The TERMINAL surface never
+    // auto-runs (it only pre-types), so it captures nothing.
+    let chatLaunch;
+    if (surface === 'chat' && detected) {
+        chatLaunch = (0, agentLaunch_1.resolveAgentLaunch)(detected.path, workspaceFolderPaths());
+        if (!chatLaunch.trustedForAutoRun) {
+            void vscode.window.showWarningMessage(`GlyphSpek Chat: did NOT auto-run your '${detected.agent}' — it resolved to ` +
+                `${chatLaunch.launchPath}, which is INSIDE your workspace. A workspace-local CLI ` +
+                'could be a swapped/planted binary, so GlyphSpek will not launch it for you. ' +
+                'The terminal is open and governed; run a trusted agent in it yourself if you intend to.');
+            return;
+        }
+        // Capture immediately before launch (TOCTOU). Never throws; best-effort fields.
+        const binary = (0, agentBinaryIdentity_1.captureAgentBinaryIdentity)(chatLaunch.launchPath);
+        // Thread ADDITIVELY: the full evidence object, plus the existing actorVersion
+        // slot from the captured --version (when available). A consumer that ignores
+        // actorBinary still sees actorVersion; both are OPTIONAL.
+        request.actorBinary = {
+            path: binary.path,
+            ...(binary.sha256 ? { sha256: binary.sha256 } : {}),
+            ...(binary.sizeBytes !== undefined ? { sizeBytes: binary.sizeBytes } : {}),
+            ...(binary.mtimeMs !== undefined ? { mtimeMs: binary.mtimeMs } : {}),
+            ...(binary.version ? { version: binary.version } : {}),
+        };
+        if (binary.version)
+            request.actorVersion = binary.version;
+        output.appendLine(`[host] governed chat actor binary: ${binary.path} ` +
+            `(sha256 ${binary.sha256 ? `${binary.sha256.slice(0, 12)}…` : `unavailable: ${binary.sha256Unavailable}`}; ` +
+            `version ${binary.version ?? `unavailable: ${binary.versionUnavailable}`}). ` +
+            'Evidence captured at launch on the SOFT (governed-unsandboxed) path — not product-trusted.');
+    }
     // Open + reveal the Trust Panel FIRST so it is ready for the live stream.
     // postRunEvent buffers any events that arrive before the webview signals ready.
     const panel = TrustPanel.createOrShow(context.extensionUri, getWebviewGestureGate());
@@ -1629,16 +1668,22 @@ async function openGovernedTerminalSurface(context, output, surface, detected) {
         // canonical path that resolves UNDER a workspace folder (the red flag for a
         // repo-supplied shim) — instead we warn with the full path and leave the agent
         // for the operator to launch by hand inside the already-governed terminal.
-        if (detected) {
-            const launch = (0, agentLaunch_1.resolveAgentLaunch)(detected.path, workspaceFolderPaths());
-            if (!launch.trustedForAutoRun) {
-                // UNTRUSTED resolved path: do NOT auto-run. Be honest — name the full path so
-                // the operator can decide. The terminal is already open + governed, so they
-                // can still run a trusted agent in it by hand.
-                void vscode.window.showWarningMessage(`GlyphSpek Chat: did NOT auto-run your '${detected.agent}' — it resolved to ` +
-                    `${launch.launchPath}, which is INSIDE your workspace. A workspace-local CLI ` +
-                    'could be a swapped/planted binary, so GlyphSpek will not launch it for you. ' +
-                    'The terminal is open and governed; run a trusted agent in it yourself if you intend to.');
+        if (detected && chatLaunch) {
+            // chatLaunch was resolved + trust-checked + the binary identity captured BEFORE
+            // session start (above); a workspace-local resolution already returned there, so
+            // here it is trusted for auto-run. We REUSE that exact resolution so the bytes we
+            // launch match the evidence threaded into run_opened + the trace.
+            const launch = chatLaunch;
+            // WINDOWS GUARD (sweep-28 Medium). launch.launchCommand uses POSIX single-quote
+            // escaping, which is INVALID for PowerShell/cmd (the detector finds claude.cmd/
+            // .exe/.bat on win32). Until a platform/shell-aware (or PTY) launch exists, do
+            // NOT auto-send on win32: PRE-TYPE the canonical path (no newline) and tell the
+            // operator chat auto-run is macOS/Linux for now — they press Enter themselves.
+            if (process.platform === 'win32') {
+                terminal.sendText(launch.launchPath, false);
+                void vscode.window.showInformationMessage(`GlyphSpek Chat: pre-typed ${launch.launchPath} (your '${detected.agent}') — press Enter to run it. ` +
+                    'Chat auto-run is macOS/Linux for now (Windows shell quoting differs); your egress is governed ' +
+                    '(metadata-only), streaming LIVE into the Trust Panel, UNSANDBOXED and never product-trusted.');
                 return;
             }
             // Send the EXACT canonical absolute path, shell-quoted, + Enter (auto-run).
