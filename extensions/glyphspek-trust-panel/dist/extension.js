@@ -1122,17 +1122,10 @@ function activate(context) {
     context.subscriptions.push(vscode.commands.registerCommand('glyphspek.openTrustPanel', () => {
         TrustPanel.createOrShow(context.extensionUri, gate);
     }));
-    // Governed chat (M6). Opens the chat surface; every model call is brokered
-    // through the supervisor (provider credential held supervisor-side). Until the
-    // supervisor stdio bridge server is packaged, a clearly-marked stub gateway
-    // backs the UI so it is demoable. A demo run id is set so the UI can send.
-    context.subscriptions.push(vscode.commands.registerCommand('glyphspek.openChat', () => {
-        const panel = ChatPanel.createOrShow(context.extensionUri, stubModelGateway());
-        panel.reveal();
-        panel.setRunId(`chat-${Date.now().toString(36)}`);
-    }));
-    // Inline edit (Cmd-K-style). Takes the active editor selection + an instruction,
-    // sends it through the SAME brokered model.call, and DIFF-GATES the proposed edit.
+    // Inline edit (Cmd-K-style, DEMO). Takes the active editor selection + an
+    // instruction and previews it through the stub gateway. This is still the demo
+    // preview surface (not yet brokered or diff-gated); only the primary Chat command
+    // was repurposed onto the governed terminal.
     context.subscriptions.push(vscode.commands.registerCommand('glyphspek.inlineEdit', async () => {
         const sel = activeEditorSelection();
         if (!sel) {
@@ -1205,6 +1198,15 @@ function activate(context) {
     // is NOT routed through the trusted-run gesture gate below (there is no product-
     // trust lever to protect). The command opens the governed terminal directly.
     context.subscriptions.push(vscode.commands.registerCommand('glyphspek.openGovernedTerminal', () => openGovernedTerminal(context, supervisorOutput)));
+    // GlyphSpek CHAT (M7). Chat = a governed terminal running INTERACTIVE Claude Code.
+    // The interactive TUI IS the chat: it runs on the user's OWN subscription (auth from
+    // ~/.claude; GlyphSpek injects no credential), governed (egress via the supervisor's
+    // metadata-only proxy), and traced (a governed-unsandboxed run in the Trust Panel +
+    // Governed Runs sidebar). This reuses the EXACT openGovernedTerminal machinery and
+    // auto-launches the detected interactive agent CLI. It NO LONGER opens the stub
+    // ChatPanel/stubModelGateway — that fake gateway is retired as the chat path. The
+    // API-key model broker is a separate, secondary path (parked).
+    context.subscriptions.push(vscode.commands.registerCommand('glyphspek.openChat', () => openGovernedChat(context, supervisorOutput)));
     // FIRST-PARTY WEBVIEW GESTURE GATE (sweep-20 High #3 — rework of sweep-19).
     //
     // ALL THREE trusted-run paths (governed / bridge / live) are PRODUCT-TRUSTED:
@@ -1504,22 +1506,23 @@ function assembleGovernedTerminalRequest(context, output, actorType) {
     };
 }
 /**
- * Open the in-IDE Governed Terminal: start the supervised session over the bridge
- * (terminal/start — NO client egress field, egress is supervisor-owned), open a VS
- * Code terminal whose env routes egress through the returned proxy and strips
- * ambient host secrets, stream the session's run/event feed into the Trust Panel
- * LIVE, and finalize the run (terminal/stop) when the operator closes the terminal.
+ * The SHARED governed-terminal core. Starts the supervised session over the bridge
+ * (terminal/start — NO client egress field, egress is supervisor-owned), opens a VS
+ * Code terminal whose env routes egress through the returned proxy and strips ambient
+ * host secrets, streams the session's run/event feed into the Trust Panel LIVE, and
+ * finalizes the run (terminal/stop) when the operator closes the terminal.
  *
- * Honest framing surfaced to the operator: this surface IS governed + traced but
- * UNSANDBOXED (metadata-only; destinations + counts, NOT decrypted content), so it
- * is never product-trusted. detectAgentCli makes `claude`/`codex` ergonomic (the
- * command is PRE-TYPED for the operator to run — never force-run).
+ * `surface` selects honest framing only. With `surface: 'terminal'` the detected agent
+ * CLI is PRE-TYPED (never force-run) and the operator drives it. With `surface: 'chat'`
+ * the detected agent CLI is AUTO-RUN INTERACTIVELY (e.g. `claude`\n): the interactive
+ * TUI IS the chat — on the user's OWN subscription (auth from ~/.claude; GlyphSpek
+ * injects NO credential), governed (egress via the proxy, metadata-only), and traced
+ * (a governed-unsandboxed run in the Trust Panel + Governed Runs sidebar). Either way
+ * the trust posture is identical: governed + traced but UNSANDBOXED, never
+ * product-trusted.
  */
-async function openGovernedTerminal(context, output) {
+async function openGovernedTerminalSurface(context, output, surface, detected) {
     output.show(true);
-    // Detect an installed agent CLI so we can (a) tag the actor identity and (b) make
-    // it ergonomic to launch. Detection only — we never force-run anything.
-    const detected = (0, agentCli_1.detectAgentCli)();
     const actorType = detected?.agent === 'claude'
         ? 'claude-code-cli'
         : detected?.agent === 'codex'
@@ -1532,10 +1535,11 @@ async function openGovernedTerminal(context, output) {
     // postRunEvent buffers any events that arrive before the webview signals ready.
     const panel = TrustPanel.createOrShow(context.extensionUri, getWebviewGestureGate());
     panel.reveal();
+    const progressTitle = surface === 'chat' ? 'GlyphSpek: opening governed chat…' : 'GlyphSpek: opening governed terminal…';
     const start = await vscode.window.withProgress({
         location: vscode.ProgressLocation.Notification,
         cancellable: false,
-        title: 'GlyphSpek: opening governed terminal…',
+        title: progressTitle,
     }, () => (0, supervisorBridgeRunner_1.startGovernedTerminalSession)({
         bridgeServerPath: resolveBundledBridgeServerPath(context),
         extensionVersion: resolveExtensionVersion(context),
@@ -1544,22 +1548,24 @@ async function openGovernedTerminal(context, output) {
         output,
         onRunEvent: (raw) => panel.postRunEvent(raw),
     }));
+    const surfaceLabel = surface === 'chat' ? 'governed chat' : 'governed terminal';
     if (!start.started || !start.session || !start.proxyUrl || !start.runId) {
-        void vscode.window.showErrorMessage(`GlyphSpek: could not open a governed terminal — ${start.message}`);
+        void vscode.window.showErrorMessage(`GlyphSpek: could not open a ${surfaceLabel} — ${start.message}`);
         return;
     }
     // Build the governed terminal env: FORCE egress through the supervisor's proxy and
     // STRIP ambient host secrets/capability handles (SSH_AUTH_SOCK, DOCKER_HOST, …) by
     // default. strictEnv makes the provided env the COMPLETE environment — nothing
     // ambient is inherited, so the secret firewall is default-deny (robust to unknown
-    // vars). The CLI authenticates from its OWN on-disk store (~/.claude, ~/.codex);
-    // we inject NO credential and set NO base-url override (anti-FauxCode).
+    // vars). HOME is PRESERVED so the agent CLI authenticates from its OWN on-disk store
+    // (~/.claude, ~/.codex — the user's SUBSCRIPTION); we inject NO credential and set NO
+    // base-url override (anti-FauxCode).
     const { env: terminalEnv, strictEnv } = (0, governedTerminalEnv_1.buildGovernedTerminalEnv)({
         proxyUrl: start.proxyUrl,
         baseEnv: process.env,
     });
     const terminal = vscode.window.createTerminal({
-        name: 'GlyphSpek Governed Terminal',
+        name: surface === 'chat' ? 'GlyphSpek Chat' : 'GlyphSpek Governed Terminal',
         env: terminalEnv,
         strictEnv,
     });
@@ -1574,25 +1580,48 @@ async function openGovernedTerminal(context, output) {
         closeSub.dispose();
         const stop = await session.stop();
         if (!stop.finalized || !stop.verdict) {
-            void vscode.window.showWarningMessage(`GlyphSpek: governed terminal ${session.runId} closed but did not finalize — ${stop.message}`);
+            void vscode.window.showWarningMessage(`GlyphSpek: ${surfaceLabel} ${session.runId} closed but did not finalize — ${stop.message}`);
             return;
         }
         const degraded = stop.verdict.assurance === 'degraded';
         const verdictLabel = `${stop.verdict.overallVerdict.toUpperCase()} (${degraded ? 'DEGRADED — lower assurance, not fully trusted' : 'assurance: full'})`;
         if (degraded) {
-            void vscode.window.showWarningMessage(`GlyphSpek: governed terminal ${session.runId} finalized ${verdictLabel}. ` +
+            void vscode.window.showWarningMessage(`GlyphSpek: ${surfaceLabel} ${session.runId} finalized ${verdictLabel}. ` +
                 'This session was governed + traced but UNSANDBOXED (metadata-only) — never product-trusted.');
         }
         else {
-            void vscode.window.showInformationMessage(`GlyphSpek: governed terminal ${session.runId} finalized — verdict ${verdictLabel}. ` +
+            void vscode.window.showInformationMessage(`GlyphSpek: ${surfaceLabel} ${session.runId} finalized — verdict ${verdictLabel}. ` +
                 'Governed + traced, metadata-only, UNSANDBOXED — not product-trusted.');
         }
     });
     context.subscriptions.push(closeSub);
     terminal.show();
-    // Honest, non-coercive ergonomics: if an agent CLI is installed, PRE-TYPE its name
-    // (without sending) so the operator just hits Enter; never auto-run. Otherwise
-    // leave the terminal empty and tell the operator their egress is governed.
+    // Honest, one-line banner echoed in the terminal so the posture is visible IN the
+    // surface (not only in a transient notification). GlyphSpek holds no credential.
+    const banner = surface === 'chat'
+        ? "echo 'GlyphSpek Chat — your Claude Code on your subscription, governed (metadata-only egress) + traced. GlyphSpek holds no key.'"
+        : "echo 'GlyphSpek Governed Terminal — egress governed (metadata-only) + traced. UNSANDBOXED; never product-trusted. GlyphSpek holds no key.'";
+    terminal.sendText(banner, true);
+    if (surface === 'chat') {
+        // CHAT = a governed terminal running INTERACTIVE Claude Code. The interactive TUI
+        // IS the chat: it stays on the user's SUBSCRIPTION (interactive `claude` is exempt
+        // from the 2026-06-15 headless `claude -p`/Agent-SDK metering carve-out), so it is
+        // cheap + durable. AUTO-RUN it (send the agent name + Enter) — the whole point of
+        // the chat surface is that the agent launches for you.
+        if (detected) {
+            terminal.sendText(detected.agent, true);
+            void vscode.window.showInformationMessage(`GlyphSpek Chat: launched your interactive '${detected.agent}' on YOUR subscription. ` +
+                'Egress is governed (metadata-only) and streaming LIVE into the Trust Panel; this session is ' +
+                'UNSANDBOXED and never product-trusted. GlyphSpek holds no credential.');
+        }
+        // The no-CLI case never reaches here (the command shows the honest message and only
+        // optionally opens this terminal; see openGovernedChat).
+        return;
+    }
+    // surface === 'terminal': honest, non-coercive ergonomics. If an agent CLI is
+    // installed, PRE-TYPE its name (without sending) so the operator just hits Enter;
+    // never auto-run. Otherwise leave the terminal empty and tell the operator their
+    // egress is governed.
     if (detected) {
         terminal.sendText(detected.agent, false);
         void vscode.window.showInformationMessage(`GlyphSpek: governed terminal ready. Your '${detected.agent}' CLI is pre-typed — press Enter to run it. ` +
@@ -1603,6 +1632,64 @@ async function openGovernedTerminal(context, output) {
         void vscode.window.showInformationMessage('GlyphSpek: governed terminal ready. Any command you run here has its egress governed (metadata-only) ' +
             'and streamed LIVE into the Trust Panel. This session is UNSANDBOXED and never product-trusted.');
     }
+}
+/**
+ * Open the in-IDE Governed Terminal: the user-driven surface. Detects an agent CLI
+ * (to tag the actor identity + pre-type the command) and delegates to the shared
+ * governed-terminal core. The detected CLI is PRE-TYPED for the operator to run —
+ * never force-run.
+ */
+async function openGovernedTerminal(context, output) {
+    await openGovernedTerminalSurface(context, output, 'terminal', (0, agentCli_1.detectAgentCli)());
+}
+/**
+ * Open GlyphSpek CHAT = a governed terminal running INTERACTIVE Claude Code.
+ *
+ * "Chat can be a terminal." The interactive Claude Code TUI IS a chat. Interactive
+ * `claude` stays on the user's SUBSCRIPTION (it is exempt from the 2026-06-15 headless
+ * `claude -p`/Agent-SDK metering carve-out), so it is cheap + durable. So GlyphSpek
+ * Chat is NOT a separate webview or a headless-JSON stream — it is the GOVERNED
+ * TERMINAL with the user's interactive agent AUTO-LAUNCHED. This reuses the entire
+ * governed-terminal stack (egress proxy, sanitized env with HOME preserved for the
+ * ~/.claude subscription auth, run/event projection into the Trust Panel + sidebar).
+ *
+ * If NO agent CLI is detected we do NOT open a fake chat: we show an HONEST message
+ * (install Claude Code / `claude login`, or install Codex) and still open the governed
+ * terminal so the operator can install/login inside it. GlyphSpek holds NO credential.
+ */
+async function openGovernedChat(context, output) {
+    const detected = (0, agentCli_1.detectAgentCli)();
+    if (!detected) {
+        // HONEST no-CLI path: never open a fake chat. Tell the truth and link the docs.
+        const INSTALL = 'How to install';
+        const choice = await vscode.window.showWarningMessage('GlyphSpek Chat runs your Claude Code in a governed terminal. Install Claude Code and run ' +
+            '`claude login` to chat on your subscription (or install Codex).', INSTALL);
+        if (choice === INSTALL) {
+            void vscode.env.openExternal(vscode.Uri.parse('https://docs.anthropic.com/en/docs/claude-code/setup'));
+        }
+        // Still open the governed terminal (no auto-run) so they can install/login IN it
+        // with egress already governed. detected is undefined → no agent is auto-run.
+        await openGovernedTerminalSurface(context, output, 'chat', undefined);
+        return;
+    }
+    // FIRST-PARTY LAUNCH GESTURE (sweep-26 High). `glyphspek.openChat` is a globally
+    // invokable command and the chat surface AUTO-RUNS a user-authenticated agent CLI
+    // (claude/codex from the user's own ~/.claude/~/.codex auth). A globally invokable
+    // command must NOT silently launch an actor process: require a fresh, explicit
+    // operator confirmation before auto-running. A third-party `executeCommand(
+    // 'glyphspek.openChat')` cannot satisfy this MODAL dialog, so it defeats silent
+    // agent launch from another extension. This gates only the auto-run — the session
+    // is still governed + traced (governed-unsandboxed), never product-trusted. The
+    // user-driven Governed Terminal stays one-step (it only PRE-TYPES, never auto-runs,
+    // so the operator's Enter is itself the gesture).
+    const OPEN_CHAT = 'Open Chat';
+    const confirm = await vscode.window.showInformationMessage(`Launch GlyphSpek Chat? This opens a governed terminal and runs your '${detected.agent}' ` +
+        'on YOUR subscription — governed (metadata-only egress) + traced, UNSANDBOXED; GlyphSpek holds no key.', { modal: true }, OPEN_CHAT);
+    if (confirm !== OPEN_CHAT) {
+        // Operator declined the launch gesture — nothing is opened or auto-run.
+        return;
+    }
+    await openGovernedTerminalSurface(context, output, 'chat', detected);
 }
 /**
  * Create + launch a TRUSTED governed run. SECURITY (sweep-19 High #3): this is the
