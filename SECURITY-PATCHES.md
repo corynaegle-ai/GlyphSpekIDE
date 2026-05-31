@@ -524,3 +524,100 @@ unique files**; the gate's per-pattern total is **50** (files matching multiple 
   If a future upstream pull adds a new vendored built-in carrying a telemetry constant, the gate
   will (correctly) FAIL as UNEXPECTED until that file is opened, confirmed dormant, and added to
   the allowlist with a `why-dormant` — that is the intended, auditable behavior.
+
+---
+
+## M4 — Escape-hatch discovery & classification
+
+- **Status:** `AUDIT` (2026-05-31). This is a discovery/classification deliverable, **not**
+  a patch — no workbench source is changed. It enumerates every surface that can run or
+  egress code OUTSIDE GlyphSpek's governance (or undermine the trust/trace claim) and
+  classifies each honestly. The full register, rationale, and recommended hardening per
+  milestone are in **`build/glyphspek/escape-hatch-audit.md`**; this section is the concise
+  summary the patch ledger requires.
+
+### Threat addressed
+
+GlyphSpek's claim is that it governs an agent's egress (metadata-only proxy) and produces an
+honest, tamper-evident trace under a strict trust vocabulary (`trusted` /
+`sandboxed-soft-egress` / `governed-unsandboxed` / `untrusted` / `refused`). An **escape
+hatch** is anything that lets code run/egress outside that governance while a user might still
+believe the session is governed — or that undermines the trace/verdict integrity. The
+highest-priority class is any hatch that creates a **false impression of governance**.
+
+### Load-bearing structural finding
+
+**The fork does NOT patch the stock Code-OSS execution surfaces.** Diffing `glyphspek` from its
+first GlyphSpek commit, the GlyphSpek `src/vs/**` changes are limited to branding/getting-started,
+the policy-source loader (PATCH-001), the agent-host Copilot/telemetry de-fang, and the embedded
+extension. The **integrated terminal, `tasks`/`launch` runners, debug adapters, workspace-trust,
+the `code`/`glyphspek` CLI, Remote-Tunnels / `serve-web`, settings sync, and the webview host are
+UNMODIFIED stock Code-OSS.** GlyphSpek's governance (egress proxy, sanitized env, trace, signed
+verdict) lives entirely in the **first-party extension + supervisor** and governs ONLY the
+runs/terminals/chat the extension itself creates. **Net: the GlyphSpek envelope is a per-run /
+per-terminal envelope inside an otherwise stock IDE — it is not whole-IDE confinement.** Most
+hatches below are therefore stock IDE capability *outside* the envelope, not fork bugs; they are
+acceptable for P0 only while the IDE never presents a stock surface as governed/trusted.
+
+### Classification summary
+
+| Classification | Count | Representative vectors |
+|---|---|---|
+| **PATCHED** (a fork/extension change closes it) | 7 | governed-terminal `strictEnv` ignores `terminal.integrated.env.*` (A5); machine-scope + global-only `inspect()` selection for `supervisorPath`/`trustedVerifierKeys`/`devSupervisorTrustKey`/`runtime`/`runOutputRoot`/`supervisorMode` (B1–B4); hash-pinned bundled supervisor (B2); first-party **webview-gesture gate** so `executeCommand` cannot mint a trusted run (C2/C4) |
+| **MITIGATED-SOFT** (reduced, soft-bypassable by design) | 5 | workspace shell profiles vs governed terminals (A4); workspace `policyPath` as reviewed policy-as-code (B5); Sovereign extension allowlist vs third-party capability (C1); settings-sync of non-load-bearing keys (E3); webview trust-display integrity (E4) |
+| **STOCK-DEFAULT-MITIGATED** (a stock default/gate reduces it) | 2 | `task.allowAutomaticTasks` defaults `'off'` + trust-gated (A2); workspace-trust enabled-by-default blocks auto-exec on untrusted-folder open (E6) |
+| **KNOWN-GAP / ACCEPTED-P0** (open, honest reason) | 8 | un-governed stock integrated terminal (A1); `launch.json` debug exec (A3); Developer-mode arbitrary extension capability + `openExternal`/port-forward (C1/C3); `--extensionDevelopmentPath` defeats the allowlist (E1); Remote-Tunnels/`serve-web` (E2); git-hook/npm-lifecycle on the stock surface (E5); un-governed activity absent from the trace (F1) |
+| **FUTURE-HARD-PLANE** (only the Firecracker hard-egress plane closes it) | 2 | raw-socket egress strips proxy env on the governed-unsandboxed terminal (D1) and the Docker-local soft-egress isolation path (D2) |
+
+### Top open gaps (highest product-trust risk)
+
+1. **A1 — the un-governed stock integrated terminal inside a "GlyphSpek IDE."** Governed env
+   applies only to extension-created terminals; a normal `Create New Terminal` is a full-network,
+   full-secret, un-governed shell. Not falsely badged today, but the brand implies governance.
+2. **C1/C3 (Developer mode) — arbitrary extension-host capability + `openExternal`/port-forward**
+   as un-governed exec/exfil channels; the ambient-extension warning meant to flag this is a
+   **stub, not wired**. Only Sovereign-mode allowlisting structurally contains it.
+3. **E2 — Remote-Tunnels / `serve-web` shipped unmodified** (remote control + remote-extension-host
+   execution outside the envelope). E1 (`--extensionDevelopmentPath`, defeats the Sovereign
+   allowlist for a local operator) is the close runner-up.
+
+### CIO-level flags (escalated, NOT silently accepted)
+
+- **CIO-FLAG-1 — "GlyphSpek IDE" is a per-run envelope inside a stock IDE, not a confined IDE.**
+  P0 can ship honestly only with explicit messaging that GlyphSpek governs the runs/terminals it
+  creates, not the whole IDE, and with the IDE never presenting a stock surface as governed. If
+  positioning implies whole-IDE confinement, this audit cannot support that claim in P0.
+- **CIO-FLAG-2 — the Sovereign hard-confinement story is only partly wired.** The
+  `AllowedExtensions` enforcement is stock-hard (PATCH-001 + fail-closed), but the ambient-extension
+  warning and the Sovereign default-settings overlay are **not wired**, and
+  `--extensionDevelopmentPath` / Remote-Tunnels are not blocked even in Sovereign. "Sovereign =
+  locked down" is not yet end-to-end true.
+- **CIO-FLAG-3 (honest, not a regression) — raw-socket egress is a soft boundary by design** (D1/D2);
+  a hard egress allowlist is the Firecracker remote plane. The trust vocabulary already handles this
+  (`governed-unsandboxed` / `sandboxed-soft-egress`, never product-trusted). Flagged only so it is
+  never re-described as enforcement in an external claim.
+
+### What is honestly closed (do not re-flag)
+
+The trust-redirection class is genuinely shut: a malicious **repository** cannot redirect the
+supervisor (B1/B2), inject a verifier trust root (B3), redirect runtime/output/mode (B4), defeat the
+governed-terminal env via `terminal.integrated.env.*` (A5/A4), or drive a third-party extension to
+mint a product-trusted run (C2/C4). Verdict/trace crypto is solid (`docs/threat-model.md` rows 7–8).
+The residual risk is overwhelmingly **un-governed stock IDE surfaces** (false impression of
+governance), not a redirectable GlyphSpek control.
+
+### Files
+
+- **`build/glyphspek/escape-hatch-audit.md`** — the full A–F register (vector, reachable?,
+  classification, rationale, recommended hardening + milestone). This M4 section is its summary.
+- Cross-checked against `docs/threat-model.md` (soft egress is proxy-only / raw-socket-bypassable;
+  hard allowlist = remote plane) and the standing memory facts (machine-scoped settings prevent
+  workspace redirection).
+
+### Rollback / rebase note
+
+- **Rollback:** delete `build/glyphspek/escape-hatch-audit.md` and this section. No app/runtime
+  impact (docs only).
+- **Rebase risk: NONE** — documentation only; no source touched. Re-audit when any stock surface
+  (terminal/task/debug/tunnel/extension-host) is patched, when the Sovereign overlay/ambient-warning
+  is wired, or when the Firecracker hard-egress plane lands (closes D1/D2).
