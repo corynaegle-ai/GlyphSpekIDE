@@ -503,6 +503,32 @@ var DockerSandboxRuntime = class {
   constructor(options = {}) {
     this.onEgressDecision = options.onEgressDecision;
   }
+  /**
+   * HONEST capability report for the trust gate (see SandboxCapabilities). The
+   * Docker runtime ALWAYS earns fs-isolation: the container sees only the mounted
+   * worktree + synthetic HOME, with no host path/secret/env reachable (the bytes
+   * are structurally absent), regardless of host backend.
+   *
+   * hardEgress is the honest, host-dependent part:
+   *   - network:'deny' maps to `--network none` — no interface, no route, no DNS —
+   *     a HARD container-level boundary no in-container process can defeat. So
+   *     hardEgress is TRUE for the deny posture on every backend.
+   *   - a network:{ allow } allowlist is enforced ONLY by an application-layer
+   *     proxy (HTTP_PROXY/HTTPS_PROXY). On the backend this runtime ships
+   *     (standard bridge / Colima NAT) a process can strip the proxy env or open a
+   *     raw socket and bypass it, so hardEgress is FALSE for the allow posture.
+   *
+   * A true default-DROP + allowlist (hardEgress under an `allow` spec) is the
+   * Firecracker remote-plane's network-namespace job — the deferred follow-on —
+   * NOT this Docker-local runtime. We report what we can structurally enforce, no
+   * more, so the trust gate never grants product `trusted` on a soft boundary.
+   */
+  capabilities(spec) {
+    return {
+      fsIsolated: true,
+      hardEgress: spec.network === "deny"
+    };
+  }
   async createSandbox(spec) {
     if (spec.network !== "deny" && spec.network.acknowledgeSoftEgress !== true) {
       throw softEgressNotAcknowledgedError();

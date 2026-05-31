@@ -200,6 +200,7 @@ exports.AUTONOMY_TIERS = [
 /** The full set of run-trust postures, for validation. */
 exports.RUN_TRUSTS = [
     'trusted',
+    'sandboxed-soft-egress',
     'governed-unsandboxed',
     'untrusted',
     'refused',

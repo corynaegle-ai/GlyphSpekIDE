@@ -55,6 +55,14 @@ var UNTRUSTED_PROVENANCE = [
 // ../spikes/p0-contracts/trace.ts
 var TRACE_EVENT_VERSION = 1;
 
+// ../spikes/p0-contracts/sandbox.ts
+function runtimeCapabilities(runtime, spec) {
+  if (typeof runtime.capabilities === "function") {
+    return runtime.capabilities(spec);
+  }
+  return { fsIsolated: false, hardEgress: false };
+}
+
 // ../spikes/p0-contracts/model.ts
 var DEFAULT_INDEX_RESIDENCY_POLICY = {
   residency: "memory-only",
@@ -361,9 +369,9 @@ function createTraceWriter(traceFilePath) {
   };
   return { path: traceFilePath, append };
 }
-function readTrace(path2) {
-  if (!existsSync(path2)) return [];
-  const raw = readFileSync(path2, "utf8");
+function readTrace(path3) {
+  if (!existsSync(path3)) return [];
+  const raw = readFileSync(path3, "utf8");
   const events = [];
   const lines = raw.split("\n");
   for (let i = 0; i < lines.length; i++) {
@@ -374,7 +382,7 @@ function readTrace(path2) {
       parsed = JSON.parse(line);
     } catch (err) {
       throw new Error(
-        `readTrace: invalid JSON on line ${i + 1} of ${path2}: ${err.message}`
+        `readTrace: invalid JSON on line ${i + 1} of ${path3}: ${err.message}`
       );
     }
     events.push(parsed);
@@ -583,18 +591,18 @@ function decide(policy, request) {
 function decideRaw(policy, request) {
   switch (request.tool) {
     case "file_read": {
-      const path2 = readPath(request.payload);
-      if (path2 !== void 0) {
-        if (anyGlobMatch(policy.deny.read_paths, path2)) return "deny";
-        if (anyGlobMatch(policy.allow.read_paths, path2)) return "allow";
+      const path3 = readPath(request.payload);
+      if (path3 !== void 0) {
+        if (anyGlobMatch(policy.deny.read_paths, path3)) return "deny";
+        if (anyGlobMatch(policy.allow.read_paths, path3)) return "allow";
       }
       return verbToDecision(policy.defaults.file_read);
     }
     case "file_write": {
-      const path2 = readPath(request.payload);
-      if (path2 !== void 0) {
-        if (anyGlobMatch(policy.deny.write_paths, path2)) return "deny";
-        if (anyGlobMatch(policy.allow.write_paths, path2)) return "allow";
+      const path3 = readPath(request.payload);
+      if (path3 !== void 0) {
+        if (anyGlobMatch(policy.deny.write_paths, path3)) return "deny";
+        if (anyGlobMatch(policy.allow.write_paths, path3)) return "allow";
       }
       return verbToDecision(policy.defaults.file_write);
     }
@@ -787,8 +795,8 @@ async function driveScriptedRun(opts) {
 function sinkEvents(sink) {
   const maybe = sink.events;
   if (Array.isArray(maybe)) return maybe;
-  const path2 = sink.path;
-  if (typeof path2 === "string") return readTrace(path2);
+  const path3 = sink.path;
+  if (typeof path3 === "string") return readTrace(path3);
   return [];
 }
 function signEphemeral(checks, overallVerdict, traceRootHash, injectedKey) {
@@ -797,8 +805,50 @@ function signEphemeral(checks, overallVerdict, traceRootHash, injectedKey) {
 }
 
 // ../spikes/p0-supervisor/terminal-session.ts
-import { join as join3 } from "node:path";
+import { join as join4 } from "node:path";
 import { generateKeyPairSync as generateKeyPairSync3 } from "node:crypto";
+
+// ../spikes/p0-sandbox/worktree.ts
+import { execFileSync } from "node:child_process";
+import * as fs from "node:fs";
+import * as path2 from "node:path";
+function createWorktree(repoPath, runId, intoDir) {
+  void runId;
+  fs.mkdirSync(path2.dirname(intoDir), { recursive: true });
+  execFileSync("git", ["-C", repoPath, "worktree", "add", "--detach", intoDir, "HEAD"], {
+    stdio: "pipe"
+  });
+  return { worktreeDir: intoDir };
+}
+function removeWorktree(repoPath, worktreeDir) {
+  try {
+    execFileSync("git", ["-C", repoPath, "worktree", "remove", "--force", worktreeDir], {
+      stdio: "pipe"
+    });
+  } catch {
+  }
+  fs.rmSync(worktreeDir, { recursive: true, force: true });
+  try {
+    execFileSync("git", ["-C", repoPath, "worktree", "prune"], { stdio: "pipe" });
+  } catch {
+  }
+}
+function createSyntheticHome(baseDir) {
+  const home = path2.join(baseDir, "home");
+  fs.mkdirSync(home, { recursive: true });
+  return home;
+}
+var DEFAULT_PATH = "/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin";
+function buildInjectedEnv(allow = []) {
+  const env = { PATH: DEFAULT_PATH };
+  for (const name of allow) {
+    const value = process.env[name];
+    if (value !== void 0) {
+      env[name] = value;
+    }
+  }
+  return env;
+}
 
 // ../spikes/p0-governed-cli/governed-terminal-proxy.ts
 import { randomUUID as randomUUID3 } from "node:crypto";
@@ -1233,13 +1283,19 @@ async function startGovernedTerminalProxy(opts) {
 }
 
 // ../spikes/p0-supervisor/terminal-session.ts
+function deriveSandboxTrust(caps) {
+  if (caps.fsIsolated && caps.hardEgress) return "trusted";
+  if (caps.fsIsolated) return "sandboxed-soft-egress";
+  return "governed-unsandboxed";
+}
 async function startTerminalSession(opts) {
   const { facts, emit } = opts;
   const now = opts.now ?? Date.now;
   const { runId, runDir } = facts;
   const lifecycle = opts.lifecycle ?? new RunLifecycle("created");
-  const sink = opts.sink ?? createTraceWriter(join3(runSubdirPath(runDir, "trace"), "trace.jsonl"));
+  const sink = opts.sink ?? createTraceWriter(join4(runSubdirPath(runDir, "trace"), "trace.jsonl"));
   const endpoints = opts.modelEndpoints ?? DEFAULT_MODEL_ENDPOINTS;
+  const isolation = opts.isolation;
   const allow = endpoints.map((e) => `${e.host}:${e.port ?? 443}`);
   const appendAndStream = (type, payload, source) => {
     const appended = sink.append({
@@ -1262,14 +1318,63 @@ async function startTerminalSession(opts) {
     const payload = { from, to, reason };
     appendAndStream("run_state_changed", payload, "policy");
   };
+  const egressProjector = (d) => {
+    const policy = {
+      tool: "network",
+      requestedCapability: `network:${d.host}:${d.port}`,
+      decision: d.decision,
+      provenanceLabel: "tool-output",
+      rule: d.decision === "allow" ? `egress allowed by allowlist (${d.kind})` : d.reason === "direct-ip" ? "egress denied: direct-IP literal (controlled-resolver bypass)" : d.reason === "no-target" ? "egress denied: no target host" : `egress denied by allowlist (${d.kind})`
+    };
+    appendAndStream("policy_decision", policy);
+    if (d.decision === "allow") {
+      const endpoint = classifyModelEndpoint(endpoints, d.host);
+      if (endpoint) {
+        const call = {
+          model: endpoint.model,
+          provider: endpoint.provider,
+          endpointHost: endpoint.host,
+          // Boundary observation: tokens/cost DELIBERATELY absent (we never decrypt).
+          observation: "metadata-only",
+          provenanceLabel: "tool-output"
+        };
+        appendAndStream("model_call", call);
+      }
+    }
+  };
+  let openedTrust = facts.creationTrust;
+  let openedRuntimeTrust = facts.runtimeTrust;
+  let isolationRuntime;
+  let isolationSpec;
+  if (isolation) {
+    isolationRuntime = isolation.runtimeFactory(egressProjector);
+    isolationSpec = {
+      runId,
+      // workdir/home filled in once the worktree is provisioned (below); the
+      // capability probe does not depend on them, so placeholders are fine and are
+      // overwritten before createSandbox.
+      workdir: "",
+      home: "",
+      env: {},
+      ...isolation.resourceLimits ? { resourceLimits: isolation.resourceLimits } : {},
+      // EXPLICIT soft-egress opt-in: the runtime's allowlist is application-layer on
+      // Docker-local, acknowledged here with eyes open (the derived posture reflects
+      // it honestly). network:'deny' would be hard but would also cut the actor off
+      // from its model endpoint entirely.
+      network: { allow, acknowledgeSoftEgress: true }
+    };
+    const caps = runtimeCapabilities(isolationRuntime, isolationSpec);
+    openedTrust = deriveSandboxTrust(caps);
+    openedRuntimeTrust = caps.fsIsolated ? "trusted" : "untrusted";
+  }
   emit({
     rev: RUN_EVENT_PROTOCOL_VERSION,
     runId,
     kind: "run_opened",
     actorType: facts.actorType,
-    trust: facts.creationTrust,
+    trust: openedTrust,
     runtimeProfile: facts.runtimeProfile,
-    runtimeTrust: facts.runtimeTrust,
+    runtimeTrust: openedRuntimeTrust,
     extensionPosture: facts.extensionPosture,
     cliFidelity: facts.cliFidelity,
     state: lifecycle.state
@@ -1300,6 +1405,36 @@ async function startTerminalSession(opts) {
     ...opts.denyDirectIp !== void 0 ? { denyDirectIp: opts.denyDirectIp } : {}
   });
   transition("executing", "governed terminal session live (proxy bound)");
+  let worktreeDir;
+  let sandbox;
+  if (isolation && isolationRuntime && isolationSpec) {
+    worktreeDir = createWorktree(
+      isolation.repoPath,
+      runId,
+      join4(runDir, "worktree")
+    ).worktreeDir;
+    const home = createSyntheticHome(join4(runDir, "home"));
+    const env = buildInjectedEnv(isolation.envAllow ?? []);
+    const spec = { ...isolationSpec, workdir: worktreeDir, home, env };
+    sandbox = await isolationRuntime.createSandbox(spec);
+    const requestedCapability = `command:${isolation.command[0]}`;
+    const toolStart = {
+      tool: "command",
+      requestedCapability,
+      provenanceLabel: "tool-output"
+    };
+    appendAndStream("tool_start", toolStart);
+    const startedAt = now();
+    const result = await sandbox.exec({ command: isolation.command });
+    const toolEnd = {
+      tool: "command",
+      exitCode: result.exitCode,
+      durationMs: now() - startedAt,
+      provenanceLabel: "tool-output",
+      stdoutLength: result.stdout.length
+    };
+    appendAndStream("tool_end", toolEnd);
+  }
   let stopped = false;
   let finalVerdict;
   const stop = async () => {
@@ -1307,6 +1442,15 @@ async function startTerminalSession(opts) {
     stopped = true;
     const health = proxy.traceHealth();
     await proxy.close();
+    if (sandbox) {
+      await sandbox.teardown().catch(() => void 0);
+    }
+    if (isolation && worktreeDir) {
+      try {
+        removeWorktree(isolation.repoPath, worktreeDir);
+      } catch {
+      }
+    }
     finalVerdict = finalizeTerminalRun({
       runId,
       sink,
@@ -1394,8 +1538,8 @@ function finalizeTerminalRun(opts) {
 function sinkEvents2(sink) {
   const maybe = sink.events;
   if (Array.isArray(maybe)) return maybe;
-  const path2 = sink.path;
-  if (typeof path2 === "string") return readTrace(path2);
+  const path3 = sink.path;
+  if (typeof path3 === "string") return readTrace(path3);
   return [];
 }
 function signTerminalVerdict(core, injectedKey) {
@@ -2234,11 +2378,13 @@ var BridgeServer = class {
       runtimeTrust: serverRun.runtimeIsolated ? "trusted" : "untrusted",
       extensionPosture: serverRun.request.extensionPosture,
       // Carry the creation-time posture faithfully into the run_opened badge. We
-      // drive trusted, untrusted (dev-runtime) AND governed-unsandboxed (the
-      // governed-terminal posture, sweep-23 #2) runs; only a truly unexpected
-      // value collapses to 'refused'. Never MISLABEL governed-unsandboxed as
-      // refused — product trust is still gated separately and strictly.
-      creationTrust: serverRun.trust === "trusted" || serverRun.trust === "governed-unsandboxed" || serverRun.trust === "untrusted" ? serverRun.trust : "refused",
+      // drive trusted, untrusted (dev-runtime), governed-unsandboxed (the
+      // governed-terminal SOFT posture, sweep-23 #2) AND sandboxed-soft-egress (the
+      // M7 isolation-path posture: real fs isolation, soft egress) runs; only a
+      // truly unexpected value collapses to 'refused'. Never MISLABEL a real
+      // sub-trusted posture as refused — product trust is still gated separately
+      // and strictly (=== 'trusted').
+      creationTrust: serverRun.trust === "trusted" || serverRun.trust === "sandboxed-soft-egress" || serverRun.trust === "governed-unsandboxed" || serverRun.trust === "untrusted" ? serverRun.trust : "refused",
       // Native runs do not carry CLI fidelity; a CLI adapter would set this from
       // the adapter's detected hook surface (per-tool-brokered vs boundary-only).
       cliFidelity: serverRun.request.actorType === "native" ? "n/a" : "per-tool-brokered"

@@ -12,6 +12,6 @@ exports.BUNDLED_BRIDGE_SERVER_SHA256 = exports.BUNDLED_SUPERVISOR_SHA256 = void 
  * dist/extension.js, the gates cannot be defeated by editing a sibling file —
  * the bundle must be re-built (re-running this script regenerates the hashes).
  */
-exports.BUNDLED_SUPERVISOR_SHA256 = '8f0a5215c248aa7c9b00fe0d4893a88e08b9758366a90e9ab288dc51a96e8ca1';
-exports.BUNDLED_BRIDGE_SERVER_SHA256 = 'c62d86f8cd780fd303186bc76dc3501d54000a62e071188af2124be46642ba84';
+exports.BUNDLED_SUPERVISOR_SHA256 = 'fe14020b8732cae22e85c2f5b354c4757c86ed81fdb8ba1e5c836ac46634de24';
+exports.BUNDLED_BRIDGE_SERVER_SHA256 = 'b5a101d03dde7066614cbe04ed9a4ef8f9044e869e0632846b3b043a8e04ea1b';
 //# sourceMappingURL=supervisorHash.js.map
