@@ -11,9 +11,10 @@
 # used only for the Windows .ico; without it that step is skipped with a warning so the
 # rest still succeeds. Re-run on a machine with ImageMagick (or in CI) to refresh the .ico.
 #
-# NOTE: the current master is the GlyphSpek lockup (G-mark + wordmark) padded to square.
-# Replace resources/glyphspek/glyphspek-icon-master.png with a dedicated 1024x1024 G-mark
-# (no wordmark) for crisp rendering at small sizes, then re-run this script.
+# NOTE: the current master is the wordmark-FREE GlyphSpek G-mark, cropped so the mark
+# fills ~73% of the 1024 canvas for a strong Dock presence at small sizes. The prior
+# master is kept alongside as glyphspek-icon-master-prev.png for fallback. To adjust the
+# mark size, re-crop the master and re-run this script.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
