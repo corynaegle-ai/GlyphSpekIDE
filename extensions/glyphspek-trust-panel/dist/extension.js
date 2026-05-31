@@ -64,6 +64,8 @@ const governedTerminalEnv_1 = require("./governedTerminalEnv");
 const agentCli_1 = require("./agentCli");
 const agentLaunch_1 = require("./agentLaunch");
 const agentBinaryIdentity_1 = require("./agentBinaryIdentity");
+const chatTerminalView_1 = require("./chatTerminalView");
+const ptyHost_1 = require("./ptyHost");
 const inlineScript_1 = require("./inlineScript");
 const bridgeProtocol_1 = require("./bridgeProtocol");
 const policyHash_1 = require("./policyHash");
@@ -1100,6 +1102,16 @@ function activate(context) {
         treeDataProvider: runsTree,
         showCollapseAll: false,
     }));
+    // ACTIVITY-BAR "Chat" view (the SIDEBAR "chat that's a terminal"). A webview-view
+    // hosting an xterm.js terminal connected to a real PTY running the user's
+    // interactive `claude`, governed. Reuses the entire governed stack (bridge session,
+    // forced-proxy + secret-firewall env, run/event projection into the Trust Panel +
+    // Governed Runs view). The PTY backend is node-pty (proven in spikes/p0-governed-pty).
+    const chatViewOutput = vscode.window.createOutputChannel('GlyphSpek Chat');
+    context.subscriptions.push(chatViewOutput);
+    const chatViewProvider = new chatTerminalView_1.ChatTerminalViewProvider(context.extensionUri, buildChatTerminalDeps(context, chatViewOutput), chatViewOutput);
+    context.subscriptions.push(vscode.window.registerWebviewViewProvider(chatTerminalView_1.ChatTerminalViewProvider.viewType, chatViewProvider, { webviewOptions: { retainContextWhenHidden: true } }));
+    context.subscriptions.push({ dispose: () => chatViewProvider.dispose() });
     // Tree-row click → focus the Trust Panel on that run (view-only navigation;
     // confers no trust and starts nothing). Opens/reveals the panel, then selects
     // the run; the panel buffers the selection if the webview is still booting.
@@ -1787,6 +1799,144 @@ async function openGovernedChat(context, output) {
         return;
     }
     await openGovernedTerminalSurface(context, output, 'chat', detected);
+}
+/* ================================================================== *
+ * CHAT TERMINAL VIEW WIRING (M7 — the SIDEBAR "chat that's a terminal").
+ *
+ * The activity-bar `glyphspek.chat` webview-view hosts an xterm.js terminal connected
+ * to a real PTY running the user's interactive `claude`, governed. Unlike
+ * `glyphspek.openChat` (which opens a VS Code terminal), this surface lives IN the
+ * sidebar and OWNS its own terminal — the shape the product wants. It reuses the
+ * ENTIRE governed stack: startGovernedTerminalSession (terminal/start, run/event
+ * projection into the Trust Panel + Governed Runs sidebar), buildGovernedTerminalEnv
+ * (secret firewall + forced proxy + preserved HOME for the ~/.claude subscription),
+ * and the resolveAgentLaunch binary-swap guard. The PTY backend is node-pty (proven in
+ * spikes/p0-governed-pty); see ptyHost.ts for the load + exec-bit repair.
+ * ================================================================== */
+/**
+ * Candidate base dirs to resolve node-pty from, in order:
+ *   (1) the dev spikes root, if glyphspek.supervisorPath points at it (the proven spike
+ *       install lives there — keeps `npm test`/dev working);
+ *   (2) the extension's own install dir (in case a node-pty is ever vendored there);
+ *   (3) the RUNNING app's bundled node_modules — Code-OSS already ships a correct
+ *       Electron-ABI node-pty there (its integrated terminal uses it). This is the
+ *       DISTRIBUTION path: in the packaged GlyphSpek.app the extension host is Electron,
+ *       so a node-built node-pty wouldn't load and the extension ships none; resolving
+ *       the app's OWN node-pty gives the right-ABI module for free.
+ * The first that resolves wins; if none do, the chat surfaces an honest empty state.
+ *
+ * The app node_modules is derived TWO ways (deduped) for robustness: vscode.env.appRoot
+ * (the canonical app dir) and process.execPath (works even if appRoot is unset, e.g. in
+ * the ext-host test harness). deriveAppNodeModulesDir is pure + unit-tested.
+ */
+function resolveNodePtyBaseDirs(context) {
+    const bases = [];
+    const supervisorPath = vscode.workspace
+        .getConfiguration('glyphspek')
+        .get('supervisorPath', '');
+    if (supervisorPath && supervisorPath.trim()) {
+        bases.push(supervisorPath.trim());
+    }
+    bases.push(context.extensionUri.fsPath);
+    // (3) The running app's bundled node_modules (correct Electron ABI, ships node-pty).
+    const appRoot = vscode.env.appRoot; // e.g. .../GlyphSpek.app/Contents/Resources/app
+    if (appRoot && appRoot.trim()) {
+        bases.push(path.join(appRoot.trim(), 'node_modules'));
+    }
+    const fromExec = (0, ptyHost_1.deriveAppNodeModulesDir)(process.execPath);
+    if (fromExec && !bases.includes(fromExec)) {
+        bases.push(fromExec);
+    }
+    return bases;
+}
+/**
+ * Build the {@link ChatTerminalDeps} the sidebar Chat view needs. The view is pure
+ * transport (xterm ⇄ PTY); this factory supplies the two host-side capabilities:
+ *   - startSession(): detect the agent, apply the SAME binary-swap + workspace-local
+ *     guards as openGovernedChat, start the governed bridge session, and return the
+ *     proxy url + canonical launch path the view runs under the PTY.
+ *   - resolveNodePty(): load the proven node-pty backend (or undefined → empty state).
+ */
+function buildChatTerminalDeps(context, output) {
+    return {
+        resolveNodePty() {
+            return (0, ptyHost_1.loadNodePty)(resolveNodePtyBaseDirs(context));
+        },
+        async startSession() {
+            output.show(true);
+            const detected = (0, agentCli_1.detectAgentCli)();
+            if (!detected) {
+                void vscode.window.showWarningMessage('GlyphSpek Chat runs your interactive Claude Code in a governed session. Install Claude ' +
+                    'Code and run `claude login` (or install Codex), then start the chat again.');
+                return undefined;
+            }
+            // BINARY-SWAP GUARD (sweep-27/28). Canonicalize the detected path and REFUSE a
+            // workspace-local resolution (the red flag for a planted shim) — exactly as the
+            // openGovernedChat command does. The PTY runs the EXACT canonical path.
+            const launch = (0, agentLaunch_1.resolveAgentLaunch)(detected.path, workspaceFolderPaths());
+            if (!launch.trustedForAutoRun) {
+                void vscode.window.showWarningMessage(`GlyphSpek Chat will NOT auto-run your '${detected.agent}': it resolves to ` +
+                    `${launch.launchPath}, which is INSIDE your workspace. A workspace-local CLI could be ` +
+                    'a swapped/planted binary. Run a trusted agent in a Governed Terminal yourself if you intend to.');
+                return undefined;
+            }
+            const actorType = detected.agent === 'claude' ? 'claude-code-cli' : 'codex-cli';
+            const request = assembleGovernedTerminalRequest(context, output, actorType);
+            if (!request)
+                return undefined;
+            // Capture the binary identity immediately before launch (TOCTOU) and thread it
+            // additively into the run request → run_opened + trace.
+            const binary = (0, agentBinaryIdentity_1.captureAgentBinaryIdentity)(launch.launchPath);
+            request.actorBinary = {
+                path: binary.path,
+                ...(binary.sha256 ? { sha256: binary.sha256 } : {}),
+                ...(binary.sizeBytes !== undefined ? { sizeBytes: binary.sizeBytes } : {}),
+                ...(binary.mtimeMs !== undefined ? { mtimeMs: binary.mtimeMs } : {}),
+                ...(binary.version ? { version: binary.version } : {}),
+            };
+            if (binary.version)
+                request.actorVersion = binary.version;
+            // Open + reveal the Trust Panel so it is ready for the LIVE run/event stream.
+            const panel = TrustPanel.createOrShow(context.extensionUri, getWebviewGestureGate());
+            panel.reveal();
+            const start = await (0, supervisorBridgeRunner_1.startGovernedTerminalSession)({
+                bridgeServerPath: resolveBundledBridgeServerPath(context),
+                extensionVersion: resolveExtensionVersion(context),
+                runsBase: resolveRunsBase(),
+                request,
+                output,
+                onRunEvent: (raw) => panel.postRunEvent(raw),
+            });
+            if (!start.started || !start.session || !start.proxyUrl || !start.runId) {
+                void vscode.window.showErrorMessage(`GlyphSpek Chat: could not start a governed session — ${start.message}`);
+                return undefined;
+            }
+            const session = start.session;
+            let stopped = false;
+            return {
+                runId: start.runId,
+                proxyUrl: start.proxyUrl,
+                launchPath: launch.launchPath,
+                args: [],
+                cwd: request.workspaceRoot,
+                async stop() {
+                    if (stopped)
+                        return;
+                    stopped = true;
+                    const result = await session.stop();
+                    if (result.finalized && result.verdict) {
+                        const degraded = result.verdict.assurance === 'degraded';
+                        output.appendLine(`[chat] governed run ${start.runId} finalized — ${result.verdict.overallVerdict.toUpperCase()} ` +
+                            `(${degraded ? 'DEGRADED — lower assurance' : 'assurance: full'}). ` +
+                            'Governed + traced, metadata-only, UNSANDBOXED — not product-trusted.');
+                    }
+                    else {
+                        output.appendLine(`[chat] governed run ${start.runId} did not finalize — ${result.message}`);
+                    }
+                },
+            };
+        },
+    };
 }
 /**
  * Create + launch a TRUSTED governed run. SECURITY (sweep-19 High #3): this is the
