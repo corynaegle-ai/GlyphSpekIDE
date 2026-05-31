@@ -15,6 +15,16 @@
 #       Copilot can ship as a node_modules runtime dependency even when no
 #       extensions/copilot folder exists, so scanning extensions/ alone is NOT a
 #       sufficient "ships no Copilot" guarantee.
+#   (C) Chains build/glyphspek/verify-embedded-extension.sh — the source<->embedded
+#       conformance gate (command IDs, activationEvents, dist/*.js,
+#       dist-supervisor/*.mjs, pinned supervisor hashes).
+#   (D) Chains build/glyphspek/sync-embedded-extension.sh --check --no-build — the
+#       media/** drift gate. (C) does NOT compare media/**, so the embedded Trust
+#       Panel webview (media/app.js, live.js, chat.js, index.html, CSS, icons/*.svg
+#       — the verifier display, failure-state UI, live trust-posture text) could go
+#       stale/missing while (C) stays green. --check is read-only (writes nothing)
+#       and --no-build verifies the embedded copy against the already-built source
+#       artifacts WITHOUT rebuilding source, keeping this gate read-only.
 #
 # USAGE
 #   build/glyphspek/verify-bundled-extensions.sh [TARGET_DIR]
@@ -176,8 +186,35 @@ else
   echo
 fi
 
+# ---- chain the media/** drift gate (Sweep-24 #2) ----------------------------
+# verify-embedded-extension.sh above compares command IDs, activationEvents,
+# dist/*.js, dist-supervisor/*.mjs, and the pinned supervisor hashes — but it does
+# NOT compare the media/** tree. The embedded media/ holds the Trust Panel webview
+# (media/app.js, live.js, chat.js, index.html, CSS, media/icons/*.svg) that renders
+# the verifier display, failure-state UI, and live trust-posture text. Stale/missing
+# media could ship while the conformance gate stays green. The reproducible sync
+# script already has a media-aware verify mode that recursively compares media/**
+# (and the rest of the synced surfaces) and exits non-zero on ANY drift; run it here
+# in --check (read-only, writes nothing) + --no-build (do NOT rebuild source; verify
+# the embedded copy against the already-built source artifacts) so media drift is
+# release-blocking. This subgate is read-only: it never touches the source or the
+# embedded copy.
+media_sync_fail=0
+SYNC_CHECK="$REPO_ROOT/build/glyphspek/sync-embedded-extension.sh"
+if [ -f "$SYNC_CHECK" ]; then
+  echo "--- source<->embedded media/** drift gate (sync --check --no-build) ---"
+  if ! bash "$SYNC_CHECK" --check --no-build; then
+    media_sync_fail=1
+  fi
+  echo
+else
+  echo "WARN: sync-embedded-extension.sh not found at $SYNC_CHECK —" >&2
+  echo "      the embedded media/** tree is NOT being checked for drift vs source." >&2
+  echo
+fi
+
 echo "=== verdict ==="
-if [ "$violations" -gt 0 ] || [ "$copilot_runtime_fail" -gt 0 ] || [ "$embedded_conformance_fail" -gt 0 ]; then
+if [ "$violations" -gt 0 ] || [ "$copilot_runtime_fail" -gt 0 ] || [ "$embedded_conformance_fail" -gt 0 ] || [ "$media_sync_fail" -gt 0 ]; then
   if [ "$violations" -gt 0 ]; then
     echo "RESULT: FAIL — $violations denylisted extension(s) shipped in the packaged app:"
     printf '%s' "$matched_list" | sed '/^$/d' | sed 's/^/        - extensions\//'
@@ -191,6 +228,13 @@ if [ "$violations" -gt 0 ] || [ "$copilot_runtime_fail" -gt 0 ] || [ "$embedded_
     echo "RESULT: FAIL — the embedded GlyphSpek extension drifted from its source"
     echo "        (see the source<->embedded conformance gate above). Re-sync with the"
     echo "        canonical command (do NOT copy files by hand):"
+    echo "            bash build/glyphspek/sync-embedded-extension.sh"
+  fi
+  if [ "$media_sync_fail" -gt 0 ]; then
+    echo "RESULT: FAIL — the embedded GlyphSpek media/** tree (Trust Panel webview:"
+    echo "        verifier display, failure-state UI, live trust-posture text, icons)"
+    echo "        drifted from its source (see the media/** drift gate above). Re-sync"
+    echo "        with the canonical command (do NOT copy files by hand):"
     echo "            bash build/glyphspek/sync-embedded-extension.sh"
   fi
   exit 1

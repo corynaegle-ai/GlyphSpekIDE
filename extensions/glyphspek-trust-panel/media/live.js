@@ -458,6 +458,52 @@
     return b;
   }
 
+  /**
+   * SHARED, EXHAUSTIVE creation-trust → badge map (sweep-24 #3). EVERY RunTrust
+   * value MUST appear here so a new posture cannot silently render without a badge.
+   * `productTrusted: false` on a posture documents that it is NEVER shown as
+   * product-trusted. Amber postures (governed-unsandboxed, sandboxed-soft-egress) are
+   * governed-but-not-hard; 'trusted' is the only product-trust-eligible posture (and
+   * even then only "pending gate"); untrusted/refused are failure-red.
+   */
+  var CREATION_TRUST_BADGE = {
+    'trusted': {
+      className: 'creation-trusted',
+      text: 'creation: trusted (pending gate)',
+      productTrusted: true,
+    },
+    'sandboxed-soft-egress': {
+      className: 'creation-sandboxed-soft-egress',
+      text: 'Sandboxed (soft egress) — not hard containment',
+      productTrusted: false,
+    },
+    'governed-unsandboxed': {
+      className: 'creation-governed-unsandboxed',
+      text: 'Governed (soft) — metadata-only, not sandboxed',
+      productTrusted: false,
+    },
+    'untrusted': {
+      className: 'creation-untrusted',
+      text: 'creation: UNTRUSTED',
+      productTrusted: false,
+    },
+    'refused': {
+      className: 'creation-untrusted',
+      text: 'creation: REFUSED',
+      productTrusted: false,
+    },
+  };
+
+  /**
+   * Resolve a creation-trust posture to its badge via the shared exhaustive map.
+   * Returns null only for an absent/unknown posture (no creation badge rendered),
+   * which the golden test asserts never happens for a real RunTrust value.
+   */
+  function creationTrustBadge(ct) {
+    if (!ct) return null;
+    return CREATION_TRUST_BADGE[ct] || null;
+  }
+
   function renderBadges(view) {
     var root = document.getElementById('live-badges');
     if (!root) return;
@@ -482,26 +528,13 @@
       : 'fidelity: n/a (native)';
     root.appendChild(el('span', { className: 'trust-badge ' + fidClass, text: fidText }));
 
-    // Creation-trust badge (sweep-23 #2). Surfaces the run-creation posture honestly.
-    // A GOVERNED TERMINAL session (M7) settles into 'governed-unsandboxed': governed +
-    // traced but the SOFT, metadata-only, UNSANDBOXED boundary — NEVER product-trusted.
-    // It is shown as its own amber badge so a reviewer cannot mistake it for trusted.
-    var ct = b.creationTrust;
-    if (ct === 'governed-unsandboxed') {
-      root.appendChild(el('span', {
-        className: 'trust-badge creation-governed-unsandboxed',
-        text: 'Governed (soft) — metadata-only, not sandboxed',
-      }));
-    } else if (ct === 'untrusted' || ct === 'refused') {
-      root.appendChild(el('span', {
-        className: 'trust-badge creation-untrusted',
-        text: 'creation: ' + ct.toUpperCase(),
-      }));
-    } else if (ct === 'trusted') {
-      root.appendChild(el('span', {
-        className: 'trust-badge creation-trusted',
-        text: 'creation: trusted (pending gate)',
-      }));
+    // Creation-trust badge (sweep-23 #2, sweep-24 #3). Surfaces the run-creation
+    // posture honestly. The label/CSS for EVERY RunTrust value lives in the shared
+    // exhaustive CREATION_TRUST_BADGE map below, so a NEW posture cannot silently
+    // fall through with no badge (the sandboxed-soft-egress gap this fix closes).
+    var ctBadge = creationTrustBadge(b.creationTrust);
+    if (ctBadge) {
+      root.appendChild(el('span', { className: 'trust-badge ' + ctBadge.className, text: ctBadge.text }));
     }
 
     // Actor + creation-trust badge.
@@ -810,10 +843,31 @@
       case 'tool_start': return p.argv ? '$ ' + argvToString(p.argv) : 'tool=' + p.tool;
       case 'tool_end': return (p.argv ? '$ ' + argvToString(p.argv) : 'tool=' + p.tool) + '   exitCode=' + (p.exitCode == null ? '?' : p.exitCode);
       case 'redaction': return 'location=' + p.location + '   reason=' + p.reason + '   (value never recorded)';
-      case 'model_call': return 'model=' + p.model + '   tokens=' + (p.inputTokens || 0) + ' in / ' + (p.outputTokens || 0) + ' out';
+      case 'model_call': return summarizeModelCall(p);
       case 'actor_claimed_success': return 'actor claims success (NOT a verdict)';
       default: return JSON.stringify(p);
     }
+  }
+
+  /**
+   * Summarize a model_call event HONESTLY (sweep-24 #1). A metadata-only boundary
+   * observation against a BROAD-WEB origin (e.g. chatgpt.com) is host-only evidence:
+   * the proxy cannot see the TLS path, so a host match is WEAK proof this egress was
+   * actually a model call. We label it as LOWER assurance rather than presenting it
+   * identically to a narrow-API (api.*) model call. A brokered/decrypted call (no
+   * 'metadata-only' observation) keeps the full token summary.
+   */
+  function summarizeModelCall(p) {
+    var base = 'model=' + p.model;
+    if (p.observation === 'metadata-only') {
+      // Boundary observation: tokens absent by construction; show byte counts.
+      var bytes = 'bytes=' + (p.bytesUp || 0) + '↑ / ' + (p.bytesDown || 0) + '↓';
+      var assurance = p.originAssurance === 'broad-web'
+        ? '   LOWER ASSURANCE: host-only evidence — broad origin, path not verified'
+        : '   metadata-only (boundary): host-match evidence';
+      return base + '   ' + bytes + assurance;
+    }
+    return base + '   tokens=' + (p.inputTokens || 0) + ' in / ' + (p.outputTokens || 0) + ' out';
   }
 
   function renderFiles(view) {
@@ -1032,6 +1086,13 @@
         var v = runs[runId];
         return v ? deriveTrustSummary(v) : null;
       },
+      // Exposed for the webview render tests (sweep-24 #1, #3): the SHARED exhaustive
+      // creation-trust badge map + resolver, and the trace-event summarizer (so the
+      // broad-web lower-assurance model_call label and the sandboxed-soft-egress badge
+      // are asserted on the REAL panel code, not a re-implementation).
+      CREATION_TRUST_BADGE: CREATION_TRUST_BADGE,
+      creationTrustBadge: creationTrustBadge,
+      summarizeLive: summarizeLive,
     };
   }
 

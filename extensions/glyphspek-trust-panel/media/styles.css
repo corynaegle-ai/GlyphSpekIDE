@@ -867,6 +867,13 @@ input[type="file"] {
   border-color: var(--warn);
   background: rgba(217, 164, 65, 0.12);
 }
+/* sandboxed-soft-egress (sweep-24 #3): real fs isolation but SOFT egress — strictly
+   stronger than governed-unsandboxed, still amber + NEVER product-trusted. */
+.creation-sandboxed-soft-egress {
+  color: var(--warn);
+  border-color: var(--warn);
+  background: rgba(217, 164, 65, 0.12);
+}
 .creation-untrusted {
   color: var(--fail);
   border-color: var(--fail);

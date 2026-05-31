@@ -1194,14 +1194,34 @@ function originFormPath(rawUrl) {
 }
 
 // ../spikes/p0-governed-cli/governed-terminal-proxy.ts
+var DEFAULT_ORIGIN_ASSURANCE = "narrow-api";
 var DEFAULT_MODEL_ENDPOINTS = [
-  { host: "api.anthropic.com", port: 443, provider: "anthropic", model: "anthropic-model (boundary)" },
-  { host: "api.openai.com", port: 443, provider: "openai", model: "openai-model (boundary)" },
+  // NARROW provider API origins: a dedicated host that serves essentially nothing
+  // but the model API, so a host match is STRONG model-call evidence.
+  { host: "api.anthropic.com", port: 443, provider: "anthropic", model: "anthropic-model (boundary)", originAssurance: "narrow-api" },
+  { host: "api.openai.com", port: 443, provider: "openai", model: "openai-model (boundary)", originAssurance: "narrow-api" },
+  // Codex CLI on a ChatGPT SUBSCRIPTION sign-in (the common case — see
+  // docs/governed-terminal.md §5) does NOT hit api.openai.com: it routes model calls
+  // through chatgpt.com/backend-api/codex/responses, tied to the user's ChatGPT plan
+  // rate limits. Without this endpoint, a subscription-Codex run's egress to
+  // chatgpt.com would be DENIED by the allowlist (it could not reach its model) and
+  // its calls would not classify as model_call metadata. We classify the HOST only
+  // (metadata-only; we never read the /backend-api path off the encrypted wire), pinned
+  // :443. API-KEY Codex auth uses api.openai.com (already classified above).
+  //
+  // BUT chatgpt.com is a BROAD consumer origin (web app, auth, assets, telemetry) —
+  // the model API is only ONE path under it, and the metadata-only proxy cannot see
+  // the path. So a host match here is WEAK model-call evidence: marked 'broad-web' so
+  // the boundary model_call carries lower assurance and the Trust Panel labels it
+  // honestly (host-only evidence, path not verified). We keep it (functionally
+  // required for subscription Codex) but never over-claim it as a narrow-API call.
+  { host: "chatgpt.com", port: 443, provider: "openai", model: "codex-model (boundary)", originAssurance: "broad-web" },
   {
     host: "generativelanguage.googleapis.com",
     port: 443,
     provider: "google",
-    model: "gemini-model (boundary)"
+    model: "gemini-model (boundary)",
+    originAssurance: "narrow-api"
   }
 ];
 function classifyModelEndpoint(endpoints, host) {
@@ -1253,6 +1273,11 @@ async function startGovernedTerminalProxy(opts) {
           bytesDown: summary.bytesDown,
           // tokens/cost are DELIBERATELY ABSENT — metadata-only cannot see them.
           observation: "metadata-only",
+          // How strong the host-match is as model-call evidence (sweep-24 #1). A
+          // broad-web origin (chatgpt.com) is HOST-ONLY evidence — the path is not
+          // visible in metadata mode — so it is carried as lower assurance and the
+          // Trust Panel labels it accordingly. Default narrow-api when unset.
+          originAssurance: endpoint.originAssurance ?? DEFAULT_ORIGIN_ASSURANCE,
           provenanceLabel
         };
         emit("model_call", payload);
@@ -1336,6 +1361,9 @@ async function startTerminalSession(opts) {
           endpointHost: endpoint.host,
           // Boundary observation: tokens/cost DELIBERATELY absent (we never decrypt).
           observation: "metadata-only",
+          // Host-match evidence strength (sweep-24 #1): a broad-web origin is
+          // host-only evidence (path unverified in metadata mode). Default narrow-api.
+          originAssurance: endpoint.originAssurance ?? DEFAULT_ORIGIN_ASSURANCE,
           provenanceLabel: "tool-output"
         };
         appendAndStream("model_call", call);
@@ -1407,36 +1435,84 @@ async function startTerminalSession(opts) {
   transition("executing", "governed terminal session live (proxy bound)");
   let worktreeDir;
   let sandbox;
-  if (isolation && isolationRuntime && isolationSpec) {
-    worktreeDir = createWorktree(
-      isolation.repoPath,
-      runId,
-      join4(runDir, "worktree")
-    ).worktreeDir;
-    const home = createSyntheticHome(join4(runDir, "home"));
-    const env = buildInjectedEnv(isolation.envAllow ?? []);
-    const spec = { ...isolationSpec, workdir: worktreeDir, home, env };
-    sandbox = await isolationRuntime.createSandbox(spec);
-    const requestedCapability = `command:${isolation.command[0]}`;
-    const toolStart = {
-      tool: "command",
-      requestedCapability,
-      provenanceLabel: "tool-output"
-    };
-    appendAndStream("tool_start", toolStart);
-    const startedAt = now();
-    const result = await sandbox.exec({ command: isolation.command });
-    const toolEnd = {
-      tool: "command",
-      exitCode: result.exitCode,
-      durationMs: now() - startedAt,
-      provenanceLabel: "tool-output",
-      stdoutLength: result.stdout.length
-    };
-    appendAndStream("tool_end", toolEnd);
-  }
   let stopped = false;
   let finalVerdict;
+  if (isolation && isolationRuntime && isolationSpec) {
+    let toolStarted = false;
+    try {
+      worktreeDir = createWorktree(
+        isolation.repoPath,
+        runId,
+        join4(runDir, "worktree")
+      ).worktreeDir;
+      const home = createSyntheticHome(join4(runDir, "home"));
+      const env = buildInjectedEnv(isolation.envAllow ?? []);
+      const spec = { ...isolationSpec, workdir: worktreeDir, home, env };
+      sandbox = await isolationRuntime.createSandbox(spec);
+      const requestedCapability = `command:${isolation.command[0]}`;
+      const toolStart = {
+        tool: "command",
+        requestedCapability,
+        provenanceLabel: "tool-output"
+      };
+      appendAndStream("tool_start", toolStart);
+      toolStarted = true;
+      const startedAt = now();
+      const result = await sandbox.exec({ command: isolation.command });
+      const toolEnd = {
+        tool: "command",
+        exitCode: result.exitCode,
+        durationMs: now() - startedAt,
+        provenanceLabel: "tool-output",
+        stdoutLength: result.stdout.length
+      };
+      appendAndStream("tool_end", toolEnd);
+    } catch (err) {
+      const reason = err instanceof Error ? err.message : String(err);
+      try {
+        const refusal = {
+          tool: "command",
+          requestedCapability: `command:${isolation.command[0]}`,
+          decision: "deny",
+          provenanceLabel: "tool-output",
+          rule: `isolation provisioning failed/refused: ${reason}`
+        };
+        appendAndStream("policy_decision", refusal, "policy");
+        if (toolStarted) {
+          const toolEndFail = {
+            tool: "command",
+            exitCode: -1,
+            durationMs: 0,
+            provenanceLabel: "tool-output",
+            stdoutLength: 0
+          };
+          appendAndStream("tool_end", toolEndFail);
+        }
+      } catch {
+      }
+      await proxy.close();
+      if (sandbox) {
+        await sandbox.teardown().catch(() => void 0);
+      }
+      if (worktreeDir) {
+        try {
+          removeWorktree(isolation.repoPath, worktreeDir);
+        } catch {
+        }
+      }
+      finalVerdict = finalizeTerminalRun({
+        runId,
+        sink,
+        lifecycle,
+        degraded: true,
+        emit,
+        now,
+        ...opts.verifierPrivateKey ? { verifierPrivateKey: opts.verifierPrivateKey } : {}
+      });
+      stopped = true;
+      throw err instanceof Error ? err : new Error(reason);
+    }
+  }
   const stop = async () => {
     if (stopped && finalVerdict) return finalVerdict;
     stopped = true;
