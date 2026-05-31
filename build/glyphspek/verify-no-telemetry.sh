@@ -18,15 +18,71 @@
 #     ../VSCode-darwin-arm64/GlyphSpek.app   (packaged build, relative to repo root)
 #     ./out                                   (dev build)
 #
+# CLASSIFICATION (why this is a PASS, not a perpetual REVIEW)
+#   Every HARD endpoint hit is classified against an inventoried allowlist
+#   (build/glyphspek/vendored-telemetry-allowlist.json):
+#     - VENDORED-DORMANT: the hit is in a Microsoft-authored built-in / the
+#       vendored @microsoft/1ds telemetry SDK / core out/ that Code-OSS ships,
+#       where the endpoint is a DORMANT string constant (or a localized doc-link
+#       description). GlyphSpek introduces no telemetry; telemetry is OFF at the
+#       product level (no aiConfig/enableTelemetry/aiKey; gallery=open-vsx;
+#       no updateUrl). These are inventoried + expected → they do NOT fail.
+#     - GlyphSpek-INTRODUCED / UNEXPECTED: a HARD hit whose path is NOT in the
+#       allowlist (e.g. the embedded glyphspek-trust-panel extension, product.json,
+#       or any new/GlyphSpek-authored code). This HARD-FAILS — GlyphSpek must
+#       introduce zero telemetry.
+#   Result: PASS (with an inventoried accounting) when the only hits are the
+#   known vendored-dormant set; FAIL the instant a telemetry string appears
+#   outside that inventory.
+#
 # EXIT CODES
-#   0  = no Microsoft telemetry/marketplace endpoints found (CDN-only matches are
-#        reported as WARN, not failure — see KNOWN_SOFT below).
-#   1  = at least one HARD telemetry/marketplace endpoint found in the build.
+#   0  = no UNEXPECTED telemetry/marketplace endpoints found. Either nothing
+#        matched, or every HARD hit is an inventoried vendored-dormant file
+#        (CDN-only matches are reported as WARN — see SOFT below).
+#   1  = at least one UNEXPECTED HARD hit (GlyphSpek-introduced or not yet
+#        inventoried), OR a denylisted bundled extension. This is a real finding.
 #   2  = target dir not found / nothing to scan.
 #
 set -uo pipefail
 
 REPO_ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
+
+# ---- vendored-telemetry allowlist (inventoried, auditable) -------------------
+# Path globs (app-relative) of files that may legitimately contain a HARD
+# endpoint string because it is a dormant vendored-upstream constant. Loaded
+# from the checked-in JSON inventory so the list is reviewable in git. A
+# trailing /** matches any descendant path.
+ALLOWLIST_JSON="$REPO_ROOT/build/glyphspek/vendored-telemetry-allowlist.json"
+VENDORED_ALLOW=()
+if [ -f "$ALLOWLIST_JSON" ]; then
+  # Extract "pattern" values without requiring jq (portable grep/sed).
+  while IFS= read -r p; do
+    [ -n "$p" ] && VENDORED_ALLOW+=("$p")
+  done < <(grep -oE '"pattern"[[:space:]]*:[[:space:]]*"[^"]+"' "$ALLOWLIST_JSON" \
+             | sed -E 's/.*"pattern"[[:space:]]*:[[:space:]]*"([^"]+)".*/\1/')
+fi
+
+# is_vendored_allowed <app-relative-path> -> 0 if it matches an allowlist glob.
+is_vendored_allowed() {
+  local rel="$1" pat
+  for pat in "${VENDORED_ALLOW[@]}"; do
+    case "$pat" in
+      */\*\*)
+        # 'prefix/**' matches the prefix dir and anything under it.
+        local prefix="${pat%/\*\*}"
+        case "$rel" in
+          "$prefix"|"$prefix"/*) return 0 ;;
+        esac
+        ;;
+      *)
+        [ "$rel" = "$pat" ] && return 0
+        # also tolerate a glob if the inventory ever uses one mid-path
+        case "$rel" in $pat) return 0 ;; esac
+        ;;
+    esac
+  done
+  return 1
+}
 
 # ---- resolve target ---------------------------------------------------------
 TARGET="${1:-}"
@@ -47,6 +103,28 @@ fi
 
 echo "=== GlyphSpek telemetry static scan ==="
 echo "target: $TARGET"
+
+# The vendored-dormant allowlist is scoped to the PACKAGED app — the actual
+# shipped artifact (Microsoft built-ins + the 1DS SDK + the minified/tree-shaken
+# core out/ bundles). The dev ./out tree is a build INTERMEDIATE: it is the
+# unbundled source-mirror of core, so it contains hundreds of individual vs/**
+# modules (e.g. vs/platform/telemetry/common/1dsAppender.js) and *.test.js files
+# that get bundled/minified into a handful of out/vs/**/*.main.js files in the
+# package. Those extra dev-intermediate paths are NOT inventoried (they are not
+# shipped), so a scan of ./out will report them as UNEXPECTED. Scan the PACKAGED
+# .app for an authoritative verdict; ./out is for quick local smoke only.
+TARGET_IS_PACKAGED=0
+case "$TARGET" in
+  *.app|*.app/) TARGET_IS_PACKAGED=1 ;;
+  *) [ -d "$TARGET/Contents/Resources/app" ] || [ -d "$TARGET/resources/app" ] && TARGET_IS_PACKAGED=1 ;;
+esac
+if [ "$TARGET_IS_PACKAGED" -ne 1 ]; then
+  echo "note: target looks like a dev build intermediate (not a packaged .app)."
+  echo "      The vendored-dormant allowlist is packaged-app-scoped; unbundled core"
+  echo "      modules under out/vs/** may be reported as UNEXPECTED here even though"
+  echo "      they minify into already-inventoried bundles. Scan the packaged"
+  echo "      ../VSCode-darwin-arm64/GlyphSpek.app for the authoritative verdict."
+fi
 echo
 
 # ---- patterns ---------------------------------------------------------------
@@ -82,38 +160,73 @@ GREP_FILES=(-r -l -I --binary-files=without-match \
   --include='*.js' --include='*.cjs' --include='*.mjs' \
   --include='*.json' --include='*.html' --include='*.css')
 
-# scan_pattern <regex> -> prints per-file report, echoes total file count to stdout
+# app_rel <abs-path> -> path relative to the app root we classify against.
+# For a packaged .app the allowlist is written relative to Contents/Resources/app
+# (macOS) or resources/app (Linux/Windows); for a dev ./out target it is the same
+# 'out/...' prefix. Strip the longest known app-root prefix so the remainder
+# matches the inventory's app-relative globs.
+app_rel() {
+  local f="$1" rel
+  rel="${f#"$TARGET"/}"
+  case "$rel" in
+    Contents/Resources/app/*) rel="${rel#Contents/Resources/app/}" ;;
+    resources/app/*)          rel="${rel#resources/app/}" ;;
+  esac
+  echo "$rel"
+}
+
+# scan_pattern <regex> -> per-file report tagged VENDORED vs UNEXPECTED; echoes
+# the count of UNEXPECTED (non-allowlisted) files to stdout. Vendored-dormant
+# (inventoried) files are reported for the audit trail but do NOT count as hits.
 scan_pattern() {
   local pat="$1"
   local files
   files="$(grep "${GREP_FILES[@]}" -E "$pat" "$TARGET" 2>/dev/null | sort -u)"
   if [ -z "$files" ]; then echo 0; return; fi
-  local nfiles
+  local nfiles unexpected=0
   nfiles="$(printf '%s\n' "$files" | wc -l | tr -d ' ')"
   {
-    printf '%s\n' "$files" | head -40 | while IFS= read -r f; do
-      # line-count per file (grep -c), trimmed to the app-relative path
-      local c rel
+    printf '%s\n' "$files" | head -60 | while IFS= read -r f; do
+      local c rel tag
       c="$(grep -cE "$pat" "$f" 2>/dev/null)"
-      rel="${f#"$TARGET"/}"
-      echo "    [$c] $rel"
+      rel="$(app_rel "$f")"
+      if is_vendored_allowed "$rel"; then tag="VENDORED-DORMANT"; else tag="UNEXPECTED"; fi
+      echo "    [$c][$tag] $rel"
     done
-    [ "$nfiles" -gt 40 ] && echo "    ... and $((nfiles - 40)) more file(s)"
+    [ "$nfiles" -gt 60 ] && echo "    ... and $((nfiles - 60)) more file(s)"
   } >&2
-  echo "$nfiles"
+  # Count files NOT covered by the allowlist (these are the real hits).
+  while IFS= read -r f; do
+    rel="$(app_rel "$f")"
+    is_vendored_allowed "$rel" || unexpected=$((unexpected + 1))
+  done <<< "$files"
+  echo "$unexpected"
 }
 
-hard_hits=0
+unexpected_hits=0
+vendored_hits=0
 echo "--- HARD endpoints (telemetry / marketplace / update) ---"
 for pat in "${HARD_PATTERNS[@]}"; do
   echo "[$pat]" >&2
-  n="$(scan_pattern "$pat")"
-  if [ "$n" -gt 0 ]; then
-    echo "FAIL [$pat]: present in $n file(s) (see list above)"
-    hard_hits=$((hard_hits + n))
+  # total files matching this pattern
+  pfiles="$(grep "${GREP_FILES[@]}" -E "$pat" "$TARGET" 2>/dev/null | sort -u)"
+  if [ -z "$pfiles" ]; then continue; fi
+  ptotal="$(printf '%s\n' "$pfiles" | wc -l | tr -d ' ')"
+  n_unexpected="$(scan_pattern "$pat")"
+  n_vendored=$((ptotal - n_unexpected))
+  vendored_hits=$((vendored_hits + n_vendored))
+  if [ "$n_unexpected" -gt 0 ]; then
+    echo "FAIL [$pat]: $n_unexpected UNEXPECTED file(s) (not in vendored allowlist) — see list above"
+    unexpected_hits=$((unexpected_hits + n_unexpected))
+  elif [ "$n_vendored" -gt 0 ]; then
+    echo "INVENTORY [$pat]: $n_vendored vendored-dormant file(s) (allowlisted)"
   fi
 done
-[ "$hard_hits" -eq 0 ] && echo "OK: no hard telemetry/marketplace/update endpoints found."
+if [ "$unexpected_hits" -eq 0 ] && [ "$vendored_hits" -eq 0 ]; then
+  echo "OK: no hard telemetry/marketplace/update endpoints found."
+elif [ "$unexpected_hits" -eq 0 ]; then
+  echo "OK: $vendored_hits vendored-dormant hit(s), all inventoried; 0 unexpected/GlyphSpek-introduced."
+fi
 echo
 
 soft_hits=0
@@ -211,26 +324,40 @@ echo "      (@microsoft/applicationinsights-*, @microsoft/1ds-*, @vscode/extensi
 echo "      telemetry) inside built-in extensions; those carry hard-coded default"
 echo "      ingestion hosts as constants. They only transmit when (a) the host"
 echo "      product.json enables telemetry AND (b) the user's telemetryLevel != off."
-echo "      GlyphSpek product.json sets NO aiConfig/enableTelemetry, so the core"
-echo "      telemetry channel is unconfigured. The authoritative proof is the"
-echo "      DYNAMIC startup capture above — run it on a cold offline launch."
+echo "      GlyphSpek product.json sets NO aiConfig/enableTelemetry/aiKey, no"
+echo "      updateUrl, and a gallery of open-vsx.org, so the core telemetry/update/"
+echo "      marketplace channels are unconfigured. Each HARD hit above is classified:"
+echo "      VENDORED-DORMANT hits are inventoried in"
+echo "      build/glyphspek/vendored-telemetry-allowlist.json (confirmed string"
+echo "      constants / localized doc-link text, not active call paths); an UNEXPECTED"
+echo "      hit is a GlyphSpek-introduced or not-yet-inventoried telemetry string and"
+echo "      hard-fails. The authoritative proof of zero phone-home is the DYNAMIC"
+echo "      startup capture above — run it on a cold offline launch."
 echo
 if [ "$bundled_ext_fail" -gt 0 ]; then
   echo "RESULT: FAIL — the packaged app ships one or more denylisted built-in extensions"
   echo "        (see the bundled-extension deny gate above). GlyphSpek must not ship them."
   exit 1
 fi
-if [ "$hard_hits" -gt 0 ]; then
-  echo "RESULT: REVIEW — $hard_hits file(s) contain hard telemetry/marketplace/update"
-  echo "        endpoint strings (expected from vendored SDKs). Confirm dormancy via"
-  echo "        the dynamic capture; investigate any file OUTSIDE a known telemetry SDK"
-  echo "        / built-in extension, and any non-empty aiKey wired to a live reporter."
-  # Non-zero exit so CI flags it for human sign-off; this is conservative by design.
+if [ "$unexpected_hits" -gt 0 ]; then
+  echo "RESULT: FAIL — $unexpected_hits file(s) contain a hard telemetry/marketplace/update"
+  echo "        endpoint string OUTSIDE the vendored-dormant allowlist. This is a REAL"
+  echo "        finding: it is either GlyphSpek-INTRODUCED telemetry (must be zero) or a"
+  echo "        new vendored file not yet inventoried. Investigate each [UNEXPECTED] file"
+  echo "        above; if (and only if) it is a confirmed dormant vendored-upstream"
+  echo "        constant, add it to vendored-telemetry-allowlist.json with a why-dormant."
   exit 1
 fi
-if [ "$soft_hits" -gt 0 ]; then
-  echo "RESULT: PASS (with $soft_hits real, non-sourcemap CDN reference(s) flagged)."
+# No unexpected hard hits. Report PASS with an honest accounting of the dormant set.
+if [ "$vendored_hits" -gt 0 ]; then
+  echo "RESULT: PASS — GlyphSpek introduces ZERO telemetry. $vendored_hits HARD endpoint"
+  echo "        hit(s) are all VENDORED-DORMANT (inventoried in"
+  echo "        build/glyphspek/vendored-telemetry-allowlist.json) — Microsoft-authored"
+  echo "        built-ins / vendored 1DS SDK / core out/, telemetry OFF at product level."
+elif [ "$soft_hits" -gt 0 ]; then
+  echo "RESULT: PASS — no hard endpoints; $soft_hits real, non-sourcemap CDN reference(s) flagged."
 else
   echo "RESULT: PASS — no hard endpoints; CDN refs are sourcemap comments only."
 fi
+[ "$soft_hits" -gt 0 ] && echo "        (plus $soft_hits non-sourcemap Microsoft-CDN reference(s) flagged above.)"
 exit 0

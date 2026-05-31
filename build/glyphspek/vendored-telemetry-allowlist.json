@@ -1,0 +1,112 @@
+{
+	"$comment": [
+		"GlyphSpek vendored-telemetry allowlist (audit inventory).",
+		"",
+		"WHAT THIS IS: an inventoried, justified allowlist of files in the packaged app",
+		"that contain a Microsoft telemetry / Marketplace / update / issue-reporter",
+		"ENDPOINT STRING which is NOT GlyphSpek-introduced. Every entry is a DORMANT",
+		"endpoint CONSTANT (or a localized doc-link description string) baked into",
+		"Microsoft-authored built-in extensions, the vendored @microsoft/1ds telemetry",
+		"SDK, or core out/ that Code-OSS vendors. GlyphSpek SHIPS these files (ripping",
+		"endpoint constants out of git / typescript-language-features / the 1DS SDK would",
+		"risk breaking those built-ins) but does NOT ACTIVATE them: telemetry is disabled",
+		"at the PRODUCT level (product.json sets no aiConfig / enableTelemetry / aiKey;",
+		"the gallery is open-vsx.org; updateUrl is absent so the update service is off;",
+		"reportIssueUrl points at the GlyphSpek repo).",
+		"",
+		"HOW THE GATE USES IT: verify-no-telemetry.sh classifies every HARD endpoint hit.",
+		"  - A hit whose app-relative path matches a 'pattern' below = VENDORED-DORMANT",
+		"    (inventoried, expected) -> does NOT fail the gate.",
+		"  - A hit whose path matches NO pattern below = UNEXPECTED. If it is the GlyphSpek",
+		"    embedded extension, product.json, or any other GlyphSpek-authored surface, it",
+		"    is GlyphSpek-INTRODUCED telemetry and HARD-FAILS the gate.",
+		"So adding new telemetry anywhere outside this inventory still fails the build,",
+		"and the inventory itself is reviewable in git.",
+		"",
+		"'pattern' is an app-relative path glob (relative to Contents/Resources/app on",
+		"macOS, resources/app on Linux/Windows), matched case-sensitively. A trailing /**",
+		"matches any descendant. Keep 'why-dormant' specific so the list stays auditable.",
+		"",
+		"VERIFIED (2026-05-30): each pattern's hit was opened and confirmed to be a string",
+		"constant / localized description, not an active call path in the shipped config.",
+		"See GATE-003 in SECURITY-PATCHES.md and build/glyphspek/telemetry-posture.md."
+	],
+	"allowlist": [
+		{
+			"pattern": "extensions/git/dist/main.js",
+			"why-dormant": "Microsoft-authored built-in Git extension. Embeds the @vscode/extension-telemetry / Application Insights default ingestion host (dc.services.visualstudio.com) and the 1DS OneCollector default hosts as SDK constants. The reporter only transmits when product.json supplies an aiKey AND telemetryLevel != off — neither holds in GlyphSpek."
+		},
+		{
+			"pattern": "extensions/github/dist/extension.js",
+			"why-dormant": "Microsoft-authored built-in GitHub extension. Vendored telemetry SDK default endpoint constants (Application Insights + 1DS). Dormant — no aiKey / telemetry config at product level."
+		},
+		{
+			"pattern": "extensions/github-authentication/dist/extension.js",
+			"why-dormant": "Microsoft-authored built-in GitHub Authentication extension. Vendored telemetry SDK default endpoint constants. Dormant — no telemetry config at product level."
+		},
+		{
+			"pattern": "extensions/microsoft-authentication/dist/extension.js",
+			"why-dormant": "Microsoft-authored built-in Microsoft Authentication extension. Vendored telemetry SDK default endpoint constants. Dormant — no telemetry config at product level."
+		},
+		{
+			"pattern": "extensions/typescript-language-features/dist/extension.js",
+			"why-dormant": "Microsoft-authored built-in TypeScript/JavaScript language features. Vendored telemetry SDK default endpoint constants. Dormant — no telemetry config at product level."
+		},
+		{
+			"pattern": "extensions/html-language-features/client/dist/node/htmlClientMain.js",
+			"why-dormant": "Microsoft-authored built-in HTML language features client. Vendored telemetry SDK default endpoint constants. Dormant — no telemetry config at product level."
+		},
+		{
+			"pattern": "extensions/json-language-features/client/dist/node/jsonClientMain.js",
+			"why-dormant": "Microsoft-authored built-in JSON language features client. Vendored telemetry SDK default endpoint constants. Dormant — no telemetry config at product level."
+		},
+		{
+			"pattern": "extensions/markdown-language-features/dist/extension.js",
+			"why-dormant": "Microsoft-authored built-in Markdown language features. Vendored telemetry SDK default endpoint constants. Dormant — no telemetry config at product level."
+		},
+		{
+			"pattern": "extensions/merge-conflict/dist/mergeConflictMain.js",
+			"why-dormant": "Microsoft-authored built-in Merge Conflict extension. Vendored telemetry SDK default endpoint constants. Dormant — no telemetry config at product level."
+		},
+		{
+			"pattern": "node_modules/@microsoft/1ds-core-js/**",
+			"why-dormant": "Vendored Microsoft 1DS (OneCollector) core telemetry SDK. _ENDPOINT_URL / browser.events.data.microsoft.com etc. are the SDK's hard-coded DEFAULT collector hosts (string constants in InternalConstants.js and the prebuilt bundles). The SDK transmits only when instantiated with a real instrumentation key by a telemetry channel; GlyphSpek configures none."
+		},
+		{
+			"pattern": "out/nls.messages.js",
+			"why-dormant": "Core localized-message bundle. marketplace.visualstudio.com appears inside a localized DESCRIPTION string (e.g. a Dev Containers documentation link), not as a gallery service endpoint (the gallery is open-vsx.org per product.json extensionsGallery)."
+		},
+		{
+			"pattern": "out/nls.messages.json",
+			"why-dormant": "Core localized-message bundle (JSON form). Same localized doc-link description string as nls.messages.js; not a live endpoint."
+		},
+		{
+			"pattern": "out/nls.metadata.json",
+			"why-dormant": "Core NLS metadata (message keys + source strings). Carries the same localized doc-link description text; metadata only, not a runtime endpoint."
+		},
+		{
+			"pattern": "out/vs/workbench/workbench.desktop.main.js",
+			"why-dormant": "Core workbench bundle. Contains the marketplace doc-link description string and the issue-reporter fallback URL (api.github.com/repos/microsoft/vscode-distro). The active gallery is open-vsx.org and the active issue URL is reportIssueUrl (GlyphSpek repo); these are unreached defaults / description text."
+		},
+		{
+			"pattern": "out/vs/sessions/sessions.desktop.main.js",
+			"why-dormant": "Core agent-sessions window bundle. Same marketplace doc-link + issue-reporter fallback strings as the workbench bundle; gallery/issue endpoints are overridden at the product level."
+		},
+		{
+			"pattern": "out/vs/workbench/contrib/debug/node/telemetryApp.js",
+			"why-dormant": "Core debug telemetry forwarder. Carries the 1DS OneCollector default host as a constant. It forwards events only when the core telemetry channel is configured with a key; GlyphSpek product.json configures none, so it is never fed."
+		},
+		{
+			"pattern": "out/vs/code/electron-utility/sharedProcess/sharedProcessMain.js",
+			"why-dormant": "Core shared-process bundle. Carries the 1DS OneCollector default host and update.code.visualstudio.com as the update service's default base URL constant. Telemetry is unconfigured and product.json has no updateUrl, so the update service does not poll."
+		},
+		{
+			"pattern": "out/vs/code/node/cliProcessMain.js",
+			"why-dormant": "Core CLI-process bundle (e.g. extension install/list). Carries the 1DS OneCollector default host as a constant. Dormant — no telemetry key configured."
+		},
+		{
+			"pattern": "out/vs/platform/agentHost/node/agentHostMain.js",
+			"why-dormant": "Core Agent Host bundle. Carries the 1DS OneCollector default host as a constant (endpointUrl). Dormant — no telemetry key configured; the Copilot path is also stubbed inert (GATE-002)."
+		}
+	]
+}

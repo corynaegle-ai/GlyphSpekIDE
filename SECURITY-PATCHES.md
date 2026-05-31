@@ -448,3 +448,79 @@ via `tsconfig` `paths` (tsc) and a `build/next/index.ts` esbuild `onResolve` (bu
   block in `verify-bundled-extensions.sh`. No app/runtime impact (gates are build-time only).
 - **Rebase risk: LOW.** Both files are GlyphSpek-only build tooling with no upstream
   counterpart.
+
+---
+
+## GATE-003 — Honest telemetry gate verdict (vendored-dormant allowlist)
+
+- **Status:** `APPLIED` (2026-05-30). Build-time gate tooling only; no runtime/app code touched.
+- **Origin:** every code-review sweep flagged `verify-no-telemetry.sh` as **REVIEW/fail** on
+  ~50 endpoint-string hits and never resolved, because the old verdict logic returned `REVIEW`
+  (exit 1) whenever *any* HARD telemetry/Marketplace/update string was present — with **no**
+  distinction between GlyphSpek-introduced telemetry (must be zero) and dormant
+  Microsoft-authored constants baked into vendored built-ins. The signal was permanently red and
+  therefore meaningless.
+
+### Threat addressed
+
+A perpetual-REVIEW gate is a *false-negative risk*: reviewers learn to ignore it, so a genuine
+GlyphSpek-introduced telemetry leak would be lost in the noise of the same ~50 expected vendored
+hits. The fix makes the gate's verdict **accurate** — PASS when (and only when) GlyphSpek
+introduces no telemetry and the sole hits are the inventoried vendored-dormant set; **FAIL** the
+instant a telemetry string appears outside that inventory (GlyphSpek-authored or a new vendored
+file). This restores the gate as a meaningful guardrail for the no-telemetry claim.
+
+### What was verified (the honest classification)
+
+Scanned the packaged app (`../VSCode-darwin-arm64/GlyphSpek.app`). The HARD hits resolve to **29
+unique files**; the gate's per-pattern total is **50** (files matching multiple patterns):
+
+- **GlyphSpek-INTRODUCED telemetry: ZERO.** The embedded `glyphspek-trust-panel` extension
+  appears in **none** of the hits; its compiled `dist/extension.js` has no MS telemetry endpoint,
+  no `TelemetryReporter`/`@vscode/extension-telemetry`/`sendTelemetry*`, and no outbound URLs
+  beyond local/schema. (The word "telemetry" appears only in prose negations — "no telemetry".)
+  `product.json` has **no** `aiConfig`/`enableTelemetry`/`aiKey`/`crashReporter`, `updateUrl` is
+  absent, gallery = `open-vsx.org`, `reportIssueUrl` = the GlyphSpek repo.
+- **VENDORED-DORMANT: 29 files**, inventoried in
+  `build/glyphspek/vendored-telemetry-allowlist.json` (9 Microsoft built-in extensions + 11
+  `@microsoft/1ds-core-js` SDK files + 9 core `out/` bundles). Each hit was opened and confirmed
+  to be a **string constant** (Application Insights / 1DS OneCollector default ingestion host,
+  the update service default base URL) or a **localized doc-link description** (a Dev Containers
+  `marketplace.visualstudio.com` docs link; the `repos/microsoft/vscode-distro` issue-reporter
+  fallback) — not an active call path in the shipped config. See
+  `build/glyphspek/telemetry-posture.md` for the verified-vs-assumed breakdown. **Assumed (not
+  exhaustively traced):** non-reachability of every minified branch — closed only by the
+  documented dynamic cold-launch network capture.
+
+### Files changed (gate tooling + inventory + doc — no app/runtime code)
+
+- `build/glyphspek/verify-no-telemetry.sh` — each HARD hit is now classified per-file against
+  the allowlist via `is_vendored_allowed`/`app_rel`: VENDORED-DORMANT hits are reported for the
+  audit trail but do **not** fail; an UNEXPECTED (non-allowlisted) hit hard-fails (exit 1). The
+  verdict emits `RESULT: PASS — GlyphSpek introduces ZERO telemetry; N vendored-dormant hits,
+  all inventoried` instead of perpetual `REVIEW`. A target-type note warns that the dev `./out`
+  intermediate is not allowlist-scoped (scan the packaged `.app`).
+- `build/glyphspek/vendored-telemetry-allowlist.json` — **new** checked-in inventory: 19
+  app-relative path globs covering the 29 files, each with a `why-dormant` justification, plus a
+  `$comment` header explaining how the gate consumes it.
+- `build/glyphspek/telemetry-posture.md` — **new** posture doc (claim, verified-vs-assumed, the
+  three vendored buckets, how the gate enforces, re-verify steps incl. the dynamic capture).
+
+### Acceptance test (run + verified)
+
+1. `bash build/glyphspek/verify-no-telemetry.sh ../VSCode-darwin-arm64/GlyphSpek.app` →
+   **RESULT: PASS**, exit 0. 50 HARD hits all classified VENDORED-DORMANT; 0 UNEXPECTED.
+2. **Strictness (negative test):** a synthetic target with a `dc.services.visualstudio.com`
+   string injected into `extensions/glyphspek-trust-panel/dist/extension.js` (a GlyphSpek
+   surface) **and** into the allowlisted `extensions/git/dist/main.js` → the git file classifies
+   VENDORED-DORMANT (passes), the glyphspek file classifies **UNEXPECTED** → **RESULT: FAIL**,
+   exit 1. Confirms a GlyphSpek-introduced (or any non-inventoried) telemetry string still fails.
+
+### Rollback / rebase note
+
+- **Rollback:** revert `verify-no-telemetry.sh` to the count-all-HARD-hits → REVIEW logic and
+  delete `vendored-telemetry-allowlist.json` + `telemetry-posture.md`. No app/runtime impact.
+- **Rebase risk: LOW.** All three are GlyphSpek-only build tooling with no upstream counterpart.
+  If a future upstream pull adds a new vendored built-in carrying a telemetry constant, the gate
+  will (correctly) FAIL as UNEXPECTED until that file is opened, confirmed dormant, and added to
+  the allowlist with a `why-dormant` — that is the intended, auditable behavior.
