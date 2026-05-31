@@ -167,5 +167,8 @@
 			"type": "light"
 		}
 	],
-	"sessionsWindowAllowedExtensions": []
+	"sessionsWindowAllowedExtensions": [],
+	"configurationDefaults": {
+		"extensions.ignoreRecommendations": true
+	}
 }

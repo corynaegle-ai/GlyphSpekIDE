@@ -15,11 +15,14 @@
  * ─────────────────────────────────────────────────────────────────────────────
  * SOFT BOUNDARY (sweep-23, governed-unsandboxed). The terminal env FORCES the
  * CLI's egress through the supervisor-owned metadata-only proxy by setting
- * HTTPS_PROXY/HTTP_PROXY = proxyUrl and CLEARING NO_PROXY — a proxy-honoring CLI is
- * thereby confined to the supervisor's egress allowlist and its egress metadata is
- * observed into the run's trace. This is the SOFT boundary: a CLI that strips these
- * vars and opens a raw socket bypasses the proxy. Hard containment (per-run
- * network namespace / container with a default-DROP route) is the hard-mode
+ * HTTPS_PROXY/HTTP_PROXY = proxyUrl, EXEMPTING ONLY LOOPBACK via
+ * NO_PROXY=localhost,127.0.0.1,::1 — so the CLI's external egress is observed into
+ * the run's trace while its OWN localhost OAuth callback (e.g. Claude Code's sign-in
+ * redirect to 127.0.0.1) is not forced through the proxy and 403/ECONNREFUSED'd.
+ * Loopback is the machine talking to itself, not external egress, so the exemption
+ * does not weaken external-egress observation. This is the SOFT boundary: a CLI that
+ * strips these vars and opens a raw socket bypasses the proxy. Hard containment
+ * (per-run network namespace / container with a default-DROP route) is the hard-mode
  * follow-on. We do NOT claim hard containment, and the session is NEVER
  * product-trusted (it settles into the `governed-unsandboxed` posture).
  *
@@ -153,9 +156,13 @@ function buildGovernedTerminalEnv(opts) {
     env.https_proxy = opts.proxyUrl;
     env.HTTP_PROXY = opts.proxyUrl;
     env.http_proxy = opts.proxyUrl;
-    // CLEAR NO_PROXY so NOTHING is exempted from the governed proxy.
-    env.NO_PROXY = '';
-    env.no_proxy = '';
+    // EXEMPT LOOPBACK from the proxy. An empty NO_PROXY would force loopback THROUGH the
+    // proxy, which breaks a CLI's localhost OAuth callback (e.g. Claude Code's sign-in
+    // listens on 127.0.0.1 and the redirect would hit the proxy → ECONNREFUSED). Loopback
+    // is the machine talking to ITSELF, not external egress, so exempting it does NOT
+    // weaken external-egress observation (the trace still records every real destination).
+    env.NO_PROXY = 'localhost,127.0.0.1,::1';
+    env.no_proxy = 'localhost,127.0.0.1,::1';
     return {
         env,
         // strictEnv only in the sanitized posture: the env IS the whole environment.

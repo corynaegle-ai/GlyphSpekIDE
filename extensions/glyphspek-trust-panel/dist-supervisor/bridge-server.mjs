@@ -930,6 +930,7 @@ function startEgressProxy(options) {
   const bindHost = options.bindHost ?? "0.0.0.0";
   const bindPort = options.bindPort ?? 0;
   const denyDirectIp = options.denyDirectIp ?? true;
+  const observeAll = options.observeAll ?? false;
   const upstreamLookup = {};
   for (const [k, v] of Object.entries(options.upstreamLookup ?? {})) {
     upstreamLookup[k.toLowerCase()] = v;
@@ -966,26 +967,28 @@ function startEgressProxy(options) {
       clientRes.end("egress proxy: could not determine target host\n");
       return;
     }
-    if (denyDirectIp && isIpLiteral(target.host)) {
-      emit({
-        id: randomUUID2(),
-        ts: Date.now(),
-        kind: "http",
-        decision: "deny",
-        host: target.host,
-        port: target.port,
-        method: clientReq.method,
-        reason: "direct-ip"
-      });
-      clientRes.writeHead(403, { "content-type": "text/plain" });
-      clientRes.end(
-        `egress denied: direct IP literal not permitted (use an allowlisted name; the proxy is the controlled resolver): ${target.host}:${target.port}
+    const allowed = observeAll || isHostAllowed(allow, target.host, target.port);
+    if (!observeAll) {
+      if (denyDirectIp && isIpLiteral(target.host)) {
+        emit({
+          id: randomUUID2(),
+          ts: Date.now(),
+          kind: "http",
+          decision: "deny",
+          host: target.host,
+          port: target.port,
+          method: clientReq.method,
+          reason: "direct-ip"
+        });
+        clientRes.writeHead(403, { "content-type": "text/plain" });
+        clientRes.end(
+          `egress denied: direct IP literal not permitted (use an allowlisted name; the proxy is the controlled resolver): ${target.host}:${target.port}
 `
-      );
-      clientReq.resume();
-      return;
+        );
+        clientReq.resume();
+        return;
+      }
     }
-    const allowed = isHostAllowed(allow, target.host, target.port);
     emit({
       id: randomUUID2(),
       ts: Date.now(),
@@ -994,7 +997,7 @@ function startEgressProxy(options) {
       host: target.host,
       port: target.port,
       method: clientReq.method,
-      reason: "allowlist"
+      reason: observeAll ? "observed" : "allowlist"
     });
     if (!allowed) {
       clientRes.writeHead(403, { "content-type": "text/plain" });
@@ -1034,28 +1037,30 @@ function startEgressProxy(options) {
     const authority = req.url ?? "";
     const { host, port } = splitHostPort(authority);
     const targetPort = port ?? DEFAULT_HTTPS_PORT;
-    if (denyDirectIp && host.length > 0 && isIpLiteral(host)) {
-      emit({
-        id: randomUUID2(),
-        ts: Date.now(),
-        kind: "connect",
-        decision: "deny",
-        host,
-        port: targetPort,
-        reason: "direct-ip"
-      });
-      clientSocket.write(
-        `HTTP/1.1 403 Forbidden\r
+    if (!observeAll) {
+      if (denyDirectIp && host.length > 0 && isIpLiteral(host)) {
+        emit({
+          id: randomUUID2(),
+          ts: Date.now(),
+          kind: "connect",
+          decision: "deny",
+          host,
+          port: targetPort,
+          reason: "direct-ip"
+        });
+        clientSocket.write(
+          `HTTP/1.1 403 Forbidden\r
 Content-Type: text/plain\r
 Connection: close\r
 \r
 egress denied: direct IP literal not permitted (use an allowlisted name; the proxy is the controlled resolver): ${host}:${targetPort}
 `
-      );
-      clientSocket.end();
-      return;
+        );
+        clientSocket.end();
+        return;
+      }
     }
-    const allowed = host.length > 0 && isHostAllowed(allow, host, targetPort);
+    const allowed = host.length > 0 && (observeAll || isHostAllowed(allow, host, targetPort));
     emit({
       id: randomUUID2(),
       ts: Date.now(),
@@ -1063,7 +1068,7 @@ egress denied: direct IP literal not permitted (use an allowlisted name; the pro
       decision: allowed ? "allow" : "deny",
       host,
       port: targetPort,
-      reason: host.length > 0 ? "allowlist" : "no-target"
+      reason: host.length === 0 ? "no-target" : observeAll ? "observed" : "allowlist"
     });
     if (!allowed) {
       clientSocket.write(
@@ -1261,7 +1266,7 @@ async function startGovernedTerminalProxy(opts) {
       decision: d.decision,
       provenanceLabel,
       // Non-secret human-readable rule mirroring the proxy's own reason vocabulary.
-      rule: d.decision === "allow" ? `egress allowed by allowlist (${d.kind})` : d.reason === "direct-ip" ? "egress denied: direct-IP literal (controlled-resolver bypass)" : d.reason === "no-target" ? "egress denied: no target host" : `egress denied by allowlist (${d.kind})`
+      rule: d.decision === "allow" ? d.reason === "observed" ? `observed (governed-unsandboxed: default-allow, metadata-only trace) (${d.kind})` : `egress allowed by allowlist (${d.kind})` : d.reason === "direct-ip" ? "egress denied: direct-IP literal (controlled-resolver bypass)" : d.reason === "no-target" ? "egress denied: no target host" : `egress denied by allowlist (${d.kind})`
     };
     emit("policy_decision", payload);
   };
@@ -1296,6 +1301,7 @@ async function startGovernedTerminalProxy(opts) {
     bindHost: opts.bindHost ?? "127.0.0.1",
     bindPort: opts.bindPort ?? 0,
     denyDirectIp: opts.denyDirectIp,
+    ...opts.observeAll !== void 0 ? { observeAll: opts.observeAll } : {},
     onDecision,
     onTunnel
   });
@@ -1442,6 +1448,7 @@ async function startTerminalSession(opts) {
     sink: projectionSink,
     runId,
     modelEndpoints: endpoints,
+    observeAll: true,
     bindHost: opts.bindHost ?? "127.0.0.1",
     ...opts.denyDirectIp !== void 0 ? { denyDirectIp: opts.denyDirectIp } : {}
   });
@@ -1695,8 +1702,8 @@ function buildGovernedEnvResult(opts) {
   env.https_proxy = opts.proxyUrl;
   env.HTTP_PROXY = opts.proxyUrl;
   env.http_proxy = opts.proxyUrl;
-  env.NO_PROXY = "";
-  env.no_proxy = "";
+  env.NO_PROXY = "localhost,127.0.0.1,::1";
+  env.no_proxy = "localhost,127.0.0.1,::1";
   return { env, posture: allowAmbient ? "untrusted" : "sanitized" };
 }
 

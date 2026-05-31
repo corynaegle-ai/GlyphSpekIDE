@@ -67,6 +67,20 @@ div.chat-welcome-view {
 		-webkit-mask-size: 40px;
 	}
 
+	/* GlyphSpek: full-color brand logo empty-state graphic (raster img); no color/mask treatment so brand colors are preserved. */
+	& > .chat-welcome-view-icon.glyphspek-logo {
+		display: flex;
+		align-items: center;
+		justify-content: center;
+		min-height: 0;
+		margin-bottom: 24px;
+	}
+
+	& > .chat-welcome-view-icon.glyphspek-logo img {
+		width: auto;
+		height: 104px;
+	}
+
 	& > .chat-welcome-view-icon.large-icon {
 		min-width: 72px;
 		min-height: 72px;

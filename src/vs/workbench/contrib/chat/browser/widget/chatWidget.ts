@@ -19,7 +19,7 @@ import { IMarkdownString, MarkdownString } from '../../../../../base/common/html
 import { Iterable } from '../../../../../base/common/iterator.js';
 import { Disposable, DisposableStore, IDisposable, MutableDisposable, thenIfNotDisposed } from '../../../../../base/common/lifecycle.js';
 import { ResourceSet } from '../../../../../base/common/map.js';
-import { Schemas } from '../../../../../base/common/network.js';
+import { FileAccess, Schemas } from '../../../../../base/common/network.js';
 import { IsSessionsWindowContext } from '../../../../common/contextkeys.js';
 import { filter } from '../../../../../base/common/objects.js';
 import { autorun, derived, observableFromEvent, observableValue } from '../../../../../base/common/observable.js';
@@ -205,6 +205,13 @@ const supportsAllAttachments: Required<IChatAgentAttachmentCapabilities> = {
 };
 
 const DISCLAIMER = localize('chatDisclaimer', "AI responses may be inaccurate");
+
+/**
+ * GlyphSpek empty-state graphic: the full-color GlyphSpek brand mark (white "G"
+ * + blue corner-bracket) rendered as a raster `<img>` on the chat empty state.
+ * Source asset: ./media/glyphspek-chat-logo.png
+ */
+const GLYPHSPEK_CHAT_LOGO_URI = FileAccess.asBrowserUri('vs/workbench/contrib/chat/browser/widget/media/glyphspek-chat-logo.png');
 
 export class ChatWidget extends Disposable implements IChatWidget {
 
@@ -1235,6 +1242,7 @@ export class ChatWidget extends Disposable implements IChatWidget {
 			title,
 			message: new MarkdownString(DISCLAIMER),
 			icon: Codicon.chatSparkle,
+			iconImageUri: GLYPHSPEK_CHAT_LOGO_URI,
 			additionalMessage,
 		};
 	}

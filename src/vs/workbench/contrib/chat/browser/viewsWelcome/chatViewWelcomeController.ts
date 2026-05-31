@@ -120,6 +120,11 @@ export class ChatViewWelcomeController extends Disposable {
 
 export interface IChatViewWelcomeContent {
 	readonly icon?: ThemeIcon | URI;
+	/**
+	 * GlyphSpek: optional browser URI of a full-color raster logo rendered as an
+	 * `<img>` in place of `icon`. Used for the brand mark on the empty state.
+	 */
+	readonly iconImageUri?: URI;
 	readonly title: string;
 	readonly message: IMarkdownString;
 	readonly additionalMessage?: string | IMarkdownString;
@@ -155,7 +160,15 @@ export class ChatViewWelcomePart extends Disposable {
 			if (content.useLargeIcon) {
 				icon.classList.add('large-icon');
 			}
-			if (content.icon) {
+			if (content.iconImageUri) {
+				// GlyphSpek: render the full-color brand logo as a raster `<img>`.
+				// No `currentColor`/mask treatment so brand colors are preserved.
+				icon.classList.add('glyphspek-logo');
+				const img = dom.append(icon, $<HTMLImageElement>('img'));
+				img.src = content.iconImageUri.toString(true);
+				img.setAttribute('aria-hidden', 'true');
+				img.setAttribute('draggable', 'false');
+			} else if (content.icon) {
 				if (ThemeIcon.isThemeIcon(content.icon)) {
 					const iconElement = renderIcon(content.icon);
 					icon.appendChild(iconElement);

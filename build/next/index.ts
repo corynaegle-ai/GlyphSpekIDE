@@ -292,6 +292,7 @@ const desktopResourcePatterns = [
 	'vs/workbench/services/extensionManagement/common/media/*.png',
 	'vs/workbench/browser/parts/editor/media/*.png',
 	'vs/workbench/contrib/debug/browser/media/*.png',
+	'vs/workbench/contrib/chat/browser/widget/media/glyphspek-chat-logo.png',
 
 	// Sessions - built-in prompts and skills
 	'vs/sessions/prompts/*.prompt.md',
