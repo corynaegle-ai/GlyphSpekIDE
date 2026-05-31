@@ -96,6 +96,7 @@
         creationTrust: 'unknown',
         actorType: 'unknown',
         actorVersion: undefined,
+        loopbackProxyBypass: false,
       },
       trace: [],
       claims: null,
@@ -162,7 +163,10 @@
     for (var i = 0; i < trace.length; i++) {
       var p = payloadOf(trace[i]);
       if (trace[i].type === 'policy_decision' && p.tool === 'network') {
-        out.push({ destination: String(p.destination || p.requestedCapability || '(unknown)'), decision: String(p.decision || ''), blocked: !!p.blocked });
+        // F1: an observe-only egress is OBSERVED (soft default-allow), NOT a policy
+        // allow — surface it distinctly so it never reads as "policy: allowed".
+        var obs = p.enforcement === 'observe-only';
+        out.push({ destination: String(p.destination || p.requestedCapability || '(unknown)'), decision: String(p.decision || ''), blocked: obs ? false : !!p.blocked, observeOnly: obs });
       }
     }
     return out;
@@ -172,13 +176,17 @@
     for (var i = 0; i < trace.length; i++) {
       if (trace[i].type !== 'policy_decision') continue;
       var p = payloadOf(trace[i]);
+      // F1: carry observe-only through so a soft-plane observation is never read as
+      // a real policy allow.
+      var obs = p.enforcement === 'observe-only';
       out.push({
         tool: String(p.tool || ''),
         requestedCapability: String(p.requestedCapability || ''),
         decision: String(p.decision || ''),
-        blocked: !!p.blocked,
+        blocked: obs ? false : !!p.blocked,
         rule: p.rule ? String(p.rule) : undefined,
         provenanceLabel: p.provenanceLabel ? String(p.provenanceLabel) : undefined,
+        enforcement: obs ? 'observe-only' : undefined,
       });
     }
     return out;
@@ -221,6 +229,10 @@
           creationTrust: event.trust,
           actorType: event.actorType,
           actorVersion: event.actorVersion,
+          // F2: surface the loopback-bypass posture so the panel labels loopback as
+          // unobserved local traffic (the carve-out means it is NOT in the trace).
+          loopbackProxyBypass: event.loopbackProxyBypass === true,
+          loopbackProxyBypassReason: event.loopbackProxyBypassReason,
         };
         view.status = event.state || 'created';
         view.productTrustEligible = isProductTrustEligible(event.trust, event.runtimeTrust);
@@ -592,6 +604,17 @@
       className: 'trust-badge actor-badge',
       text: 'actor: ' + b.actorType + (b.actorVersion ? ' ' + b.actorVersion : ''),
     }));
+
+    // F2: loopback-bypass badge. When the governed terminal exempts loopback from
+    // the proxy, loopback traffic BYPASSES the proxy and is UNOBSERVED — label it
+    // honestly so "every destination is recorded" is never implied.
+    if (b.loopbackProxyBypass) {
+      root.appendChild(el('span', {
+        className: 'trust-badge loopback-unobserved',
+        text: 'loopback: unobserved local traffic',
+        title: b.loopbackProxyBypassReason || 'loopback (127.0.0.1/::1/localhost) is exempt from the egress proxy — local IPC / OAuth callbacks, NOT external egress — so it is not recorded in the trace',
+      }));
+    }
 
     // The single product-trust eligibility verdict, BEFORE the crypto gate.
     var summary = deriveTrustSummary(view);
@@ -971,7 +994,16 @@
       td.appendChild(el('code', { text: n.destination }));
       tr.appendChild(td);
       var dec = el('td');
-      dec.appendChild(el('span', { className: 'chip chip-decision decision-' + n.decision, text: n.decision }));
+      // F1: an observe-only egress is OBSERVED on the bypassable soft plane, NOT a
+      // policy allow. Label it distinctly so a reviewer never reads it as
+      // "policy: allowed".
+      if (n.observeOnly) {
+        dec.appendChild(el('span', { className: 'chip chip-decision decision-observe', text: 'observed (soft, default-allow)' }));
+      } else if (n.decision === 'allow') {
+        dec.appendChild(el('span', { className: 'chip chip-decision decision-allow', text: 'policy: allowed' }));
+      } else {
+        dec.appendChild(el('span', { className: 'chip chip-decision decision-' + n.decision, text: n.decision }));
+      }
       tr.appendChild(dec);
       tbl.appendChild(tr);
     }

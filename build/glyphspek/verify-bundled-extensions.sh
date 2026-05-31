@@ -213,8 +213,28 @@ else
   echo
 fi
 
+# ---- chain the embedded vendored-xterm provenance gate (F5) -----------------
+# The embedded Trust Panel ships UNMODIFIED third-party MIT xterm build artifacts
+# (xterm.js, xterm.css, addon-fit.js). verify-vendored-xterm.sh recomputes each
+# file's SHA256 and fails on any drift from the pinned provenance manifest
+# (VENDOR.txt), and requires the LICENSE to be present — so a tampered/upgraded
+# vendored asset can't ship unnoticed. Read-only.
+vendored_xterm_fail=0
+XTERM_GATE="$REPO_ROOT/build/glyphspek/verify-vendored-xterm.sh"
+if [ -f "$XTERM_GATE" ]; then
+  echo "--- embedded vendored-xterm provenance gate ---"
+  if ! bash "$XTERM_GATE"; then
+    vendored_xterm_fail=1
+  fi
+  echo
+else
+  echo "WARN: verify-vendored-xterm.sh not found at $XTERM_GATE —" >&2
+  echo "      the embedded vendored xterm assets are NOT being provenance-checked." >&2
+  echo
+fi
+
 echo "=== verdict ==="
-if [ "$violations" -gt 0 ] || [ "$copilot_runtime_fail" -gt 0 ] || [ "$embedded_conformance_fail" -gt 0 ] || [ "$media_sync_fail" -gt 0 ]; then
+if [ "$violations" -gt 0 ] || [ "$copilot_runtime_fail" -gt 0 ] || [ "$embedded_conformance_fail" -gt 0 ] || [ "$media_sync_fail" -gt 0 ] || [ "$vendored_xterm_fail" -gt 0 ]; then
   if [ "$violations" -gt 0 ]; then
     echo "RESULT: FAIL — $violations denylisted extension(s) shipped in the packaged app:"
     printf '%s' "$matched_list" | sed '/^$/d' | sed 's/^/        - extensions\//'
@@ -236,6 +256,12 @@ if [ "$violations" -gt 0 ] || [ "$copilot_runtime_fail" -gt 0 ] || [ "$embedded_
     echo "        drifted from its source (see the media/** drift gate above). Re-sync"
     echo "        with the canonical command (do NOT copy files by hand):"
     echo "            bash build/glyphspek/sync-embedded-extension.sh"
+  fi
+  if [ "$vendored_xterm_fail" -gt 0 ]; then
+    echo "RESULT: FAIL — the embedded vendored xterm assets (xterm.js/xterm.css/"
+    echo "        addon-fit.js) do not match the pinned provenance manifest VENDOR.txt,"
+    echo "        or the LICENSE is missing (see the vendored-xterm provenance gate"
+    echo "        above). A tampered/upgraded vendored asset must not ship."
   fi
   exit 1
 fi

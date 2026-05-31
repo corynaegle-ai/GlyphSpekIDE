@@ -44,6 +44,7 @@ function emptyRunView(runId) {
             cliFidelity: 'n/a',
             creationTrust: 'unknown',
             actorType: 'unknown',
+            loopbackProxyBypass: false,
         },
         trace: [],
         claims: null,
@@ -97,6 +98,12 @@ function reduceRunEvent(view, event) {
                 creationTrust: o.trust,
                 actorType: o.actorType,
                 ...(o.actorVersion ? { actorVersion: o.actorVersion } : {}),
+                // F2: carry the loopback-bypass posture so the panel can label loopback as
+                // unobserved local traffic (the carve-out means it is NOT in the trace).
+                loopbackProxyBypass: o.loopbackProxyBypass === true,
+                ...(o.loopbackProxyBypassReason
+                    ? { loopbackProxyBypassReason: o.loopbackProxyBypassReason }
+                    : {}),
             };
             next.status = o.state ?? 'created';
             next.productTrustEligible = (0, runEventProtocol_1.isProductTrustEligible)({
@@ -249,10 +256,16 @@ function deriveNetwork(trace) {
     for (const e of trace) {
         const p = payloadOf(e);
         if (e.type === 'policy_decision' && p.tool === 'network') {
+            // F1: a soft-plane observe-only egress is OBSERVED, not a policy allow.
+            // Surface it distinctly so the panel never reads it as "policy: allowed".
+            const observeOnly = p.enforcement === 'observe-only';
             out.push({
                 destination: String(p.destination ?? p.requestedCapability ?? '(unknown)'),
                 decision: String(p.decision ?? ''),
-                blocked: Boolean(p.blocked),
+                // An observe-only egress was let THROUGH (not blocked); it is recorded as
+                // observed. `blocked` reflects only a real enforced block.
+                blocked: observeOnly ? false : Boolean(p.blocked),
+                observeOnly,
             });
         }
     }
@@ -264,13 +277,18 @@ function derivePolicyDecisions(trace) {
         if (e.type !== 'policy_decision')
             continue;
         const p = payloadOf(e);
+        // F1: carry the observe-only enforcement posture through so a consumer never
+        // reads a soft-plane observation's back-compat `decision:'allow'` as a real
+        // policy allow.
+        const observeOnly = p.enforcement === 'observe-only';
         out.push({
             tool: String(p.tool ?? ''),
             requestedCapability: String(p.requestedCapability ?? ''),
             decision: String(p.decision ?? ''),
-            blocked: Boolean(p.blocked),
+            blocked: observeOnly ? false : Boolean(p.blocked),
             ...(p.rule ? { rule: String(p.rule) } : {}),
             ...(p.provenanceLabel ? { provenanceLabel: String(p.provenanceLabel) } : {}),
+            ...(observeOnly ? { enforcement: 'observe-only' } : {}),
         });
     }
     return out;

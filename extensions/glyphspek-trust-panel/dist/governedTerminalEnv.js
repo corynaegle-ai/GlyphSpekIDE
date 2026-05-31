@@ -16,11 +16,13 @@
  * SOFT BOUNDARY (sweep-23, governed-unsandboxed). The terminal env FORCES the
  * CLI's egress through the supervisor-owned metadata-only proxy by setting
  * HTTPS_PROXY/HTTP_PROXY = proxyUrl, EXEMPTING ONLY LOOPBACK via
- * NO_PROXY=localhost,127.0.0.1,::1 — so the CLI's external egress is observed into
+ * NO_PROXY={@link LOOPBACK_NO_PROXY} — so the CLI's external egress is observed into
  * the run's trace while its OWN localhost OAuth callback (e.g. Claude Code's sign-in
  * redirect to 127.0.0.1) is not forced through the proxy and 403/ECONNREFUSED'd.
  * Loopback is the machine talking to itself, not external egress, so the exemption
- * does not weaken external-egress observation. This is the SOFT boundary: a CLI that
+ * does not weaken external-egress observation — but loopback itself BYPASSES the
+ * proxy and is UNOBSERVED (NOT recorded); the session surfaces that honestly as a
+ * `loopback_proxy_bypass` run fact. This is the SOFT boundary: a CLI that
  * strips these vars and opens a raw socket bypasses the proxy. Hard containment
  * (per-run network namespace / container with a default-DROP route) is the hard-mode
  * follow-on. We do NOT claim hard containment, and the session is NEVER
@@ -41,10 +43,25 @@
  * ─────────────────────────────────────────────────────────────────────────────
  */
 Object.defineProperty(exports, "__esModule", { value: true });
-exports.PRESERVED_TERMINAL_ENV_NAMES = void 0;
+exports.PRESERVED_TERMINAL_ENV_NAMES = exports.LOOPBACK_NO_PROXY = void 0;
 exports.isPreservedTerminalEnvName = isPreservedTerminalEnvName;
 exports.sanitizeTerminalBaseEnv = sanitizeTerminalBaseEnv;
 exports.buildGovernedTerminalEnv = buildGovernedTerminalEnv;
+/**
+ * The loopback carve-out value for NO_PROXY/no_proxy (F2, sweep-30). MIRROR of the
+ * spikes' canonical `LOOPBACK_NO_PROXY` (p0-sandbox/egress-proxy.ts): the extension
+ * is a SEPARATE build package and cannot import the spikes tree, exactly as the
+ * env-sanitization allow-list and the RPC shapes are mirrored here. A conformance
+ * test pins this byte-for-byte equal to the spike constant so the carve-out cannot
+ * drift.
+ *
+ * READ THIS. Loopback exempted here BYPASSES the governed proxy and is therefore
+ * UNOBSERVED — the machine talking to itself (local IPC / a CLI's localhost OAuth
+ * callback), NOT external egress. Exempting it does not weaken EXTERNAL-egress
+ * observation, but it means "every destination is recorded" is FALSE: loopback is
+ * not. The session surfaces this honestly as a `loopback_proxy_bypass` run fact.
+ */
+exports.LOOPBACK_NO_PROXY = 'localhost,127.0.0.1,::1';
 /**
  * Environment variable NAMES ALWAYS preserved into the governed terminal — the
  * EXHAUSTIVE allow-list of process basics a CLI needs to run, plus locale (handled
@@ -156,13 +173,16 @@ function buildGovernedTerminalEnv(opts) {
     env.https_proxy = opts.proxyUrl;
     env.HTTP_PROXY = opts.proxyUrl;
     env.http_proxy = opts.proxyUrl;
-    // EXEMPT LOOPBACK from the proxy. An empty NO_PROXY would force loopback THROUGH the
-    // proxy, which breaks a CLI's localhost OAuth callback (e.g. Claude Code's sign-in
-    // listens on 127.0.0.1 and the redirect would hit the proxy → ECONNREFUSED). Loopback
-    // is the machine talking to ITSELF, not external egress, so exempting it does NOT
-    // weaken external-egress observation (the trace still records every real destination).
-    env.NO_PROXY = 'localhost,127.0.0.1,::1';
-    env.no_proxy = 'localhost,127.0.0.1,::1';
+    // EXEMPT LOOPBACK from the proxy via the ONE shared carve-out value (F2). An empty
+    // NO_PROXY would force loopback THROUGH the proxy, which breaks a CLI's localhost
+    // OAuth callback (e.g. Claude Code's sign-in listens on 127.0.0.1 and the redirect
+    // would hit the proxy → ECONNREFUSED). Loopback is the machine talking to ITSELF,
+    // not external egress, so exempting it does NOT weaken external-egress observation
+    // (the trace still records every real EXTERNAL destination) — but loopback itself
+    // BYPASSES the proxy and is UNOBSERVED, surfaced honestly as a loopback_proxy_bypass
+    // run fact so the Trust Panel labels it as unobserved local traffic.
+    env.NO_PROXY = exports.LOOPBACK_NO_PROXY;
+    env.no_proxy = exports.LOOPBACK_NO_PROXY;
     return {
         env,
         // strictEnv only in the sanitized posture: the env IS the whole environment.

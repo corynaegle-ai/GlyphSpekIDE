@@ -775,10 +775,14 @@ function deriveNetwork(trace) {
   const out = [];
   for (const e of trace) {
     if (e.type === 'policy_decision' && e.payload && e.payload.tool === 'network') {
+      // F1: an observe-only egress is OBSERVED on the bypassable soft plane, NOT a
+      // policy allow — surface it distinctly so it never reads as "policy: allowed".
+      const obs = e.payload.enforcement === 'observe-only';
       out.push({
         destination: e.payload.destination || e.payload.requestedCapability,
         decision: e.payload.decision,
-        blocked: !!e.payload.blocked,
+        blocked: obs ? false : !!e.payload.blocked,
+        observeOnly: obs,
       });
     }
   }
@@ -788,14 +792,18 @@ function deriveNetwork(trace) {
 function derivePolicyDecisions(trace) {
   return trace
     .filter((e) => e.type === 'policy_decision')
-    .map((e) => ({
-      tool: e.payload.tool,
-      requestedCapability: e.payload.requestedCapability,
-      decision: e.payload.decision,
-      blocked: !!e.payload.blocked,
-      rule: e.payload.rule,
-      provenanceLabel: e.payload.provenanceLabel,
-    }));
+    .map((e) => {
+      const obs = e.payload.enforcement === 'observe-only';
+      return {
+        tool: e.payload.tool,
+        requestedCapability: e.payload.requestedCapability,
+        decision: e.payload.decision,
+        blocked: obs ? false : !!e.payload.blocked,
+        rule: e.payload.rule,
+        provenanceLabel: e.payload.provenanceLabel,
+        enforcement: obs ? 'observe-only' : undefined,
+      };
+    });
 }
 
 /* ------------------------------------------------------------------ *
@@ -1354,7 +1362,15 @@ function renderNetwork() {
     td.appendChild(el('code', { text: n.destination }));
     tr.appendChild(td);
     const dec = el('td');
-    dec.appendChild(el('span', { className: 'chip chip-decision decision-' + n.decision, text: n.decision }));
+    // F1: observe-only egress reads as OBSERVED (soft default-allow), distinct from
+    // a real "policy: allowed".
+    if (n.observeOnly) {
+      dec.appendChild(el('span', { className: 'chip chip-decision decision-observe', text: 'observed (soft, default-allow)' }));
+    } else if (n.decision === 'allow') {
+      dec.appendChild(el('span', { className: 'chip chip-decision decision-allow', text: 'policy: allowed' }));
+    } else {
+      dec.appendChild(el('span', { className: 'chip chip-decision decision-' + n.decision, text: n.decision }));
+    }
     tr.appendChild(dec);
     tbl.appendChild(tr);
   }
