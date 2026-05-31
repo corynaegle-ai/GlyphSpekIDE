@@ -1225,7 +1225,7 @@ var DEFAULT_MODEL_ENDPOINTS = [
   }
 ];
 var AGENT_SUPPORT_HOSTS = {
-  "claude-code-cli": ["claude.ai", "console.anthropic.com", "downloads.claude.ai", "statsig.anthropic.com"],
+  "claude-code-cli": ["claude.ai", "console.anthropic.com", "downloads.claude.ai", "platform.claude.com", "statsig.anthropic.com"],
   "codex-cli": ["auth.openai.com"]
 };
 function agentSupportAllowEntries(actorType) {
