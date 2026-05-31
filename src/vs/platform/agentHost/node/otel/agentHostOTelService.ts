@@ -5,7 +5,7 @@
 
 import { mkdir } from 'fs/promises';
 import { dirname, join } from '../../../../base/common/path.js';
-import type { TelemetryConfig } from '@github/copilot-sdk';
+import type { TelemetryConfig } from '../shared/copilotSdkStub.js';
 import { Disposable, toDisposable } from '../../../../base/common/lifecycle.js';
 import { URI } from '../../../../base/common/uri.js';
 import { INativeEnvironmentService } from '../../../environment/common/environment.js';

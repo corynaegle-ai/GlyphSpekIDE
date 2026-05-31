@@ -35,7 +35,7 @@
 
 import type Anthropic from '@anthropic-ai/sdk';
 import type { GetSessionMessagesOptions, Options, PermissionResult, Query, SDKMessage, SDKResultSuccess, SDKSessionInfo, SDKSystemMessage, SDKUserMessage, SessionMessage, WarmQuery } from '@anthropic-ai/claude-agent-sdk';
-import type { CCAModel } from '@vscode/copilot-api';
+import type { CCAModel } from '../../node/shared/copilotApiStub.js';
 import assert from 'assert';
 import type * as http from 'http';
 import { URI } from '../../../../base/common/uri.js';

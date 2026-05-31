@@ -3,7 +3,7 @@
  *  Licensed under the MIT License. See License.txt in the project root for license information.
  *--------------------------------------------------------------------------------------------*/
 
-import type { SessionEventPayload } from '@github/copilot-sdk';
+import type { SessionEventPayload } from '../shared/copilotSdkStub.js';
 import { localize } from '../../../../nls.js';
 
 export interface ICopilotSystemNotification {

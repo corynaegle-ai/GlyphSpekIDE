@@ -5,7 +5,7 @@
 
 import assert from 'assert';
 import type Anthropic from '@anthropic-ai/sdk';
-import type { CCAModel } from '@vscode/copilot-api';
+import type { CCAModel } from '../../node/shared/copilotApiStub.js';
 import type * as http from 'http';
 import * as net from 'net';
 import { ensureNoDisposablesAreLeakedInTestSuite } from '../../../../base/test/common/utils.js';

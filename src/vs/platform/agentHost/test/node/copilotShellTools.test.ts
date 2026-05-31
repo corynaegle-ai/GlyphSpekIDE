@@ -4,7 +4,7 @@
  *--------------------------------------------------------------------------------------------*/
 
 import assert from 'assert';
-import type { Tool, ToolInvocation, ToolResultObject } from '@github/copilot-sdk';
+import type { Tool, ToolInvocation, ToolResultObject } from '../../node/shared/copilotSdkStub.js';
 import { DeferredPromise } from '../../../../base/common/async.js';
 import { URI } from '../../../../base/common/uri.js';
 import * as platform from '../../../../base/common/platform.js';

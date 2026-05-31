@@ -6,7 +6,7 @@
 import type Anthropic from '@anthropic-ai/sdk';
 import type { GetSessionMessagesOptions, McpSdkServerConfigWithInstance, Options, PermissionMode, Query, SDKMessage, SDKSessionInfo, SDKUserMessage, SdkMcpToolDefinition, SessionMessage, Settings, WarmQuery } from '@anthropic-ai/claude-agent-sdk';
 import type { CallToolResult } from '@modelcontextprotocol/sdk/types.js';
-import type { CCAModel } from '@vscode/copilot-api';
+import type { CCAModel } from '../../node/shared/copilotApiStub.js';
 
 import assert from 'assert';
 import {

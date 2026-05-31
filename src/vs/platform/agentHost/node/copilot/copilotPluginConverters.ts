@@ -4,7 +4,7 @@
  *--------------------------------------------------------------------------------------------*/
 
 import { spawn } from 'child_process';
-import type { CustomAgentConfig, MCPServerConfig, SessionConfig } from '@github/copilot-sdk';
+import type { CustomAgentConfig, MCPServerConfig, SessionConfig } from '../shared/copilotSdkStub.js';
 import { OperatingSystem, OS } from '../../../../base/common/platform.js';
 import { parseFrontMatter } from '../../../../base/common/yaml.js';
 import { IFileService } from '../../../files/common/files.js';

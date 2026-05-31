@@ -4,7 +4,7 @@
  *--------------------------------------------------------------------------------------------*/
 
 import type Anthropic from '@anthropic-ai/sdk';
-import type { CCAModel } from '@vscode/copilot-api';
+import type { CCAModel } from '../shared/copilotApiStub.js';
 import type * as http from 'http';
 import { once } from 'events';
 import { AddressInfo } from 'net';
