@@ -927,7 +927,7 @@ function activate(context) {
         }
         const instruction = await vscode.window.showInputBox({
             prompt: `GlyphSpek inline edit — instruction for ${sel.ref}`,
-            placeHolder: 'e.g. "add input validation" — the model call is brokered + diff-gated',
+            placeHolder: 'e.g. "add input validation" — demo preview, not yet brokered or diff-gated',
         });
         if (instruction === undefined)
             return; // cancelled

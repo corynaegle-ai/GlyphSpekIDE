@@ -89,10 +89,17 @@ function startEgressProxy(options) {
     upstreamLookup[k.toLowerCase()] = v;
   }
   const dialHost = (requestedHost) => upstreamLookup[requestedHost.toLowerCase()] ?? requestedHost;
+  const health = {
+    decisionFailures: 0,
+    tunnelFailures: 0,
+    bytesFailures: 0,
+    closeFailures: 0
+  };
   const emit = (d) => {
     try {
       options.onDecision?.(d);
     } catch {
+      health.decisionFailures += 1;
     }
   };
   const server = createServer();
@@ -176,6 +183,8 @@ function startEgressProxy(options) {
     clientReq.pipe(upstream);
   });
   server.on("connect", (req, clientSocket, head) => {
+    clientSocket.on("error", () => {
+    });
     const authority = req.url ?? "";
     const { host, port } = splitHostPort(authority);
     const targetPort = port ?? DEFAULT_HTTPS_PORT;
@@ -222,18 +231,73 @@ egress denied by allowlist: ${host}:${targetPort}
       clientSocket.end();
       return;
     }
+    let observer;
+    let bytesUp = 0;
+    let bytesDown = 0;
+    let openedAt = 0;
+    let closed = false;
+    const tunnelId = randomUUID();
     const upstream = netConnect(targetPort, dialHost(host), () => {
       clientSocket.write("HTTP/1.1 200 Connection Established\r\n\r\n");
       if (head && head.length > 0) upstream.write(head);
+      if (options.onTunnel) {
+        try {
+          observer = options.onTunnel({ host, port: targetPort, id: tunnelId });
+        } catch {
+          observer = void 0;
+          health.tunnelFailures += 1;
+        }
+        openedAt = Date.now();
+        if (head && head.length > 0) {
+          bytesUp += head.length;
+          try {
+            observer?.onBytes?.("up", head.length);
+          } catch {
+            health.bytesFailures += 1;
+          }
+        }
+        clientSocket.on("data", (chunk) => {
+          bytesUp += chunk.length;
+          try {
+            observer?.onBytes?.("up", chunk.length);
+          } catch {
+            health.bytesFailures += 1;
+          }
+        });
+        upstream.on("data", (chunk) => {
+          bytesDown += chunk.length;
+          try {
+            observer?.onBytes?.("down", chunk.length);
+          } catch {
+            health.bytesFailures += 1;
+          }
+        });
+      }
       upstream.pipe(clientSocket);
       clientSocket.pipe(upstream);
     });
+    const emitClose = () => {
+      if (closed || !options.onTunnel || openedAt === 0) return;
+      closed = true;
+      try {
+        observer?.onClose?.({
+          bytesUp,
+          bytesDown,
+          durationMs: Date.now() - openedAt
+        });
+      } catch {
+        health.closeFailures += 1;
+      }
+    };
     const teardownPair = () => {
+      emitClose();
       upstream.destroy();
       clientSocket.destroy();
     };
     upstream.on("error", teardownPair);
     clientSocket.on("error", teardownPair);
+    upstream.on("close", emitClose);
+    clientSocket.on("close", emitClose);
   });
   server.on("clientError", (_err, socket) => {
     if (socket.writable) {
@@ -257,6 +321,9 @@ egress denied by allowlist: ${host}:${targetPort}
         port,
         url: `http://${proxyHost}:${port}`,
         proxyHost,
+        observerHealth() {
+          return { ...health };
+        },
         close() {
           return new Promise((res) => {
             server.close(() => res());
