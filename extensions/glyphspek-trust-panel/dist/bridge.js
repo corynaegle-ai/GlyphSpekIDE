@@ -49,10 +49,37 @@ exports.SupervisorBridge = exports.defaultBridgeSpawn = void 0;
 const node_child_process_1 = require("node:child_process");
 const supervisorBinary_1 = require("./supervisorBinary");
 const bridgeProtocol_1 = require("./bridgeProtocol");
-/** The default production spawn: real child process, stdio piped. */
-const defaultBridgeSpawn = (command, args, options) => (0, node_child_process_1.spawn)(command, args, options);
+/**
+ * The default production spawn: real child process, stdio piped. The child's
+ * stderr (operator `[bridge-server]` log lines) is NOT consumed by the bridge,
+ * so its pipe is unref'd and continuously drained — an unread, referenced stderr
+ * pipe would otherwise keep the host's event loop open and hang `node --test`.
+ */
+const defaultBridgeSpawn = (command, args, options) => {
+    const child = (0, node_child_process_1.spawn)(command, args, options);
+    // Drain + unref the unread stderr so a chatty child never blocks on a full pipe
+    // and its handle never holds the parent process open at teardown.
+    const stderr = child.stderr;
+    if (stderr) {
+        stderr.on('data', () => {
+            /* discard: the bridge surfaces failures via stdout RPCs, not child stderr */
+        });
+        stderr.on('error', () => {
+            /* a broken stderr pipe is benign during teardown */
+        });
+        stderr.unref?.();
+    }
+    return child;
+};
 exports.defaultBridgeSpawn = defaultBridgeSpawn;
 const DEFAULT_REQUEST_TIMEOUT_MS = 30_000;
+/**
+ * Grace period between the polite SIGTERM and the SIGKILL escalation in dispose().
+ * The bridge-server exits cleanly on stdin-end/SIGTERM in the normal case; this
+ * fallback guarantees a child that ignores SIGTERM (e.g. mid-run with the egress
+ * proxy socket still open) is force-reaped so it never leaks past teardown.
+ */
+const DISPOSE_FORCE_KILL_MS = 1_000;
 /**
  * The private supervisor bridge client. Construct, then `connect()` (spawn +
  * hash-pin + handshake), then `createRun()`. Always `dispose()` to tear down the
@@ -366,7 +393,26 @@ class SupervisorBridge {
         const r = response.result;
         return { ok: true, runId: r.runId, verdict: r.verdict };
     }
-    /** Tear down the child and reject all pending requests. Idempotent. */
+    /**
+     * Tear down the child and reject all pending requests. Idempotent.
+     *
+     * Teardown is made LEAK-PROOF so a disposed bridge never holds the host's event
+     * loop open INDEFINITELY (otherwise `node --test` cannot exit and the suite
+     * hangs), while still guaranteeing the spawned child is actually reaped:
+     *   1. End stdin — the bridge-server exits 0 on stdin 'end' (its normal path).
+     *   2. SIGTERM the child (the polite kill). A well-behaved child exits here; its
+     *      'close' (wired in wireChild) clears the fallback timer immediately, so the
+     *      host loop drains at once.
+     *   3. Destroy the stdio pipes so those handles stop referencing the loop right
+     *      away (a still-draining child's pipes never hold the host open).
+     *   4. Arm a SHORT, REFERENCED SIGKILL fallback so a child that IGNORES SIGTERM
+     *      (e.g. mid-run with the egress-proxy socket still open) is force-reaped
+     *      within the grace window. The timer is deliberately NOT unref'd: it is the
+     *      one thing that must keep the loop alive just long enough to land SIGKILL
+     *      and actually reap the child rather than orphaning it. It is a one-shot of
+     *      DISPOSE_FORCE_KILL_MS, so the worst case is a brief wind-down, never a hang.
+     * destroy()/unref()/kill() are all best-effort (test fakes omit the optionals).
+     */
     dispose() {
         if (this.closed)
             return;
@@ -377,18 +423,52 @@ class SupervisorBridge {
             p.resolve(this.errorResponse(0, bridgeProtocol_1.BridgeErrorCode.InvalidRequest, 'bridge disposed'));
         }
         this.pending.clear();
+        const child = this.child;
+        if (!child)
+            return;
+        // (1) Close stdin: the normal, clean exit path for the bridge-server.
         try {
-            this.child?.stdin?.end?.();
+            child.stdin?.end?.();
+        }
+        catch {
+            /* already gone */
+        }
+        // (2) Polite SIGTERM.
+        try {
+            child.kill('SIGTERM');
+        }
+        catch {
+            /* already gone */
+        }
+        // (3) Detach the stdio pipes so their handles stop referencing the host loop.
+        try {
+            child.stdout?.destroy?.();
         }
         catch {
             /* already gone */
         }
         try {
-            this.child?.kill('SIGTERM');
+            child.stdin?.destroy?.();
         }
         catch {
             /* already gone */
         }
+        // (4) SIGKILL fallback for a child that ignores SIGTERM. Kept REFERENCED (and
+        //     short) so it reliably fires to reap the child instead of orphaning it;
+        //     the child's 'close' (wireChild) clears it the instant the child exits.
+        const timer = setTimeout(() => {
+            // Send SIGKILL UNCONDITIONALLY: child.killed is set true by the earlier
+            // kill('SIGTERM') even when the process IGNORED it, so it cannot gate this.
+            // kill() on an already-exited child is a harmless no-op (throws ESRCH, caught).
+            try {
+                child.kill('SIGKILL');
+            }
+            catch {
+                /* already gone */
+            }
+            this.killTimer = undefined;
+        }, DISPOSE_FORCE_KILL_MS);
+        this.killTimer = timer;
     }
     /* ----------------------- internals ----------------------- */
     /** Wire the child's stdout (NDJSON in) + error/close handlers. */
@@ -411,6 +491,12 @@ class SupervisorBridge {
             this.failAllPending(`supervisor process error: ${String(err?.message ?? err)}`);
         });
         child.on('close', (code) => {
+            // The child left on its own — cancel any pending SIGKILL escalation so the
+            // dispose() fallback timer never outlives the process it was guarding.
+            if (this.killTimer) {
+                clearTimeout(this.killTimer);
+                this.killTimer = undefined;
+            }
             this.closeReason =
                 `supervisor exited (code ${code ?? 'null'}) before the request completed.`;
             this.failAllPending(this.closeReason);
