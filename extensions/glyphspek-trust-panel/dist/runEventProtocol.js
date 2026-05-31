@@ -32,6 +32,7 @@ Object.defineProperty(exports, "__esModule", { value: true });
 exports.RUN_FAILURE_KINDS = exports.RunFailureKind = exports.RunEventKind = exports.CLI_FIDELITY_VALUES = exports.STREAM_EXTENSION_POSTURES = exports.RUNTIME_TRUST_VALUES = exports.RUN_EVENT_PROTOCOL_VERSION = void 0;
 exports.validateRunEvent = validateRunEvent;
 exports.isProductTrustEligible = isProductTrustEligible;
+const bridgeProtocol_1 = require("./bridgeProtocol");
 /* ============================================================== *
  * VERSIONING
  * ============================================================== */
@@ -160,7 +161,12 @@ function validateRunEvent(input) {
             const o = e;
             if (!nonEmptyString(o.actorType))
                 problems.push('actorType');
-            if (o.trust !== 'trusted' && o.trust !== 'untrusted' && o.trust !== 'refused') {
+            // Validate `trust` against the canonical RUN_TRUSTS set (bridgeProtocol.ts)
+            // rather than a hardcoded list, so EVERY valid posture is accepted —
+            // including `governed-unsandboxed` (the governed terminal posture, sweep-23
+            // #2). Product-trust is gated SEPARATELY by isProductTrustEligible (strict
+            // `trusted`), so accepting the value here never confers product authority.
+            if (!bridgeProtocol_1.RUN_TRUSTS.includes(o.trust)) {
                 problems.push('trust');
             }
             if (!nonEmptyString(o.runtimeProfile))

@@ -215,7 +215,11 @@ class SupervisorBridge {
             return { trust: 'refused', reason };
         }
         const result = response.result;
-        if (!result || (result.trust !== 'trusted' && result.trust !== 'untrusted' && result.trust !== 'refused')) {
+        // Accept any posture in the canonical RUN_TRUSTS set (including
+        // `governed-unsandboxed`, sweep-23 #2) rather than a hardcoded list. Product
+        // trust is gated SEPARATELY below by the strict `=== 'trusted'` invariant, so
+        // a non-`trusted` posture is surfaced honestly but never product-trusted.
+        if (!result || !bridgeProtocol_1.RUN_TRUSTS.includes(result.trust)) {
             const reason = 'malformed run/create result from supervisor.';
             this.opts.log.appendLine(`[bridge] ${reason} — treating as refused.`);
             return { trust: 'refused', reason };
@@ -280,6 +284,87 @@ class SupervisorBridge {
             return { decision: 'deny', ok: false, error: 'malformed model/call result from supervisor.' };
         }
         return result;
+    }
+    /* ============================================================== *
+     * GOVERNED TERMINAL SESSION RPC (M7 — the in-IDE Governed Terminal)
+     * ============================================================== */
+    /**
+     * Start a GOVERNED TERMINAL SESSION (`terminal/start`). The supervisor stands up
+     * the metadata-only egress governance proxy, creates a real run, and begins
+     * streaming the SAME `run/event` notifications the live Trust Panel consumes
+     * (delivered to {@link setRunEventHandler}). This call returns the supervised
+     * session handle ({ runId, proxyUrl, posture, trust }); it does NOT spawn the CLI
+     * — that is the UI's job (set HTTPS_PROXY/HTTP_PROXY = proxyUrl on the terminal).
+     *
+     * The bridge MUST stay alive across this call AND the trailing run/event stream
+     * (the caller owns the lifetime and calls {@link terminalStop} when the terminal
+     * closes). Resolves (never rejects) with `{ ok, ... }`; a transport/server error
+     * or a malformed/credential-bearing result resolves as `{ ok: false }` so the
+     * command path never throws and never opens an ungoverned terminal.
+     *
+     * CREDENTIAL FIREWALL: the result is re-validated with
+     * {@link validateTerminalStartResult}; a result carrying a credential-shaped field
+     * (which it never should — the proxy is metadata-only) fails closed.
+     */
+    async terminalStart(params) {
+        if (!this.ready || !this.child || this.closed) {
+            const reason = this.closeReason || 'bridge is not connected (handshake not completed).';
+            return { ok: false, reason };
+        }
+        // CLIENT-SIDE §10.3 validation: a partial run request never opens a governed
+        // session (mirrors createRun). A missing identity/posture field => refused.
+        const validation = (0, bridgeProtocol_1.validateRunRequest)(params.request);
+        if (!validation.ok) {
+            const reason = `terminal session request missing required field(s): ${validation.missing.join(', ')}`;
+            this.opts.log.appendLine(`[bridge] ${reason} — refusing (no governed terminal).`);
+            return { ok: false, reason };
+        }
+        const response = await this.request(bridgeProtocol_1.BridgeMethod.TerminalStart, {
+            request: validation.request,
+        });
+        if (response.error) {
+            this.opts.log.appendLine(`[bridge] terminal/start error ${response.error.code}: ${response.error.message}`);
+            return { ok: false, reason: response.error.message };
+        }
+        const result = response.result;
+        const shape = (0, bridgeProtocol_1.validateTerminalStartResult)(result);
+        if (!shape.ok) {
+            const reason = `malformed terminal/start result (${shape.problems.join(', ')}).`;
+            this.opts.log.appendLine(`[bridge] ${reason} — treating as not started.`);
+            return { ok: false, reason };
+        }
+        const r = result;
+        return { ok: true, runId: r.runId, proxyUrl: r.proxyUrl, posture: r.posture, trust: r.trust };
+    }
+    /**
+     * Stop a governed terminal session (`terminal/stop`). The supervisor closes the
+     * egress proxy and FINALIZES the run with the Ed25519-signed verdict over the live
+     * trace root. The verdict's `assurance` ('full' | 'degraded') is bound into the
+     * SIGNED record (sweep-22 #45): a degraded session must never be presented as
+     * fully trusted. Resolves (never rejects); a malformed/credential-bearing verdict
+     * fails closed.
+     */
+    async terminalStop(params) {
+        if (!this.ready || !this.child || this.closed) {
+            const reason = this.closeReason || 'bridge is not connected (handshake not completed).';
+            return { ok: false, reason };
+        }
+        if (!params.runId) {
+            return { ok: false, reason: 'terminalStop requires a runId' };
+        }
+        const response = await this.request(bridgeProtocol_1.BridgeMethod.TerminalStop, { runId: params.runId });
+        if (response.error) {
+            this.opts.log.appendLine(`[bridge] terminal/stop error ${response.error.code}: ${response.error.message}`);
+            return { ok: false, reason: response.error.message };
+        }
+        const shape = (0, bridgeProtocol_1.validateTerminalStopResult)(response.result);
+        if (!shape.ok) {
+            const reason = `malformed terminal/stop result (${shape.problems.join(', ')}).`;
+            this.opts.log.appendLine(`[bridge] ${reason} — treating as not finalized.`);
+            return { ok: false, reason };
+        }
+        const r = response.result;
+        return { ok: true, runId: r.runId, verdict: r.verdict };
     }
     /** Tear down the child and reject all pending requests. Idempotent. */
     dispose() {

@@ -20,6 +20,7 @@
     "onCommand:glyphspek.bridgeSupervisedRun",
     "onCommand:glyphspek.startLiveRun",
     "onCommand:glyphspek.demoLiveRun",
+    "onCommand:glyphspek.openGovernedTerminal",
     "onCommand:glyphspek.openChat",
     "onCommand:glyphspek.inlineEdit"
   ],
@@ -50,12 +51,16 @@
         "title": "GlyphSpek: Demo Live Run (Trust Panel)"
       },
       {
+        "command": "glyphspek.openGovernedTerminal",
+        "title": "GlyphSpek: Open Governed Terminal"
+      },
+      {
         "command": "glyphspek.openChat",
-        "title": "GlyphSpek: Open Governed Chat"
+        "title": "GlyphSpek: Open Chat (Demo)"
       },
       {
         "command": "glyphspek.inlineEdit",
-        "title": "GlyphSpek: Inline Edit (governed)"
+        "title": "GlyphSpek: Inline Edit (Demo)"
       }
     ],
     "configuration": {
@@ -122,7 +127,7 @@
   "scripts": {
     "bundle:supervisor": "node scripts/build-supervisor.mjs",
     "compile": "npm run bundle:supervisor && tsc -p .",
-    "test": "npm run bundle:supervisor && tsc -p . && node --test test/inlineScript.test.mjs test/configScope.test.mjs test/supervisorRunner.test.mjs test/policyHash.test.mjs test/bridgeProtocol.test.mjs test/bridgeContractConformance.test.mjs test/bridge.test.mjs test/bridgeServerSpawn.test.mjs test/liveRunStream.test.mjs test/runEventProtocol.test.mjs test/liveRunModel.test.mjs test/mockRunStream.test.mjs test/liveReducerGolden.test.mjs test/chatViewModel.test.mjs test/chatDemoState.test.mjs test/chatModelSelection.test.mjs test/operatorGesture.test.mjs test/runGovernedTaskGate.test.mjs test/webviewGestureGate.test.mjs test/liveSchemaGate.test.mjs",
+    "test": "npm run bundle:supervisor && tsc -p . && node --test test/inlineScript.test.mjs test/configScope.test.mjs test/supervisorRunner.test.mjs test/policyHash.test.mjs test/bridgeProtocol.test.mjs test/bridgeContractConformance.test.mjs test/bridge.test.mjs test/bridgeServerSpawn.test.mjs test/liveRunStream.test.mjs test/runEventProtocol.test.mjs test/liveRunModel.test.mjs test/mockRunStream.test.mjs test/liveReducerGolden.test.mjs test/chatViewModel.test.mjs test/chatDemoState.test.mjs test/chatModelSelection.test.mjs test/operatorGesture.test.mjs test/runGovernedTaskGate.test.mjs test/webviewGestureGate.test.mjs test/liveSchemaGate.test.mjs test/governedTerminalEnv.test.mjs test/governedTerminalSession.test.mjs test/openGovernedTerminalCommand.test.mjs",
     "package": "npm run bundle:supervisor && tsc -p . && vsce package --no-dependencies"
   },
   "devDependencies": {

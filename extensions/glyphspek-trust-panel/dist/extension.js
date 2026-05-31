@@ -60,6 +60,8 @@ const crypto = __importStar(require("node:crypto"));
 const node_child_process_1 = require("node:child_process");
 const supervisorRunner_1 = require("./supervisorRunner");
 const supervisorBridgeRunner_1 = require("./supervisorBridgeRunner");
+const governedTerminalEnv_1 = require("./governedTerminalEnv");
+const agentCli_1 = require("./agentCli");
 const inlineScript_1 = require("./inlineScript");
 const policyHash_1 = require("./policyHash");
 const runEventProtocol_1 = require("./runEventProtocol");
@@ -982,6 +984,15 @@ function activate(context) {
     // per session; disposed with the extension.
     const supervisorOutput = vscode.window.createOutputChannel('GlyphSpek Governed Run');
     context.subscriptions.push(supervisorOutput);
+    // GOVERNED TERMINAL (M7). Opens a REAL VS Code terminal whose egress is FORCED
+    // through the supervisor-owned metadata-only proxy and whose env is sanitized of
+    // ambient host secrets/capability handles, then streams the session's governed
+    // model-call + egress-decision metadata LIVE into the Trust Panel. This surface is
+    // honestly GOVERNED (egress proxied, trace signed) but UNSANDBOXED — the
+    // `governed-unsandboxed` posture — so it can NEVER mint a product-trusted run and
+    // is NOT routed through the trusted-run gesture gate below (there is no product-
+    // trust lever to protect). The command opens the governed terminal directly.
+    context.subscriptions.push(vscode.commands.registerCommand('glyphspek.openGovernedTerminal', () => openGovernedTerminal(context, supervisorOutput)));
     // FIRST-PARTY WEBVIEW GESTURE GATE (sweep-20 High #3 — rework of sweep-19).
     //
     // ALL THREE trusted-run paths (governed / bridge / live) are PRODUCT-TRUSTED:
@@ -1204,6 +1215,165 @@ async function startLiveRun(context, output, gestures, gestureToken) {
     }
     else {
         void vscode.window.showWarningMessage(`GlyphSpek: streamed a LIVE ${trustLabel} run (${result.runId})${finalState} into the Trust Panel — ${result.message}`);
+    }
+}
+/* ================================================================== *
+ * GOVERNED TERMINAL (M7 — the in-IDE Governed Terminal surface).
+ *
+ * Opens a REAL VS Code terminal the operator drives themselves (running their own
+ * `claude` / `codex`), with its egress FORCED through the supervisor-owned
+ * metadata-only proxy and its env sanitized of ambient host secrets/capability
+ * handles. The supervisor projects the session's egress decisions + boundary
+ * model-call METADATA (host, bytes up/down, duration — NO decrypted prompt/response
+ * content) into a hash-chained, signed trace and streams it as the SAME `run/event`
+ * feed the live Trust Panel renders.
+ *
+ * TRUST POSTURE (load-bearing, sweep-23 #2): this session is `governed-unsandboxed`
+ * — governed + traced but the SOFT boundary, UNSANDBOXED. It can NEVER be presented
+ * as product-trusted; the panel renders it honestly (the reducer's
+ * boundary_only_cli label + the creation-trust badge) and a `degraded` close-verdict
+ * is surfaced as lower-assurance. No product-trust gate is weakened: there is no
+ * trusted run to mint here.
+ * ================================================================== */
+/**
+ * Assemble the §10.3 run identity for a governed terminal session. Mirrors
+ * assembleBridgeRunRequest but for a CLI actor under the SOFT (local-exec /
+ * unsandboxed) boundary: the actorType is the detected CLI (claude-code-cli /
+ * codex-cli) or 'native' when none is installed, and the runtime profile is
+ * 'local-exec' (the supervisor settles the session into `governed-unsandboxed`
+ * regardless — this string never by itself confers product trust). Returns
+ * undefined (after surfacing the reason) when the operator cancelled or the policy
+ * could not be fingerprinted.
+ */
+async function assembleGovernedTerminalRequest(output, actorType) {
+    const repo = await resolveTargetRepo();
+    if (!repo) {
+        output.appendLine('[host] governed terminal aborted: no target repo selected.');
+        return undefined;
+    }
+    const resolvedPolicy = await resolvePolicyPath(resolveSupervisorPath().path);
+    if (!resolvedPolicy) {
+        output.appendLine('[host] governed terminal aborted: no policy selected.');
+        return undefined;
+    }
+    const policyFp = (0, policyHash_1.policyFileSha256)(resolvedPolicy.path);
+    if (!policyFp.sha256) {
+        void vscode.window.showErrorMessage(`GlyphSpek: could not fingerprint the policy file (${policyFp.note}); cannot open a governed terminal.`);
+        return undefined;
+    }
+    const sourceCommit = resolveSourceCommit(repo);
+    return {
+        actorType,
+        autonomyTier: 'allowlist',
+        policyPath: resolvedPolicy.path,
+        policyHash: policyFp.sha256,
+        workspaceRoot: repo,
+        // SOFT boundary: the terminal is not run inside a supervisor-owned sandbox. The
+        // supervisor settles this into `governed-unsandboxed` (never product-trusted).
+        runtimeProfile: 'local-exec',
+        extensionPosture: 'sovereign',
+        ...(sourceCommit ? { sourceCommit } : { worktreeBase: repo }),
+    };
+}
+/**
+ * Open the in-IDE Governed Terminal: start the supervised session over the bridge
+ * (terminal/start — NO client egress field, egress is supervisor-owned), open a VS
+ * Code terminal whose env routes egress through the returned proxy and strips
+ * ambient host secrets, stream the session's run/event feed into the Trust Panel
+ * LIVE, and finalize the run (terminal/stop) when the operator closes the terminal.
+ *
+ * Honest framing surfaced to the operator: this surface IS governed + traced but
+ * UNSANDBOXED (metadata-only; destinations + counts, NOT decrypted content), so it
+ * is never product-trusted. detectAgentCli makes `claude`/`codex` ergonomic (the
+ * command is PRE-TYPED for the operator to run — never force-run).
+ */
+async function openGovernedTerminal(context, output) {
+    output.show(true);
+    // Detect an installed agent CLI so we can (a) tag the actor identity and (b) make
+    // it ergonomic to launch. Detection only — we never force-run anything.
+    const detected = (0, agentCli_1.detectAgentCli)();
+    const actorType = detected?.agent === 'claude'
+        ? 'claude-code-cli'
+        : detected?.agent === 'codex'
+            ? 'codex-cli'
+            : 'native';
+    const request = await assembleGovernedTerminalRequest(output, actorType);
+    if (!request)
+        return;
+    // Open + reveal the Trust Panel FIRST so it is ready for the live stream.
+    // postRunEvent buffers any events that arrive before the webview signals ready.
+    const panel = TrustPanel.createOrShow(context.extensionUri, getWebviewGestureGate());
+    panel.reveal();
+    const start = await vscode.window.withProgress({
+        location: vscode.ProgressLocation.Notification,
+        cancellable: false,
+        title: 'GlyphSpek: opening governed terminal…',
+    }, () => (0, supervisorBridgeRunner_1.startGovernedTerminalSession)({
+        bridgeServerPath: resolveBundledBridgeServerPath(context),
+        extensionVersion: resolveExtensionVersion(context),
+        runsBase: resolveRunsBase(),
+        request,
+        output,
+        onRunEvent: (raw) => panel.postRunEvent(raw),
+    }));
+    if (!start.started || !start.session || !start.proxyUrl || !start.runId) {
+        void vscode.window.showErrorMessage(`GlyphSpek: could not open a governed terminal — ${start.message}`);
+        return;
+    }
+    // Build the governed terminal env: FORCE egress through the supervisor's proxy and
+    // STRIP ambient host secrets/capability handles (SSH_AUTH_SOCK, DOCKER_HOST, …) by
+    // default. strictEnv makes the provided env the COMPLETE environment — nothing
+    // ambient is inherited, so the secret firewall is default-deny (robust to unknown
+    // vars). The CLI authenticates from its OWN on-disk store (~/.claude, ~/.codex);
+    // we inject NO credential and set NO base-url override (anti-FauxCode).
+    const { env: terminalEnv, strictEnv } = (0, governedTerminalEnv_1.buildGovernedTerminalEnv)({
+        proxyUrl: start.proxyUrl,
+        baseEnv: process.env,
+    });
+    const terminal = vscode.window.createTerminal({
+        name: 'GlyphSpek Governed Terminal',
+        env: terminalEnv,
+        strictEnv,
+    });
+    // Tie the supervised session's lifetime to the terminal: when the operator closes
+    // it, FINALIZE the run (terminal/stop → signed verdict incl. assurance) and surface
+    // the finalized posture. A `degraded` verdict is shown as lower-assurance and is
+    // NEVER presented as fully trusted.
+    const session = start.session;
+    const closeSub = vscode.window.onDidCloseTerminal(async (closed) => {
+        if (closed !== terminal)
+            return;
+        closeSub.dispose();
+        const stop = await session.stop();
+        if (!stop.finalized || !stop.verdict) {
+            void vscode.window.showWarningMessage(`GlyphSpek: governed terminal ${session.runId} closed but did not finalize — ${stop.message}`);
+            return;
+        }
+        const degraded = stop.verdict.assurance === 'degraded';
+        const verdictLabel = `${stop.verdict.overallVerdict.toUpperCase()} (${degraded ? 'DEGRADED — lower assurance, not fully trusted' : 'assurance: full'})`;
+        if (degraded) {
+            void vscode.window.showWarningMessage(`GlyphSpek: governed terminal ${session.runId} finalized ${verdictLabel}. ` +
+                'This session was governed + traced but UNSANDBOXED (metadata-only) — never product-trusted.');
+        }
+        else {
+            void vscode.window.showInformationMessage(`GlyphSpek: governed terminal ${session.runId} finalized — verdict ${verdictLabel}. ` +
+                'Governed + traced, metadata-only, UNSANDBOXED — not product-trusted.');
+        }
+    });
+    context.subscriptions.push(closeSub);
+    terminal.show();
+    // Honest, non-coercive ergonomics: if an agent CLI is installed, PRE-TYPE its name
+    // (without sending) so the operator just hits Enter; never auto-run. Otherwise
+    // leave the terminal empty and tell the operator their egress is governed.
+    if (detected) {
+        terminal.sendText(detected.agent, false);
+        void vscode.window.showInformationMessage(`GlyphSpek: governed terminal ready. Your '${detected.agent}' CLI is pre-typed — press Enter to run it. ` +
+            'Its egress is governed (metadata-only) and streaming LIVE into the Trust Panel; this session is ' +
+            'UNSANDBOXED and never product-trusted.');
+    }
+    else {
+        void vscode.window.showInformationMessage('GlyphSpek: governed terminal ready. Any command you run here has its egress governed (metadata-only) ' +
+            'and streamed LIVE into the Trust Panel. This session is UNSANDBOXED and never product-trusted.');
     }
 }
 /**

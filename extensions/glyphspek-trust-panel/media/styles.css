@@ -815,6 +815,23 @@ input[type="file"] {
   border-color: var(--fail);
   background: rgba(224, 84, 75, 0.12);
 }
+/* Creation-trust posture (sweep-23 #2). governed-unsandboxed = the SOFT,
+   metadata-only, UNSANDBOXED boundary (the Governed Terminal session): amber, never
+   shown as product-trusted. */
+.creation-governed-unsandboxed {
+  color: var(--warn);
+  border-color: var(--warn);
+  background: rgba(217, 164, 65, 0.12);
+}
+.creation-untrusted {
+  color: var(--fail);
+  border-color: var(--fail);
+  background: rgba(224, 84, 75, 0.12);
+}
+.creation-trusted {
+  color: var(--verdict);
+  border-color: var(--verdict);
+}
 
 /* ---- distinct failure cards ---- */
 .failure-stack {

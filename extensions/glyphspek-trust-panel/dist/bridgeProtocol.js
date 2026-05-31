@@ -43,12 +43,14 @@
  * caller-identity boundary (bridge.ts); this module is the message grammar.
  */
 Object.defineProperty(exports, "__esModule", { value: true });
-exports.MODEL_CREDENTIAL_FIELD_RE = exports.AUTONOMY_TIERS = exports.EXTENSION_POSTURES = exports.ACTOR_TYPES = exports.BridgeErrorCode = exports.BridgeNotification = exports.BridgeMethod = exports.BRIDGE_JSONRPC = exports.BRIDGE_PROTOCOL_VERSION = void 0;
+exports.TERMINAL_VERDICT_ASSURANCES = exports.TERMINAL_ENV_POSTURES = exports.MODEL_CREDENTIAL_FIELD_RE = exports.RUN_TRUSTS = exports.AUTONOMY_TIERS = exports.EXTENSION_POSTURES = exports.ACTOR_TYPES = exports.BridgeErrorCode = exports.BridgeNotification = exports.BridgeMethod = exports.BRIDGE_JSONRPC = exports.BRIDGE_PROTOCOL_VERSION = void 0;
 exports.isHandshakeCompatible = isHandshakeCompatible;
 exports.findCredentialField = findCredentialField;
 exports.validateModelCallParams = validateModelCallParams;
 exports.validateModelCallResult = validateModelCallResult;
 exports.validateModelAllowlistResult = validateModelAllowlistResult;
+exports.validateTerminalStartResult = validateTerminalStartResult;
+exports.validateTerminalStopResult = validateTerminalStopResult;
 exports.validateRunRequest = validateRunRequest;
 exports.isEnvelope = isEnvelope;
 exports.isResponse = isResponse;
@@ -109,6 +111,24 @@ exports.BridgeMethod = {
      * redacted completion + usage + trace ref).
      */
     ModelCall: 'model/call',
+    /**
+     * Start a GOVERNED TERMINAL SESSION (M7 — the in-IDE Governed Terminal surface).
+     * The supervisor starts a metadata-only egress governance proxy (allowlisting the
+     * configured model endpoints), creates a real run, and PROJECTS the proxy's egress
+     * activity into the run's hash-chained trace, streaming it as the SAME `run/event`
+     * notifications the live Trust Panel already renders. The result carries the
+     * runId, the proxy URL the future terminal UI sets as HTTPS_PROXY/HTTP_PROXY, and
+     * the env-sanitization POSTURE the UI applies. The credential NEVER touches the
+     * supervisor (the proxy is metadata-only); this RPC does NOT spawn the CLI.
+     */
+    TerminalStart: 'terminal/start',
+    /**
+     * Stop a governed terminal session (M7). The supervisor closes the proxy and
+     * FINALIZES the run with the Ed25519-signed verdict over the live trace root. A
+     * DEGRADED trace-health is bound into the verdict (`assurance: 'degraded'`,
+     * sweep-22 #45) so a consumer cannot present a degraded session as fully trusted.
+     */
+    TerminalStop: 'terminal/stop',
 };
 /** Server→client notification methods (no response expected). */
 exports.BridgeNotification = {
@@ -176,6 +196,13 @@ exports.AUTONOMY_TIERS = [
     'allowlist',
     'auto',
     'turbo',
+];
+/** The full set of run-trust postures, for validation. */
+exports.RUN_TRUSTS = [
+    'trusted',
+    'governed-unsandboxed',
+    'untrusted',
+    'refused',
 ];
 /* ============================================================== *
  * MODEL RPC RUNTIME VALIDATORS (MIRROR of spikes/p0-contracts/model.ts).
@@ -295,6 +322,66 @@ function validateModelAllowlistResult(input) {
                 problems.push('models');
                 break;
             }
+        }
+    }
+    const cred = findCredentialField(input);
+    if (cred)
+        problems.push(`credential:${cred}`);
+    return problems.length ? { ok: false, problems } : { ok: true };
+}
+/** The full set of terminal env postures, for validation. */
+exports.TERMINAL_ENV_POSTURES = [
+    'sanitized',
+    'untrusted',
+];
+/** The full set of assurance levels, for validation. */
+exports.TERMINAL_VERDICT_ASSURANCES = [
+    'full',
+    'degraded',
+];
+/** Validate a {@link TerminalStartResult} payload (credential firewall + shape). */
+function validateTerminalStartResult(input) {
+    const problems = [];
+    if (!isModelObj(input))
+        return { ok: false, problems: ['not-an-object'] };
+    if (!modelNonEmptyString(input.runId))
+        problems.push('runId');
+    if (!modelNonEmptyString(input.proxyUrl))
+        problems.push('proxyUrl');
+    if (!modelNonEmptyString(input.posture) ||
+        !exports.TERMINAL_ENV_POSTURES.includes(input.posture)) {
+        problems.push('posture');
+    }
+    if (!exports.RUN_TRUSTS.includes(input.trust)) {
+        problems.push('trust');
+    }
+    const cred = findCredentialField(input);
+    if (cred)
+        problems.push(`credential:${cred}`);
+    return problems.length ? { ok: false, problems } : { ok: true };
+}
+/** Validate a {@link TerminalStopResult} payload (credential firewall + shape). */
+function validateTerminalStopResult(input) {
+    const problems = [];
+    if (!isModelObj(input))
+        return { ok: false, problems: ['not-an-object'] };
+    if (!modelNonEmptyString(input.runId))
+        problems.push('runId');
+    const v = input.verdict;
+    if (!isModelObj(v)) {
+        problems.push('verdict');
+    }
+    else {
+        if (!Array.isArray(v.checks))
+            problems.push('verdict.checks');
+        if (v.overallVerdict !== 'pass' && v.overallVerdict !== 'fail' && v.overallVerdict !== 'error') {
+            problems.push('verdict.overallVerdict');
+        }
+        if (!modelNonEmptyString(v.traceRootHash))
+            problems.push('verdict.traceRootHash');
+        if (!modelNonEmptyString(v.assurance) ||
+            !exports.TERMINAL_VERDICT_ASSURANCES.includes(v.assurance)) {
+            problems.push('verdict.assurance');
         }
     }
     const cred = findCredentialField(input);

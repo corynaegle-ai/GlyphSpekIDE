@@ -93,7 +93,32 @@ var BridgeMethod = {
    * receives it, nor the assembled outbound HTTP request. The result is the
    * redacted projection (decision + redacted completion + usage + trace ref).
    */
-  ModelCall: "model/call"
+  ModelCall: "model/call",
+  /**
+   * Start a GOVERNED TERMINAL SESSION (M7 — the in-IDE Governed Terminal surface).
+   * The supervisor starts a metadata-only egress governance proxy (allowlisting the
+   * configured model endpoints), creates a real RunLifecycle run, and PROJECTS the
+   * proxy's egress activity into the run's hash-chained trace, streaming it as the
+   * SAME `run/event` notifications the live Trust Panel already renders. The result
+   * carries the supervisor-minted runId, the proxy URL the future terminal UI sets
+   * as HTTPS_PROXY/HTTP_PROXY, and the env-sanitization POSTURE the UI must apply.
+   *
+   * CREDENTIAL POSTURE (anti-FauxCode): the credential NEVER touches the supervisor.
+   * The proxy is metadata-only (no TLS termination); the CLI authenticates from its
+   * OWN on-disk store. This RPC does NOT spawn the CLI — that is the later UI slice;
+   * `terminal/start` only establishes the supervised session + proxy.
+   */
+  TerminalStart: "terminal/start",
+  /**
+   * Stop a governed terminal session (M7). The supervisor closes the egress proxy
+   * and FINALIZES the run with the Ed25519-signed verifier verdict over the live
+   * trace root (the same mechanism live runs use). When the session's trace-health
+   * is DEGRADED (an observer/append failure projected the trace incompletely), the
+   * finalized verdict is marked DEGRADED / lower-assurance so a consumer cannot
+   * present a degraded session as fully trusted (sweep-22 #45). The result carries
+   * the runId and the signed verdict.
+   */
+  TerminalStop: "terminal/stop"
 };
 var BridgeNotification = {
   /** A run lifecycle/trace event streamed back to the client for the panel. */
@@ -771,6 +796,677 @@ function signEphemeral(checks, overallVerdict, traceRootHash, injectedKey) {
   return signVerdict({ checks, overallVerdict, traceRootHash }, privateKey);
 }
 
+// ../spikes/p0-supervisor/terminal-session.ts
+import { join as join3 } from "node:path";
+import { generateKeyPairSync as generateKeyPairSync3 } from "node:crypto";
+
+// ../spikes/p0-governed-cli/governed-terminal-proxy.ts
+import { randomUUID as randomUUID3 } from "node:crypto";
+
+// ../spikes/p0-sandbox/egress-proxy.ts
+import { createServer } from "node:http";
+import { connect as netConnect } from "node:net";
+import { randomUUID as randomUUID2 } from "node:crypto";
+import { request as httpRequest } from "node:http";
+function splitHostPort(authority) {
+  const trimmed = authority.trim();
+  if (trimmed.startsWith("[")) {
+    const close = trimmed.indexOf("]");
+    if (close !== -1) {
+      const host = trimmed.slice(0, close + 1);
+      const rest = trimmed.slice(close + 1);
+      if (rest.startsWith(":")) {
+        const port2 = Number(rest.slice(1));
+        return Number.isInteger(port2) ? { host, port: port2 } : { host };
+      }
+      return { host };
+    }
+  }
+  const idx = trimmed.lastIndexOf(":");
+  if (idx === -1) return { host: trimmed };
+  const portStr = trimmed.slice(idx + 1);
+  const port = Number(portStr);
+  if (portStr.length > 0 && Number.isInteger(port) && /^\d+$/.test(portStr)) {
+    return { host: trimmed.slice(0, idx), port };
+  }
+  return { host: trimmed };
+}
+function isIpLiteral(host) {
+  const h = host.trim();
+  if (h.length === 0) return false;
+  if (h.startsWith("[") && h.endsWith("]")) return true;
+  if (h.includes(":")) return true;
+  const v4 = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/.exec(h);
+  if (v4) {
+    return v4.slice(1).every((o) => {
+      const n = Number(o);
+      return n >= 0 && n <= 255;
+    });
+  }
+  return false;
+}
+function isHostAllowed(allow, host, port) {
+  const targetHost = host.toLowerCase();
+  for (const entry of allow) {
+    const { host: aHost, port: aPort } = splitHostPort(entry);
+    if (aHost.toLowerCase() !== targetHost) continue;
+    if (aPort === void 0) return true;
+    if (aPort === port) return true;
+  }
+  return false;
+}
+var DEFAULT_HTTP_PORT = 80;
+var DEFAULT_HTTPS_PORT = 443;
+function targetForHttp(req) {
+  const rawUrl = req.url ?? "";
+  if (/^[a-zA-Z][a-zA-Z0-9+.-]*:\/\//.test(rawUrl)) {
+    try {
+      const u = new URL(rawUrl);
+      const host = u.hostname;
+      const port = u.port ? Number(u.port) : DEFAULT_HTTP_PORT;
+      if (host) return { host, port };
+    } catch {
+    }
+  }
+  const hostHeader = req.headers.host;
+  if (typeof hostHeader === "string" && hostHeader.length > 0) {
+    const { host, port } = splitHostPort(hostHeader);
+    if (host) return { host, port: port ?? DEFAULT_HTTP_PORT };
+  }
+  return void 0;
+}
+function startEgressProxy(options) {
+  const allow = options.allow;
+  const bindHost = options.bindHost ?? "0.0.0.0";
+  const bindPort = options.bindPort ?? 0;
+  const denyDirectIp = options.denyDirectIp ?? true;
+  const upstreamLookup = {};
+  for (const [k, v] of Object.entries(options.upstreamLookup ?? {})) {
+    upstreamLookup[k.toLowerCase()] = v;
+  }
+  const dialHost = (requestedHost) => upstreamLookup[requestedHost.toLowerCase()] ?? requestedHost;
+  const health = {
+    decisionFailures: 0,
+    tunnelFailures: 0,
+    bytesFailures: 0,
+    closeFailures: 0
+  };
+  const emit = (d) => {
+    try {
+      options.onDecision?.(d);
+    } catch {
+      health.decisionFailures += 1;
+    }
+  };
+  const server2 = createServer();
+  server2.on("request", (clientReq, clientRes) => {
+    const target = targetForHttp(clientReq);
+    if (!target) {
+      emit({
+        id: randomUUID2(),
+        ts: Date.now(),
+        kind: "http",
+        decision: "deny",
+        host: "",
+        port: 0,
+        method: clientReq.method,
+        reason: "no-target"
+      });
+      clientRes.writeHead(400, { "content-type": "text/plain" });
+      clientRes.end("egress proxy: could not determine target host\n");
+      return;
+    }
+    if (denyDirectIp && isIpLiteral(target.host)) {
+      emit({
+        id: randomUUID2(),
+        ts: Date.now(),
+        kind: "http",
+        decision: "deny",
+        host: target.host,
+        port: target.port,
+        method: clientReq.method,
+        reason: "direct-ip"
+      });
+      clientRes.writeHead(403, { "content-type": "text/plain" });
+      clientRes.end(
+        `egress denied: direct IP literal not permitted (use an allowlisted name; the proxy is the controlled resolver): ${target.host}:${target.port}
+`
+      );
+      clientReq.resume();
+      return;
+    }
+    const allowed = isHostAllowed(allow, target.host, target.port);
+    emit({
+      id: randomUUID2(),
+      ts: Date.now(),
+      kind: "http",
+      decision: allowed ? "allow" : "deny",
+      host: target.host,
+      port: target.port,
+      method: clientReq.method,
+      reason: "allowlist"
+    });
+    if (!allowed) {
+      clientRes.writeHead(403, { "content-type": "text/plain" });
+      clientRes.end(
+        `egress denied by allowlist: ${target.host}:${target.port}
+`
+      );
+      clientReq.resume();
+      return;
+    }
+    const upstream = httpRequest(
+      {
+        host: dialHost(target.host),
+        port: target.port,
+        method: clientReq.method,
+        // Strip the absolute-form prefix: upstream expects an origin-form path.
+        path: originFormPath(clientReq.url ?? "/"),
+        headers: clientReq.headers
+      },
+      (upstreamRes) => {
+        clientRes.writeHead(upstreamRes.statusCode ?? 502, upstreamRes.headers);
+        upstreamRes.pipe(clientRes);
+      }
+    );
+    upstream.on("error", (err) => {
+      if (!clientRes.headersSent) {
+        clientRes.writeHead(502, { "content-type": "text/plain" });
+      }
+      clientRes.end(`egress proxy upstream error: ${err.message}
+`);
+    });
+    clientReq.pipe(upstream);
+  });
+  server2.on("connect", (req, clientSocket, head) => {
+    clientSocket.on("error", () => {
+    });
+    const authority = req.url ?? "";
+    const { host, port } = splitHostPort(authority);
+    const targetPort = port ?? DEFAULT_HTTPS_PORT;
+    if (denyDirectIp && host.length > 0 && isIpLiteral(host)) {
+      emit({
+        id: randomUUID2(),
+        ts: Date.now(),
+        kind: "connect",
+        decision: "deny",
+        host,
+        port: targetPort,
+        reason: "direct-ip"
+      });
+      clientSocket.write(
+        `HTTP/1.1 403 Forbidden\r
+Content-Type: text/plain\r
+Connection: close\r
+\r
+egress denied: direct IP literal not permitted (use an allowlisted name; the proxy is the controlled resolver): ${host}:${targetPort}
+`
+      );
+      clientSocket.end();
+      return;
+    }
+    const allowed = host.length > 0 && isHostAllowed(allow, host, targetPort);
+    emit({
+      id: randomUUID2(),
+      ts: Date.now(),
+      kind: "connect",
+      decision: allowed ? "allow" : "deny",
+      host,
+      port: targetPort,
+      reason: host.length > 0 ? "allowlist" : "no-target"
+    });
+    if (!allowed) {
+      clientSocket.write(
+        `HTTP/1.1 403 Forbidden\r
+Content-Type: text/plain\r
+Connection: close\r
+\r
+egress denied by allowlist: ${host}:${targetPort}
+`
+      );
+      clientSocket.end();
+      return;
+    }
+    let observer;
+    let bytesUp = 0;
+    let bytesDown = 0;
+    let openedAt = 0;
+    let closed = false;
+    const tunnelId = randomUUID2();
+    const upstream = netConnect(targetPort, dialHost(host), () => {
+      clientSocket.write("HTTP/1.1 200 Connection Established\r\n\r\n");
+      if (head && head.length > 0) upstream.write(head);
+      if (options.onTunnel) {
+        try {
+          observer = options.onTunnel({ host, port: targetPort, id: tunnelId });
+        } catch {
+          observer = void 0;
+          health.tunnelFailures += 1;
+        }
+        openedAt = Date.now();
+        if (head && head.length > 0) {
+          bytesUp += head.length;
+          try {
+            observer?.onBytes?.("up", head.length);
+          } catch {
+            health.bytesFailures += 1;
+          }
+        }
+        clientSocket.on("data", (chunk) => {
+          bytesUp += chunk.length;
+          try {
+            observer?.onBytes?.("up", chunk.length);
+          } catch {
+            health.bytesFailures += 1;
+          }
+        });
+        upstream.on("data", (chunk) => {
+          bytesDown += chunk.length;
+          try {
+            observer?.onBytes?.("down", chunk.length);
+          } catch {
+            health.bytesFailures += 1;
+          }
+        });
+      }
+      upstream.pipe(clientSocket);
+      clientSocket.pipe(upstream);
+    });
+    const emitClose = () => {
+      if (closed || !options.onTunnel || openedAt === 0) return;
+      closed = true;
+      try {
+        observer?.onClose?.({
+          bytesUp,
+          bytesDown,
+          durationMs: Date.now() - openedAt
+        });
+      } catch {
+        health.closeFailures += 1;
+      }
+    };
+    const teardownPair = () => {
+      emitClose();
+      upstream.destroy();
+      clientSocket.destroy();
+    };
+    upstream.on("error", teardownPair);
+    clientSocket.on("error", teardownPair);
+    upstream.on("close", emitClose);
+    clientSocket.on("close", emitClose);
+  });
+  server2.on("clientError", (_err, socket) => {
+    if (socket.writable) {
+      socket.end("HTTP/1.1 400 Bad Request\r\nConnection: close\r\n\r\n");
+    } else {
+      socket.destroy();
+    }
+  });
+  return new Promise((resolve2, reject) => {
+    server2.once("error", reject);
+    server2.listen(bindPort, bindHost, () => {
+      server2.removeListener("error", reject);
+      const addr = server2.address();
+      if (addr === null || typeof addr === "string") {
+        reject(new Error("egress proxy: failed to resolve bound address"));
+        return;
+      }
+      const port = addr.port;
+      const proxyHost = bindHost === "0.0.0.0" || bindHost === "::" ? "127.0.0.1" : bindHost;
+      resolve2({
+        port,
+        url: `http://${proxyHost}:${port}`,
+        proxyHost,
+        observerHealth() {
+          return { ...health };
+        },
+        close() {
+          return new Promise((res) => {
+            server2.close(() => res());
+            const anyServer = server2;
+            anyServer.closeAllConnections?.();
+          });
+        }
+      });
+    });
+  });
+}
+function originFormPath(rawUrl) {
+  if (/^[a-zA-Z][a-zA-Z0-9+.-]*:\/\//.test(rawUrl)) {
+    try {
+      const u = new URL(rawUrl);
+      return u.pathname + u.search;
+    } catch {
+      return rawUrl;
+    }
+  }
+  return rawUrl || "/";
+}
+
+// ../spikes/p0-governed-cli/governed-terminal-proxy.ts
+var DEFAULT_MODEL_ENDPOINTS = [
+  { host: "api.anthropic.com", port: 443, provider: "anthropic", model: "anthropic-model (boundary)" },
+  { host: "api.openai.com", port: 443, provider: "openai", model: "openai-model (boundary)" },
+  {
+    host: "generativelanguage.googleapis.com",
+    port: 443,
+    provider: "google",
+    model: "gemini-model (boundary)"
+  }
+];
+function classifyModelEndpoint(endpoints, host) {
+  const target = host.trim().toLowerCase();
+  return endpoints.find((e) => e.host.trim().toLowerCase() === target);
+}
+async function startGovernedTerminalProxy(opts) {
+  const endpoints = opts.modelEndpoints ?? DEFAULT_MODEL_ENDPOINTS;
+  const provenanceLabel = opts.provenanceLabel ?? "tool-output";
+  const { sink, runId } = opts;
+  let appendFailures = 0;
+  const emit = (type, payload) => {
+    try {
+      sink.append({
+        v: TRACE_EVENT_VERSION,
+        runId,
+        seq: 0,
+        ts: Date.now(),
+        type,
+        payload
+      });
+    } catch {
+      appendFailures += 1;
+    }
+  };
+  const onDecision = (d) => {
+    const payload = {
+      tool: "network",
+      requestedCapability: `network:${d.host}:${d.port}`,
+      decision: d.decision,
+      provenanceLabel,
+      // Non-secret human-readable rule mirroring the proxy's own reason vocabulary.
+      rule: d.decision === "allow" ? `egress allowed by allowlist (${d.kind})` : d.reason === "direct-ip" ? "egress denied: direct-IP literal (controlled-resolver bypass)" : d.reason === "no-target" ? "egress denied: no target host" : `egress denied by allowlist (${d.kind})`
+    };
+    emit("policy_decision", payload);
+  };
+  const onTunnel = (info) => {
+    const endpoint = classifyModelEndpoint(endpoints, info.host);
+    if (!endpoint) return;
+    return {
+      onClose: (summary) => {
+        const payload = {
+          model: endpoint.model,
+          provider: endpoint.provider,
+          endpointHost: endpoint.host,
+          durationMs: summary.durationMs,
+          // Additive boundary fields (ciphertext byte counts only).
+          bytesUp: summary.bytesUp,
+          bytesDown: summary.bytesDown,
+          // tokens/cost are DELIBERATELY ABSENT — metadata-only cannot see them.
+          observation: "metadata-only",
+          provenanceLabel
+        };
+        emit("model_call", payload);
+      }
+    };
+  };
+  const proxy = await startEgressProxy({
+    allow: opts.allow,
+    bindHost: opts.bindHost ?? "127.0.0.1",
+    bindPort: opts.bindPort ?? 0,
+    denyDirectIp: opts.denyDirectIp,
+    onDecision,
+    onTunnel
+  });
+  return {
+    proxy,
+    url: proxy.url,
+    traceHealth() {
+      const obs = proxy.observerHealth();
+      const observerFailures = obs.decisionFailures + obs.tunnelFailures + obs.bytesFailures + obs.closeFailures;
+      return {
+        appendFailures,
+        degraded: appendFailures > 0 || observerFailures > 0
+      };
+    },
+    close: () => proxy.close()
+  };
+}
+
+// ../spikes/p0-supervisor/terminal-session.ts
+async function startTerminalSession(opts) {
+  const { facts, emit } = opts;
+  const now = opts.now ?? Date.now;
+  const { runId, runDir } = facts;
+  const lifecycle = opts.lifecycle ?? new RunLifecycle("created");
+  const sink = opts.sink ?? createTraceWriter(join3(runSubdirPath(runDir, "trace"), "trace.jsonl"));
+  const endpoints = opts.modelEndpoints ?? DEFAULT_MODEL_ENDPOINTS;
+  const allow = endpoints.map((e) => `${e.host}:${e.port ?? 443}`);
+  const appendAndStream = (type, payload, source) => {
+    const appended = sink.append({
+      v: TRACE_EVENT_VERSION,
+      runId,
+      seq: 0,
+      // the writer is authoritative for seq; it overwrites this.
+      ts: now(),
+      type,
+      payload,
+      ...source ? { source } : {}
+    });
+    emit({ rev: RUN_EVENT_PROTOCOL_VERSION, runId, kind: "trace_event", event: appended });
+    return appended;
+  };
+  const transition = (to, reason) => {
+    const from = lifecycle.state;
+    lifecycle.transition(to, reason);
+    emit({ rev: RUN_EVENT_PROTOCOL_VERSION, runId, kind: "state_changed", from, to, reason });
+    const payload = { from, to, reason };
+    appendAndStream("run_state_changed", payload, "policy");
+  };
+  emit({
+    rev: RUN_EVENT_PROTOCOL_VERSION,
+    runId,
+    kind: "run_opened",
+    actorType: facts.actorType,
+    trust: facts.creationTrust,
+    runtimeProfile: facts.runtimeProfile,
+    runtimeTrust: facts.runtimeTrust,
+    extensionPosture: facts.extensionPosture,
+    cliFidelity: facts.cliFidelity,
+    state: lifecycle.state
+  });
+  const runCreated = {
+    runId,
+    runDir,
+    // A terminal-launched CLI is an external opaque actor: its egress is
+    // boundary-observed (untrusted provenance), recorded honestly.
+    provenanceLabel: "tool-output"
+  };
+  appendAndStream("run_created", runCreated);
+  transition("worktree_ready", "governed terminal session opening");
+  transition("sandbox_ready", "egress governance proxy starting (metadata-only)");
+  const projectionSink = {
+    append: (evt) => {
+      const appended = sink.append(evt);
+      emit({ rev: RUN_EVENT_PROTOCOL_VERSION, runId, kind: "trace_event", event: appended });
+      return appended;
+    }
+  };
+  const proxy = await startGovernedTerminalProxy({
+    allow,
+    sink: projectionSink,
+    runId,
+    modelEndpoints: endpoints,
+    bindHost: opts.bindHost ?? "127.0.0.1",
+    ...opts.denyDirectIp !== void 0 ? { denyDirectIp: opts.denyDirectIp } : {}
+  });
+  transition("executing", "governed terminal session live (proxy bound)");
+  let stopped = false;
+  let finalVerdict;
+  const stop = async () => {
+    if (stopped && finalVerdict) return finalVerdict;
+    stopped = true;
+    const health = proxy.traceHealth();
+    await proxy.close();
+    finalVerdict = finalizeTerminalRun({
+      runId,
+      sink,
+      lifecycle,
+      degraded: health.degraded,
+      emit,
+      now,
+      ...opts.verifierPrivateKey ? { verifierPrivateKey: opts.verifierPrivateKey } : {}
+    });
+    return finalVerdict;
+  };
+  return { runId, proxyUrl: proxy.url, stop };
+}
+function finalizeTerminalRun(opts) {
+  const { runId, sink, lifecycle, emit } = opts;
+  const now = opts.now ?? Date.now;
+  const from = lifecycle.state;
+  if (from === "executing") {
+    lifecycle.transition("completed", "governed terminal session stopped");
+    emit({
+      rev: RUN_EVENT_PROTOCOL_VERSION,
+      runId,
+      kind: "state_changed",
+      from,
+      to: "completed",
+      reason: "governed terminal session stopped"
+    });
+    const payload = {
+      from,
+      to: "completed",
+      reason: "governed terminal session stopped"
+    };
+    const appended = sink.append({
+      v: TRACE_EVENT_VERSION,
+      runId,
+      seq: 0,
+      ts: now(),
+      type: "run_state_changed",
+      payload,
+      source: "policy"
+    });
+    emit({ rev: RUN_EVENT_PROTOCOL_VERSION, runId, kind: "trace_event", event: appended });
+  }
+  const finalEvents = sinkEvents2(sink);
+  const chain = verifyChain(finalEvents);
+  const traceRootHash = chain.ok ? computeTraceRoot(finalEvents) : "0".repeat(64);
+  const assurance = opts.degraded || !chain.ok ? "degraded" : "full";
+  const checks = [
+    {
+      name: "egress governance + trace projection",
+      command: ["glyphspek", "governed-terminal", "verify"],
+      status: assurance === "full" && chain.ok ? "pass" : "fail"
+    }
+  ];
+  const overallVerdict = !chain.ok ? "error" : assurance === "full" ? "pass" : "fail";
+  const signature = signTerminalVerdict(
+    { checks, overallVerdict, traceRootHash, assurance },
+    opts.verifierPrivateKey
+  );
+  const verdict = {
+    checks,
+    overallVerdict,
+    traceRootHash,
+    assurance,
+    signature
+  };
+  emit({
+    rev: RUN_EVENT_PROTOCOL_VERSION,
+    runId,
+    kind: "verifier_verdict",
+    checks: checks.map((c) => ({ name: c.name, command: c.command, status: c.status })),
+    overallVerdict,
+    traceRootHash,
+    signature
+  });
+  emit({
+    rev: RUN_EVENT_PROTOCOL_VERSION,
+    runId,
+    kind: "run_closed",
+    finalState: lifecycle.state,
+    eventCount: finalEvents.length
+  });
+  return verdict;
+}
+function sinkEvents2(sink) {
+  const maybe = sink.events;
+  if (Array.isArray(maybe)) return maybe;
+  const path2 = sink.path;
+  if (typeof path2 === "string") return readTrace(path2);
+  return [];
+}
+function signTerminalVerdict(core, injectedKey) {
+  const privateKey = injectedKey ?? generateKeyPairSync3("ed25519").privateKey;
+  return signVerdict(core, privateKey);
+}
+
+// ../spikes/p0-governed-cli/cli-agent-launcher.ts
+import { spawn } from "node:child_process";
+import { accessSync, constants as fsConstants, statSync } from "node:fs";
+import { delimiter as pathDelimiter, join as pathJoin } from "node:path";
+import { platform as osPlatform } from "node:os";
+var PRESERVED_ENV_NAMES = [
+  "PATH",
+  "Path",
+  // Windows casing
+  "HOME",
+  "TERM",
+  "LANG",
+  "LANGUAGE",
+  // Windows process basics a child needs to start at all.
+  "SystemRoot",
+  "SystemDrive",
+  "windir",
+  "TEMP",
+  "TMP",
+  "TMPDIR",
+  "USERPROFILE",
+  "HOMEDRIVE",
+  "HOMEPATH",
+  "PATHEXT",
+  "COMSPEC"
+];
+function isLocaleVar(name) {
+  return /^LC_[A-Z]+$/i.test(name);
+}
+var PROXY_ENV_LOWER = /* @__PURE__ */ new Set([
+  "http_proxy",
+  "https_proxy",
+  "no_proxy",
+  "all_proxy"
+]);
+var PRESERVED_ENV_LOWER = new Set(PRESERVED_ENV_NAMES.map((n) => n.toLowerCase()));
+function isPreservedEnvName(name) {
+  const lower = name.toLowerCase();
+  if (PROXY_ENV_LOWER.has(lower)) return false;
+  if (PRESERVED_ENV_LOWER.has(lower)) return true;
+  return isLocaleVar(name);
+}
+function sanitizeBaseEnv(base) {
+  const out = {};
+  for (const [name, value] of Object.entries(base)) {
+    if (value === void 0) continue;
+    if (!isPreservedEnvName(name)) continue;
+    out[name] = value;
+  }
+  return out;
+}
+function buildGovernedEnvResult(opts) {
+  const rawBase = opts.baseEnv ?? process.env;
+  const allowAmbient = opts.allowAmbientEnv ?? false;
+  const env = allowAmbient ? { ...rawBase } : sanitizeBaseEnv(rawBase);
+  env.HTTPS_PROXY = opts.proxyUrl;
+  env.https_proxy = opts.proxyUrl;
+  env.HTTP_PROXY = opts.proxyUrl;
+  env.http_proxy = opts.proxyUrl;
+  env.NO_PROXY = "";
+  env.no_proxy = "";
+  return { env, posture: allowAmbient ? "untrusted" : "sanitized" };
+}
+
 // ../spikes/p0-supervisor/index-residency.ts
 import { resolve, relative, isAbsolute } from "node:path";
 function resolveIndexResidency(opts) {
@@ -1184,12 +1880,12 @@ var InMemoryTraceSink = class {
     return full;
   }
 };
-function sinkEvents2(sink) {
+function sinkEvents3(sink) {
   const maybe = sink.events;
   return Array.isArray(maybe) ? maybe : [];
 }
 function sinkLength(sink) {
-  return sinkEvents2(sink).length;
+  return sinkEvents3(sink).length;
 }
 function modelEventDetail(e) {
   const p = e.payload ?? {};
@@ -1262,6 +1958,7 @@ var BridgeServer = class {
   selfPath;
   pinnedSha;
   model;
+  terminalModelEndpoints;
   stdinBuffer = "";
   handshakeDone = false;
   hashChecked = false;
@@ -1276,6 +1973,27 @@ var BridgeServer = class {
     this.selfPath = opts.selfPath;
     this.pinnedSha = opts.pinnedSha;
     this.model = opts.model;
+    this.terminalModelEndpoints = opts.terminalModelEndpoints;
+  }
+  /**
+   * Resolve the model endpoints a governed terminal session classifies. Explicit
+   * config wins; else derive from the configured model allowlist (each allowed
+   * model's endpoint host); else fall back to {@link DEFAULT_MODEL_ENDPOINTS}.
+   */
+  terminalEndpoints() {
+    if (this.terminalModelEndpoints) return this.terminalModelEndpoints;
+    const allowed = this.model?.modelPolicy.allowed;
+    if (allowed && allowed.length > 0) {
+      return allowed.map((a) => ({
+        host: a.endpointHost,
+        // Model APIs are HTTPS/443; pin the port so the terminal allowlist reaches
+        // ONLY the model API port on the provider host (sweep-23 #5).
+        port: 443,
+        provider: a.provider,
+        model: `${a.model} (boundary)`
+      }));
+    }
+    return DEFAULT_MODEL_ENDPOINTS;
   }
   /** The actor types this supervisor build can host (reported in the handshake). */
   get supportedActorTypes() {
@@ -1353,6 +2071,12 @@ var BridgeServer = class {
         return;
       case BridgeMethod.ModelCall:
         void this.handleModelCall(req);
+        return;
+      case BridgeMethod.TerminalStart:
+        void this.handleTerminalStart(req);
+        return;
+      case BridgeMethod.TerminalStop:
+        void this.handleTerminalStop(req);
         return;
       default:
         this.emit(
@@ -1509,7 +2233,12 @@ var BridgeServer = class {
       runtimeProfile: serverRun.request.runtimeProfile,
       runtimeTrust: serverRun.runtimeIsolated ? "trusted" : "untrusted",
       extensionPosture: serverRun.request.extensionPosture,
-      creationTrust: serverRun.trust === "trusted" || serverRun.trust === "untrusted" ? serverRun.trust : "refused",
+      // Carry the creation-time posture faithfully into the run_opened badge. We
+      // drive trusted, untrusted (dev-runtime) AND governed-unsandboxed (the
+      // governed-terminal posture, sweep-23 #2) runs; only a truly unexpected
+      // value collapses to 'refused'. Never MISLABEL governed-unsandboxed as
+      // refused — product trust is still gated separately and strictly.
+      creationTrust: serverRun.trust === "trusted" || serverRun.trust === "governed-unsandboxed" || serverRun.trust === "untrusted" ? serverRun.trust : "refused",
       // Native runs do not carry CLI fidelity; a CLI adapter would set this from
       // the adapter's detected hook surface (per-tool-brokered vs boundary-only).
       cliFidelity: serverRun.request.actorType === "native" ? "n/a" : "per-tool-brokered"
@@ -1690,7 +2419,7 @@ var BridgeServer = class {
    * sink already redacted every payload; nothing secret is forwarded.
    */
   forwardModelTraceEvents(runId, sink, fromIndex) {
-    const events = sinkEvents2(sink);
+    const events = sinkEvents3(sink);
     for (let i = fromIndex; i < events.length; i++) {
       const e = events[i];
       this.emitRunEvent({
@@ -1699,6 +2428,168 @@ var BridgeServer = class {
         ts: e.ts,
         detail: modelEventDetail(e)
       });
+    }
+  }
+  /* ============================================================== *
+   * GOVERNED TERMINAL SESSION RPC (M7 — the in-IDE Governed Terminal)
+   * ============================================================== */
+  /**
+   * terminal/start — open a GOVERNED TERMINAL SESSION. The supervisor:
+   *   1. requires a completed handshake AND independently re-validates the §10.3
+   *      run request (never trusting the client), settling the run-trust posture
+   *      with the SAME gate run/create uses (approved-isolation runtime ⇒ trusted);
+   *   2. creates a REAL run via the existing lifecycle (run id + dir + trace dir);
+   *   3. starts the METADATA-ONLY governed egress proxy (allowlisting the configured
+   *      model endpoints + any extra hosts) and PROJECTS its egress activity into
+   *      the run's hash-chained trace, streaming it as the SAME run/event feed the
+   *      live panel renders;
+   *   4. returns { runId, proxyUrl, posture, trust } — the proxy URL the future
+   *      terminal UI sets as HTTPS_PROXY/HTTP_PROXY, and the env-sanitization POSTURE
+   *      the UI applies when it later spawns the CLI.
+   *
+   * CREDENTIAL INVARIANT (anti-FauxCode): the credential NEVER touches the
+   * supervisor. The proxy is metadata-only (no TLS termination); the CLI runs on its
+   * OWN auth. This RPC does NOT spawn the CLI (that is the later UI slice); the
+   * posture is COMPUTED here (from cli-agent-launcher's sanitized-env path) and
+   * RETURNED so the UI can apply it — no env is held server-side.
+   */
+  async handleTerminalStart(req) {
+    if (!this.handshakeDone) {
+      this.emit(
+        this.errorResponse(
+          req.id,
+          BridgeErrorCode.InvalidRequest,
+          "terminal/start before a completed handshake"
+        )
+      );
+      return;
+    }
+    const params = req.params ?? {};
+    const validation = validateRunRequest(params.request);
+    if (!validation.ok) {
+      const message = `terminal/start run request missing required field(s): ${validation.missing.join(", ")}`;
+      this.logLine(`[bridge-server] ${message} \u2014 IdentityMissing.`);
+      this.emit(
+        this.errorResponse(req.id, BridgeErrorCode.IdentityMissing, message, {
+          missing: validation.missing
+        })
+      );
+      return;
+    }
+    const request = validation.request;
+    const created = createRun(this.runsBaseDir);
+    const lifecycle = new RunLifecycle(created.state);
+    const isolation = isApprovedIsolationRuntime(request.runtimeProfile);
+    const trust = "governed-unsandboxed";
+    const serverRun = {
+      created,
+      lifecycle,
+      trust,
+      request,
+      runtimeIsolated: isolation,
+      started: true
+      // a terminal session is its own driver; run/start is not used.
+    };
+    this.runs.set(created.runId, serverRun);
+    const facts = {
+      runId: created.runId,
+      runDir: created.dir,
+      actorType: request.actorType,
+      runtimeProfile: request.runtimeProfile,
+      runtimeTrust: isolation ? "trusted" : "untrusted",
+      extensionPosture: request.extensionPosture,
+      creationTrust: trust,
+      // A governed terminal observes egress at the boundary (not per-tool hooks).
+      cliFidelity: request.actorType === "native" ? "n/a" : "boundary-only"
+    };
+    try {
+      const session = await startTerminalSession({
+        facts,
+        modelEndpoints: this.terminalEndpoints(),
+        lifecycle,
+        emit: (event) => this.emitRunEventEnvelope(event)
+      });
+      serverRun.terminalSession = session;
+      const { posture } = buildGovernedEnvResult({
+        proxyUrl: session.proxyUrl,
+        baseEnv: {}
+        // empty base: we only need the posture marker, never real env.
+      });
+      const result = {
+        runId: created.runId,
+        proxyUrl: session.proxyUrl,
+        posture,
+        trust
+      };
+      this.logLine(
+        `[bridge-server] terminal/start \u2192 ${trust} (runId=${created.runId}, proxy=${session.proxyUrl}, posture=${posture}).`
+      );
+      this.emit(this.successResponse(req.id, result));
+    } catch (err) {
+      this.logLine(
+        `[bridge-server] terminal/start failed for ${created.runId}: ${String(err?.message ?? err)}`
+      );
+      this.emit(
+        this.errorResponse(
+          req.id,
+          BridgeErrorCode.InvalidRequest,
+          `terminal/start failed: ${String(err?.message ?? err)}`
+        )
+      );
+    }
+  }
+  /**
+   * terminal/stop — close a governed terminal session and FINALIZE the run with the
+   * Ed25519-signed verifier verdict over the live trace root (the same mechanism
+   * live runs use). The session's trace-health is read at close and BOUND into the
+   * verdict's `assurance` (sweep-22 #45): a degraded projection yields
+   * `assurance: 'degraded'` in the SIGNED verdict, so a consumer cannot present a
+   * degraded session as fully trusted. Idempotent: a second stop returns the
+   * already-finalized verdict.
+   */
+  async handleTerminalStop(req) {
+    if (!this.handshakeDone) {
+      this.emit(
+        this.errorResponse(
+          req.id,
+          BridgeErrorCode.InvalidRequest,
+          "terminal/stop before a completed handshake"
+        )
+      );
+      return;
+    }
+    const params = req.params ?? {};
+    const runId = typeof params.runId === "string" ? params.runId : "";
+    const serverRun = runId ? this.runs.get(runId) : void 0;
+    if (!serverRun || !serverRun.terminalSession) {
+      this.emit(
+        this.errorResponse(
+          req.id,
+          BridgeErrorCode.InvalidRequest,
+          `terminal/stop for unknown terminal session "${runId || "(missing)"}" \u2014 start it first`
+        )
+      );
+      return;
+    }
+    try {
+      const verdict = await serverRun.terminalSession.stop();
+      serverRun.terminalVerdict = verdict;
+      const result = { runId, verdict };
+      this.logLine(
+        `[bridge-server] terminal/stop \u2192 finalized ${runId} (verdict=${verdict.overallVerdict}, assurance=${verdict.assurance}).`
+      );
+      this.emit(this.successResponse(req.id, result));
+    } catch (err) {
+      this.logLine(
+        `[bridge-server] terminal/stop failed for ${runId}: ${String(err?.message ?? err)}`
+      );
+      this.emit(
+        this.errorResponse(
+          req.id,
+          BridgeErrorCode.InvalidRequest,
+          `terminal/stop failed: ${String(err?.message ?? err)}`
+        )
+      );
     }
   }
   /**

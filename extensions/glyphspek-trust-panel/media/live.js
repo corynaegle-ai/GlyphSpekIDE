@@ -482,6 +482,28 @@
       : 'fidelity: n/a (native)';
     root.appendChild(el('span', { className: 'trust-badge ' + fidClass, text: fidText }));
 
+    // Creation-trust badge (sweep-23 #2). Surfaces the run-creation posture honestly.
+    // A GOVERNED TERMINAL session (M7) settles into 'governed-unsandboxed': governed +
+    // traced but the SOFT, metadata-only, UNSANDBOXED boundary — NEVER product-trusted.
+    // It is shown as its own amber badge so a reviewer cannot mistake it for trusted.
+    var ct = b.creationTrust;
+    if (ct === 'governed-unsandboxed') {
+      root.appendChild(el('span', {
+        className: 'trust-badge creation-governed-unsandboxed',
+        text: 'Governed (soft) — metadata-only, not sandboxed',
+      }));
+    } else if (ct === 'untrusted' || ct === 'refused') {
+      root.appendChild(el('span', {
+        className: 'trust-badge creation-untrusted',
+        text: 'creation: ' + ct.toUpperCase(),
+      }));
+    } else if (ct === 'trusted') {
+      root.appendChild(el('span', {
+        className: 'trust-badge creation-trusted',
+        text: 'creation: trusted (pending gate)',
+      }));
+    }
+
     // Actor + creation-trust badge.
     root.appendChild(el('span', {
       className: 'trust-badge actor-badge',

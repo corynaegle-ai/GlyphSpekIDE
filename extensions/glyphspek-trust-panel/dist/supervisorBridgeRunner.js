@@ -62,6 +62,7 @@ var __importStar = (this && this.__importStar) || (function () {
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.createRunViaBridge = createRunViaBridge;
 exports.startRunViaBridge = startRunViaBridge;
+exports.startGovernedTerminalSession = startGovernedTerminalSession;
 const os = __importStar(require("node:os"));
 const bridge_1 = require("./bridge");
 const supervisorHash_1 = require("./supervisorHash");
@@ -283,6 +284,122 @@ async function startRunViaBridge(opts) {
             started: false,
             trust: 'refused',
             message: `live run failed: ${String(err?.message ?? err)}`,
+        };
+    }
+}
+/**
+ * Spawn the packaged bridge-server, connect (spawn + hash-pin + handshake), call
+ * `terminal/start` (no client egress field — egress is supervisor-owned), KEEP THE
+ * CHILD ALIVE, register the run-event handler so the supervisor streams the live
+ * `run/event` sequence into {@link StartGovernedTerminalOptions.onRunEvent}, and
+ * return a session handle whose `stop()` finalizes the run.
+ *
+ * Resolve-never-reject: every failure resolves with a populated, non-started outcome
+ * the Trust Panel + command path can render (and NEVER opens an ungoverned terminal).
+ * The session is NEVER product-trusted — `trust` is `governed-unsandboxed`.
+ */
+async function startGovernedTerminalSession(opts) {
+    const { output } = opts;
+    const env = buildBridgeEnv(opts);
+    output.appendLine('');
+    output.appendLine('[host] GlyphSpek governed terminal — spawning packaged bridge-server.');
+    output.appendLine(`[host] bridge-server: ${opts.bridgeServerPath}`);
+    output.appendLine(`[host] runs base: ${env.GLYPHSPEK_RUNS_BASE}`);
+    const bridge = new bridge_1.SupervisorBridge({
+        binaryPath: opts.bridgeServerPath,
+        expectedSha256: supervisorHash_1.BUNDLED_BRIDGE_SERVER_SHA256,
+        execPath: process.execPath,
+        env,
+        cwd: env.GLYPHSPEK_RUNS_BASE,
+        extensionVersion: opts.extensionVersion,
+        log: output,
+        spawn: opts.spawn ?? bridge_1.defaultBridgeSpawn,
+        ...(opts.requestTimeoutMs !== undefined ? { requestTimeoutMs: opts.requestTimeoutMs } : {}),
+    });
+    // Register the live feed BEFORE any RPC so no streamed event is dropped.
+    bridge.setRunEventHandler((params) => {
+        try {
+            opts.onRunEvent(params);
+        }
+        catch (err) {
+            output.appendLine(`[host] run-event sink threw (ignored): ${String(err?.message ?? err)}`);
+        }
+    });
+    let disposed = false;
+    const disposeOnce = () => {
+        if (disposed)
+            return;
+        disposed = true;
+        bridge.dispose();
+    };
+    try {
+        const connect = await bridge.connect();
+        if (connect.status !== 'connected') {
+            disposeOnce();
+            return {
+                started: false,
+                trust: 'refused',
+                message: connect.message || `bridge connect failed: ${connect.status}`,
+            };
+        }
+        const supervisorVersion = connect.handshake?.supervisorVersion;
+        // OPEN the governed terminal session. terminal/start carries the §10.3 run
+        // identity ONLY — NO client egress field (egress is supervisor-owned, sweep-23).
+        const start = await bridge.terminalStart({ request: opts.request });
+        if (!start.ok) {
+            disposeOnce();
+            return {
+                started: false,
+                trust: 'governed-unsandboxed',
+                ...(supervisorVersion ? { supervisorVersion } : {}),
+                message: start.reason,
+            };
+        }
+        // KEEP THE CHILD ALIVE for the session's lifetime. The session handle's stop()
+        // calls terminal/stop and disposes the child.
+        let stopped = false;
+        const session = {
+            runId: start.runId,
+            async stop() {
+                if (stopped) {
+                    return { finalized: false, message: 'terminal session already stopped.' };
+                }
+                stopped = true;
+                try {
+                    const fin = await bridge.terminalStop({ runId: start.runId });
+                    if (!fin.ok) {
+                        return { finalized: false, message: fin.reason };
+                    }
+                    return { finalized: true, verdict: fin.verdict, message: '' };
+                }
+                catch (err) {
+                    return {
+                        finalized: false,
+                        message: `terminal/stop failed: ${String(err?.message ?? err)}`,
+                    };
+                }
+                finally {
+                    disposeOnce();
+                }
+            },
+        };
+        return {
+            started: true,
+            runId: start.runId,
+            proxyUrl: start.proxyUrl,
+            posture: start.posture,
+            trust: start.trust,
+            ...(supervisorVersion ? { supervisorVersion } : {}),
+            message: '',
+            session,
+        };
+    }
+    catch (err) {
+        disposeOnce();
+        return {
+            started: false,
+            trust: 'refused',
+            message: `governed terminal failed: ${String(err?.message ?? err)}`,
         };
     }
 }
