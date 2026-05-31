@@ -223,7 +223,9 @@ echo "=== verdict ==="
 if [ "$drift" -gt 0 ]; then
 	echo "RESULT: FAIL — $drift conformance drift(s) between the SOURCE extension and"
 	echo "        the fork-embedded copy at extensions/glyphspek-trust-panel/."
-	echo "        Re-bundle the fresh built artifacts into the embedded copy (Task A)."
+	echo "        Re-sync with the canonical command (do NOT copy files by hand):"
+	echo "            bash build/glyphspek/sync-embedded-extension.sh"
+	echo "        (or 'sync-embedded-extension.sh --check' to see the diff without writing)."
 	exit 1
 fi
 echo "RESULT: PASS — embedded extension conforms to source (commands, activation,"

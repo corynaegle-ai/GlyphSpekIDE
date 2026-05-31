@@ -189,8 +189,9 @@ if [ "$violations" -gt 0 ] || [ "$copilot_runtime_fail" -gt 0 ] || [ "$embedded_
   fi
   if [ "$embedded_conformance_fail" -gt 0 ]; then
     echo "RESULT: FAIL — the embedded GlyphSpek extension drifted from its source"
-    echo "        (see the source<->embedded conformance gate above). Re-bundle the"
-    echo "        fresh built artifacts into extensions/glyphspek-trust-panel/."
+    echo "        (see the source<->embedded conformance gate above). Re-sync with the"
+    echo "        canonical command (do NOT copy files by hand):"
+    echo "            bash build/glyphspek/sync-embedded-extension.sh"
   fi
   exit 1
 fi
