@@ -71,6 +71,10 @@ const fs = __importStar(require("node:fs"));
 const crypto = __importStar(require("node:crypto"));
 const governedTerminalEnv_1 = require("./governedTerminalEnv");
 const ptyHost_1 = require("./ptyHost");
+/** Narrow a startSession result to the error case (vs. a real session). */
+function isChatSessionError(v) {
+    return !!v && typeof v.error === 'string';
+}
 /**
  * The activity-bar Chat view. One PTY session at a time; closing/disposing the view
  * (or the child exiting) finalizes the governed run.
@@ -136,8 +140,14 @@ class ChatTerminalViewProvider {
                 return;
             }
             const session = await this.deps.startSession();
+            if (isChatSessionError(session)) {
+                // Honest, non-silent failure: surface the reason in the webview empty state
+                // (e.g. "couldn't find Claude Code / Codex on your PATH").
+                this.post({ type: 'error', message: session.error });
+                return;
+            }
             if (!session) {
-                // startSession already surfaced the reason (no agent, workspace-local, etc.).
+                // startSession already surfaced the reason elsewhere (e.g. a modal warning).
                 return;
             }
             this.session = session;

@@ -8,8 +8,9 @@
  *   - fit-addon geometry → host message {type:'resize'} → pty.resize()
  *
  * Claude's own TUI provides the conversation; this file is just the transport +
- * a thin chat frame (logo empty-state, header, posture footer in the HTML). The CSP
- * forbids eval/remote; xterm.js + the fit addon are the vendored, nonce-loaded UMD
+ * a thin chat frame (logo + Start-button empty-state with the honest-posture text in
+ * the HTML; the view's section title labels it, so there is no in-webview header). The
+ * CSP forbids eval/remote; xterm.js + the fit addon are the vendored, nonce-loaded UMD
  * globals `Terminal` and `FitAddon`.
  */
 (function () {

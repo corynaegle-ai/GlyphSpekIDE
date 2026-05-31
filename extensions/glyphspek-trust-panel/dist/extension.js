@@ -63,9 +63,11 @@ const supervisorBridgeRunner_1 = require("./supervisorBridgeRunner");
 const governedTerminalEnv_1 = require("./governedTerminalEnv");
 const agentCli_1 = require("./agentCli");
 const agentLaunch_1 = require("./agentLaunch");
+const loginShellResolve_1 = require("./loginShellResolve");
 const agentBinaryIdentity_1 = require("./agentBinaryIdentity");
 const chatTerminalView_1 = require("./chatTerminalView");
 const ptyHost_1 = require("./ptyHost");
+const nodePtyBaseDirs_1 = require("./nodePtyBaseDirs");
 const inlineScript_1 = require("./inlineScript");
 const bridgeProtocol_1 = require("./bridgeProtocol");
 const policyHash_1 = require("./policyHash");
@@ -1814,40 +1816,35 @@ async function openGovernedChat(context, output) {
  * spikes/p0-governed-pty); see ptyHost.ts for the load + exec-bit repair.
  * ================================================================== */
 /**
- * Candidate base dirs to resolve node-pty from, in order:
- *   (1) the dev spikes root, if glyphspek.supervisorPath points at it (the proven spike
- *       install lives there — keeps `npm test`/dev working);
- *   (2) the extension's own install dir (in case a node-pty is ever vendored there);
- *   (3) the RUNNING app's bundled node_modules — Code-OSS already ships a correct
- *       Electron-ABI node-pty there (its integrated terminal uses it). This is the
- *       DISTRIBUTION path: in the packaged GlyphSpek.app the extension host is Electron,
- *       so a node-built node-pty wouldn't load and the extension ships none; resolving
- *       the app's OWN node-pty gives the right-ABI module for free.
- * The first that resolves wins; if none do, the chat surfaces an honest empty state.
- *
- * The app node_modules is derived TWO ways (deduped) for robustness: vscode.env.appRoot
- * (the canonical app dir) and process.execPath (works even if appRoot is unset, e.g. in
- * the ext-host test harness). deriveAppNodeModulesDir is pure + unit-tested.
+ * Login-shell FALLBACK for agent detection, shaped like detectAgentCli's result
+ * ({@link DetectedAgentCli}). Tries the KNOWN agents in preference order (claude, then
+ * codex) via the user's login shell — which sources their rc/profile and so sees the
+ * REAL PATH (e.g. ~/.local/bin) even when the Dock-launched app inherited a stripped
+ * one. Returns the first agent whose absolute executable the shell reports, or undefined.
+ */
+function resolveAgentViaLoginShellAsDetected() {
+    for (const agent of agentCli_1.KNOWN_AGENT_CLIS) {
+        const resolved = (0, loginShellResolve_1.resolveAgentViaLoginShell)(agent);
+        if (resolved)
+            return { agent, path: resolved.path };
+    }
+    return undefined;
+}
+/**
+ * Context-bound wrapper for {@link computeNodePtyBaseDirs} (sweep-30 F4): gather the
+ * app/extension inputs from vscode and delegate to the PURE, unit-tested helper. The
+ * candidate ORDER is documented on that helper; the load-bearing F4 change is that
+ * glyphspek.supervisorPath is NO LONGER a node-pty candidate (a native module must not
+ * be dlopen'd from a directory chosen by a general dev setting). The dev-spikes fallback
+ * (for `npm test`) is taken from a DEDICATED env hint instead.
  */
 function resolveNodePtyBaseDirs(context) {
-    const bases = [];
-    const supervisorPath = vscode.workspace
-        .getConfiguration('glyphspek')
-        .get('supervisorPath', '');
-    if (supervisorPath && supervisorPath.trim()) {
-        bases.push(supervisorPath.trim());
-    }
-    bases.push(context.extensionUri.fsPath);
-    // (3) The running app's bundled node_modules (correct Electron ABI, ships node-pty).
-    const appRoot = vscode.env.appRoot; // e.g. .../GlyphSpek.app/Contents/Resources/app
-    if (appRoot && appRoot.trim()) {
-        bases.push(path.join(appRoot.trim(), 'node_modules'));
-    }
-    const fromExec = (0, ptyHost_1.deriveAppNodeModulesDir)(process.execPath);
-    if (fromExec && !bases.includes(fromExec)) {
-        bases.push(fromExec);
-    }
-    return bases;
+    return (0, nodePtyBaseDirs_1.computeNodePtyBaseDirs)({
+        extensionDir: context.extensionUri.fsPath,
+        appRoot: vscode.env.appRoot,
+        execPath: process.execPath,
+        devSpikesRoot: process.env.GLYPHSPEK_DEV_SPIKES_ROOT,
+    });
 }
 /**
  * Build the {@link ChatTerminalDeps} the sidebar Chat view needs. The view is pure
@@ -1864,11 +1861,19 @@ function buildChatTerminalDeps(context, output) {
         },
         async startSession() {
             output.show(true);
-            const detected = (0, agentCli_1.detectAgentCli)();
+            // RESOLUTION ORDER (the Dock-PATH bug). (1) the extension's own PATH scan; (2)
+            // FALL BACK to the user's LOGIN shell — when GlyphSpek.app is launched from the
+            // Dock it inherits a stripped PATH (/usr/bin:/bin:…) that lacks ~/.local/bin where
+            // the user's `claude` lives, so the extension-PATH scan finds nothing even though
+            // `claude` runs fine in the user's terminal. The login shell sources the user's
+            // rc/profile and reports the SAME absolute binary their terminal would.
+            const detected = (0, agentCli_1.detectAgentCli)() ?? resolveAgentViaLoginShellAsDetected();
             if (!detected) {
-                void vscode.window.showWarningMessage('GlyphSpek Chat runs your interactive Claude Code in a governed session. Install Claude ' +
-                    'Code and run `claude login` (or install Codex), then start the chat again.');
-                return undefined;
+                // HONEST, non-silent: surface the reason in the webview empty state.
+                return {
+                    error: "Couldn't find Claude Code / Codex on your PATH. Open a terminal and run `claude` once, " +
+                        "or make sure it's installed.",
+                };
             }
             // BINARY-SWAP GUARD (sweep-27/28). Canonicalize the detected path and REFUSE a
             // workspace-local resolution (the red flag for a planted shim) — exactly as the
