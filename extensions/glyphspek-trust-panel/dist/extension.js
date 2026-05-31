@@ -656,6 +656,97 @@ async function resolvePolicyPath(supervisorPath) {
     }
     return { path: picked[0].fsPath, scope: 'picker' };
 }
+/* ------------------------------------------------------------------ *
+ * NON-PROMPTING resolution for the GOVERNED TERMINAL (one-click).
+ *
+ * The Governed Terminal is just a cwd to drive `claude`/`codex` in under the SOFT
+ * (governed-unsandboxed) boundary — it is NOT a sandboxed worktree and NOT a real
+ * governed RUN. So, unlike the heavier governed-RUN path (assembleBridgeRunRequest /
+ * runGovernedTask), opening it must be a SINGLE CLICK: it must NEVER pop a folder or
+ * policy picker. These helpers resolve the cwd and the policy with ZERO interaction.
+ * Provenance (workspace vs home-dir cwd; configured vs shipped-default policy) is
+ * reported honestly rather than hidden.
+ * ------------------------------------------------------------------ */
+/** Bundled, ships-in-the-vsix default governed-terminal policy (media/). */
+const DEFAULT_GOVERNED_TERMINAL_POLICY_FILE = 'default-governed-terminal-policy.json';
+/**
+ * Absolute path to the DEFAULT governed-terminal policy shipped inside the .vsix
+ * (extension/media/). Used by the terminal path when no `glyphspek.policyPath` is
+ * configured, so opening the soft terminal never needs a picker.
+ */
+function resolveDefaultGovernedTerminalPolicyPath(context) {
+    return vscode.Uri.joinPath(context.extensionUri, 'media', DEFAULT_GOVERNED_TERMINAL_POLICY_FILE).fsPath;
+}
+/**
+ * Resolve the governed-terminal cwd WITHOUT any picker (one-click):
+ *   - exactly one workspace folder  → that folder ('workspace-folder'),
+ *   - multiple folders              → the folder owning the active text editor if it
+ *                                      maps to one ('active-editor-folder'), else the
+ *                                      first folder ('workspace-folder'),
+ *   - NO workspace folder           → os.homedir() ('home-dir-fallback').
+ *
+ * NEVER calls showOpenDialog — the soft terminal is a cwd to run `claude`/`codex`
+ * in, not a sandboxed worktree, so there is nothing to pick.
+ */
+function resolveTerminalCwd() {
+    const folders = vscode.workspace.workspaceFolders ?? [];
+    if (folders.length === 0) {
+        return { path: os.homedir(), provenance: 'home-dir-fallback' };
+    }
+    if (folders.length === 1) {
+        return { path: folders[0].uri.fsPath, provenance: 'workspace-folder' };
+    }
+    // Multiple folders: prefer the one owning the active editor when it maps to one.
+    const activeUri = vscode.window.activeTextEditor?.document.uri;
+    if (activeUri) {
+        const owning = vscode.workspace.getWorkspaceFolder?.(activeUri);
+        if (owning) {
+            return { path: owning.uri.fsPath, provenance: 'active-editor-folder' };
+        }
+    }
+    return { path: folders[0].uri.fsPath, provenance: 'workspace-folder' };
+}
+/**
+ * Resolve the governed-terminal policy WITHOUT any picker (one-click). If a
+ * `glyphspek.policyPath` scope is configured (classified exactly as
+ * resolvePolicyPath does), use it and KEEP that provenance. Otherwise use the
+ * DEFAULT policy SHIPPED with the extension (media/), fingerprinting whichever
+ * file is chosen for the §10.3 policyHash pin.
+ *
+ * NEVER calls showOpenDialog. If the chosen policy cannot be fingerprinted (e.g. a
+ * configured path is missing, or — should it ever happen — the bundled default is
+ * unreadable), returns undefined after surfacing a clear error: the caller aborts
+ * rather than silently falling through to a host-cwd-relative path.
+ */
+function resolveTerminalPolicy(context) {
+    const inspect = vscode.workspace
+        .getConfiguration('glyphspek')
+        .inspect('policyPath');
+    const classified = (0, configScope_1.classifyPolicyPath)(inspect);
+    if (classified.scope !== 'none') {
+        const fp = (0, policyHash_1.policyFileSha256)(classified.path);
+        if (!fp.sha256) {
+            void vscode.window.showErrorMessage(`GlyphSpek: the configured glyphspek.policyPath (${classified.path}) could not be ` +
+                `fingerprinted (${fp.note}); cannot open a governed terminal.`);
+            return undefined;
+        }
+        return {
+            path: classified.path,
+            policyHash: fp.sha256,
+            provenance: 'configured',
+            scope: classified.scope,
+        };
+    }
+    // No configured policy — use the bundled, ships-in-the-vsix default. No picker.
+    const defaultPath = resolveDefaultGovernedTerminalPolicyPath(context);
+    const fp = (0, policyHash_1.policyFileSha256)(defaultPath);
+    if (!fp.sha256) {
+        void vscode.window.showErrorMessage(`GlyphSpek: the bundled default governed-terminal policy could not be read ` +
+            `(${defaultPath}: ${fp.note}); cannot open a governed terminal.`);
+        return undefined;
+    }
+    return { path: defaultPath, policyHash: fp.sha256, provenance: 'shipped-default', scope: 'default' };
+}
 /**
  * Resolve the output directory for this run's bundle under the configured
  * run-output root (default: <workspace>/.glyphspek/runs), timestamped per run.
@@ -1362,38 +1453,54 @@ async function startLiveRun(context, output, gestures, gestureToken) {
  * unsandboxed) boundary: the actorType is the detected CLI (claude-code-cli /
  * codex-cli) or 'native' when none is installed, and the runtime profile is
  * 'local-exec' (the supervisor settles the session into `governed-unsandboxed`
- * regardless — this string never by itself confers product trust). Returns
- * undefined (after surfacing the reason) when the operator cancelled or the policy
- * could not be fingerprinted.
+ * regardless — this string never by itself confers product trust).
+ *
+ * UX (one-click): UNLIKE the heavier governed-RUN path this NEVER pops a folder or
+ * policy picker. The cwd is resolved non-interactively (workspace folder, else the
+ * active-editor's folder, else os.homedir()) and the policy is the configured
+ * glyphspek.policyPath when set, else the DEFAULT policy SHIPPED with the extension.
+ * The cwd + policy provenance is surfaced honestly in the output channel. Returns
+ * undefined (after surfacing the reason) only when the policy could not be
+ * fingerprinted — never because the operator declined a picker (there is none).
  */
-async function assembleGovernedTerminalRequest(output, actorType) {
-    const repo = await resolveTargetRepo();
-    if (!repo) {
-        output.appendLine('[host] governed terminal aborted: no target repo selected.');
-        return undefined;
+function assembleGovernedTerminalRequest(context, output, actorType) {
+    // cwd: NON-PROMPTING. The soft terminal is just a cwd to run claude/codex in.
+    const cwd = resolveTerminalCwd();
+    if (cwd.provenance === 'home-dir-fallback') {
+        output.appendLine(`[host] governed terminal cwd: no workspace folder open — using home directory ` +
+            `(${cwd.path}). This is a HOME-DIR FALLBACK, not a workspace.`);
     }
-    const resolvedPolicy = await resolvePolicyPath(resolveSupervisorPath().path);
+    else {
+        output.appendLine(`[host] governed terminal cwd: ${cwd.path} (${cwd.provenance}).`);
+    }
+    // policy: NON-PROMPTING. Configured glyphspek.policyPath, else the shipped default.
+    const resolvedPolicy = resolveTerminalPolicy(context);
     if (!resolvedPolicy) {
-        output.appendLine('[host] governed terminal aborted: no policy selected.');
+        // resolveTerminalPolicy already surfaced an error message to the operator.
+        output.appendLine('[host] governed terminal aborted: policy could not be fingerprinted.');
         return undefined;
     }
-    const policyFp = (0, policyHash_1.policyFileSha256)(resolvedPolicy.path);
-    if (!policyFp.sha256) {
-        void vscode.window.showErrorMessage(`GlyphSpek: could not fingerprint the policy file (${policyFp.note}); cannot open a governed terminal.`);
-        return undefined;
+    if (resolvedPolicy.provenance === 'shipped-default') {
+        output.appendLine(`[host] governed terminal policy: SHIPPED DEFAULT (deny-by-default; egress is ` +
+            `supervisor-owned, not enforced by this file) — ${resolvedPolicy.path} ` +
+            `(sha256 ${resolvedPolicy.policyHash}).`);
     }
-    const sourceCommit = resolveSourceCommit(repo);
+    else {
+        output.appendLine(`[host] governed terminal policy: CONFIGURED glyphspek.policyPath (${resolvedPolicy.scope}) — ` +
+            `${resolvedPolicy.path} (sha256 ${resolvedPolicy.policyHash}).`);
+    }
+    const sourceCommit = resolveSourceCommit(cwd.path);
     return {
         actorType,
         autonomyTier: 'allowlist',
         policyPath: resolvedPolicy.path,
-        policyHash: policyFp.sha256,
-        workspaceRoot: repo,
+        policyHash: resolvedPolicy.policyHash,
+        workspaceRoot: cwd.path,
         // SOFT boundary: the terminal is not run inside a supervisor-owned sandbox. The
         // supervisor settles this into `governed-unsandboxed` (never product-trusted).
         runtimeProfile: 'local-exec',
         extensionPosture: 'sovereign',
-        ...(sourceCommit ? { sourceCommit } : { worktreeBase: repo }),
+        ...(sourceCommit ? { sourceCommit } : { worktreeBase: cwd.path }),
     };
 }
 /**
@@ -1418,7 +1525,7 @@ async function openGovernedTerminal(context, output) {
         : detected?.agent === 'codex'
             ? 'codex-cli'
             : 'native';
-    const request = await assembleGovernedTerminalRequest(output, actorType);
+    const request = assembleGovernedTerminalRequest(context, output, actorType);
     if (!request)
         return;
     // Open + reveal the Trust Panel FIRST so it is ready for the live stream.

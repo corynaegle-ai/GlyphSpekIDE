@@ -1,0 +1,23 @@
+{
+  "_comment": "GlyphSpek DEFAULT governed-terminal policy (shipped with the extension). This is the deny-by-default policy used by the in-IDE Governed Terminal when no glyphspek.policyPath is configured. HONESTY for the SOFT (governed-unsandboxed) boundary: the terminal is NOT a sandboxed worktree, so file_read/file_write/command here are advisory deny-by-default and are NOT physically enforced by an OS sandbox. EGRESS is the part the supervisor actually enforces: every network call from the terminal is forced through the supervisor-owned metadata-only proxy and decided against the supervisor's model-endpoint allowlist (NOT this file's `allow.network`). This run is always governed-unsandboxed and NEVER product-trusted.",
+  "version": 1,
+  "defaults": {
+    "file_read": "deny",
+    "file_write": "deny",
+    "command": "deny",
+    "network": "deny",
+    "mcp": "deny"
+  },
+  "allow": {
+    "read_paths": [],
+    "write_paths": [],
+    "commands": [],
+    "network": []
+  },
+  "deny": {
+    "read_paths": [],
+    "write_paths": [],
+    "commands": []
+  },
+  "verify": []
+}
