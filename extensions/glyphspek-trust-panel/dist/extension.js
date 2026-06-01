@@ -1078,6 +1078,169 @@ class ChatPanel {
             .replace(/\{\{chatUri\}\}/g, chatUri.toString());
     }
 }
+/**
+ * Singleton native-chat webview. Owns ONE {@link ChatSession} (opened lazily on the
+ * first send and reused across turns), assembles the conversation the webview posts,
+ * drives bridge chat/send, and forwards each chat/delta event to the webview. The
+ * provider credential never reaches this panel — chat/send carries none and the
+ * supervisor holds none either (Codex authenticates from its own store).
+ */
+class NativeChatPanel {
+    static createOrShow(extensionUri, sessionFactory) {
+        const column = vscode.window.activeTextEditor?.viewColumn ?? vscode.ViewColumn.One;
+        if (NativeChatPanel.current) {
+            NativeChatPanel.current.panel.reveal(column);
+            return NativeChatPanel.current;
+        }
+        const panel = vscode.window.createWebviewPanel('glyphspekNativeChat', 'GlyphSpek Chat', column, {
+            enableScripts: true,
+            retainContextWhenHidden: true,
+            localResourceRoots: [vscode.Uri.joinPath(extensionUri, 'media')],
+        });
+        NativeChatPanel.current = new NativeChatPanel(panel, extensionUri, sessionFactory);
+        return NativeChatPanel.current;
+    }
+    constructor(panel, extensionUri, sessionFactory) {
+        this.disposables = [];
+        this.ready = false;
+        /** Guard: one turn in flight at a time (the composer is disabled meanwhile). */
+        this.sending = false;
+        this.panel = panel;
+        this.extensionUri = extensionUri;
+        this.sessionFactory = sessionFactory;
+        this.panel.webview.html = this.getWebviewContent(this.panel.webview);
+        this.panel.onDidDispose(() => this.dispose(), null, this.disposables);
+        this.panel.webview.onDidReceiveMessage(
+        // RETURN the onMessage promise so a test can await an otherwise fire-and-forget
+        // handler deterministically (VS Code itself ignores the return).
+        (msg) => this.onMessage(msg), null, this.disposables);
+    }
+    reveal() {
+        const column = vscode.window.activeTextEditor?.viewColumn ?? vscode.ViewColumn.One;
+        this.panel.reveal(column);
+    }
+    async onMessage(msg) {
+        if (!msg || typeof msg !== 'object')
+            return;
+        if (msg.type === 'ready') {
+            this.ready = true;
+            return;
+        }
+        if (msg.type === 'chatSend') {
+            const messages = Array.isArray(msg.messages) ? msg.messages : [];
+            await this.handleSend(messages);
+            return;
+        }
+    }
+    /**
+     * Drive ONE chat turn. Opens the session lazily, posts a "thinking…" turn-start to
+     * the webview, calls bridge chat/send with the FULL transcript, and streams each
+     * chat/delta event to the webview (appending delta text, finalizing on done, or
+     * rendering error.message honestly). Resolve-never-throw: any failure becomes a
+     * chatError the webview renders.
+     */
+    async handleSend(messages) {
+        // Sanitize the transcript to {role, content} pairs (defense-in-depth: the webview
+        // posts only these, but never trust an inbound webview payload's shape).
+        const clean = messages
+            .filter((m) => m &&
+            (m.role === 'user' || m.role === 'assistant' || m.role === 'system') &&
+            typeof m.content === 'string')
+            .map((m) => ({ role: m.role, content: m.content }));
+        if (clean.length === 0) {
+            this.postError('empty message — nothing to send.');
+            return;
+        }
+        if (this.sending) {
+            // A turn is already in flight; ignore (the webview also disables the composer).
+            return;
+        }
+        this.sending = true;
+        this.post({ type: 'chatTurnStart' });
+        try {
+            const session = await this.ensureSession();
+            if (!session) {
+                // ensureSession already posted the error.
+                return;
+            }
+            const outcome = await session.sendTurn(clean, {
+                onEvent: (event) => this.onChatEvent(event),
+            });
+            // A transport-level failure that produced no terminal event still finalizes.
+            if (!outcome.ok && outcome.message) {
+                // onChatEvent already rendered a terminal error if one streamed; if not,
+                // surface the outcome message so the UI never hangs in the thinking state.
+                this.postError(outcome.message);
+            }
+        }
+        catch (err) {
+            this.postError(`chat turn failed: ${String(err?.message ?? err)}`);
+        }
+        finally {
+            this.sending = false;
+            this.post({ type: 'chatBusy', busy: false });
+        }
+    }
+    /** Map a streamed chat/delta event to the webview's render messages. */
+    onChatEvent(event) {
+        if (event.type === 'delta') {
+            this.post({ type: 'chatDelta', text: event.text });
+        }
+        else if (event.type === 'done') {
+            this.post({ type: 'chatDone' });
+        }
+        else if (event.type === 'error') {
+            this.postError(event.message);
+        }
+    }
+    /** Open the chat session lazily; report a connect failure honestly to the webview. */
+    async ensureSession() {
+        if (this.session)
+            return this.session;
+        const opened = await this.sessionFactory.open();
+        if (!opened.connected || !opened.session) {
+            this.postError(opened.message || 'could not open the governed chat session.');
+            return undefined;
+        }
+        this.session = opened.session;
+        return this.session;
+    }
+    post(msg) {
+        // VS Code queues messages to a live webview, so a post that races the webview's
+        // `ready` signal is delivered once it boots — no pre-ready buffering needed.
+        void this.panel.webview.postMessage(msg);
+    }
+    postError(message) {
+        this.post({ type: 'chatError', message });
+    }
+    dispose() {
+        NativeChatPanel.current = undefined;
+        try {
+            this.session?.dispose();
+        }
+        catch {
+            /* best-effort teardown */
+        }
+        this.session = undefined;
+        while (this.disposables.length)
+            this.disposables.pop()?.dispose();
+    }
+    getWebviewContent(webview) {
+        const mediaUri = vscode.Uri.joinPath(this.extensionUri, 'media');
+        const htmlPath = vscode.Uri.joinPath(mediaUri, 'native-chat.html');
+        let html = fs.readFileSync(htmlPath.fsPath, 'utf8');
+        const stylesUri = webview.asWebviewUri(vscode.Uri.joinPath(mediaUri, 'styles.css'));
+        const nativeChatUri = webview.asWebviewUri(vscode.Uri.joinPath(mediaUri, 'native-chat.js'));
+        const nonce = crypto.randomBytes(16).toString('base64');
+        const iconsSprite = readIconsSprite(mediaUri);
+        return html
+            .replace('{{iconsSprite}}', iconsSprite)
+            .replace(/\{\{cspSource\}\}/g, webview.cspSource)
+            .replace(/\{\{nonce\}\}/g, nonce)
+            .replace(/\{\{stylesUri\}\}/g, stylesUri.toString())
+            .replace(/\{\{nativeChatUri\}\}/g, nativeChatUri.toString());
+    }
+}
 /** The active editor's selection (or whole document) + its workspace ref. */
 function activeEditorSelection() {
     const editor = vscode.window.activeTextEditor;
@@ -1223,6 +1386,20 @@ function activate(context) {
     // ChatPanel/stubModelGateway — that fake gateway is retired as the chat path. The
     // API-key model broker is a separate, secondary path (parked).
     context.subscriptions.push(vscode.commands.registerCommand('glyphspek.openChat', () => openGovernedChat(context, supervisorOutput)));
+    // GlyphSpek NATIVE CHAT (M7). The "normal chat window": a webview where the user
+    // types a message and sees the assistant reply, GOVERNED through our gateway —
+    // bridge chat/send → the GlyphSpek model gateway's CODEX backend on the user's own
+    // ChatGPT subscription. This is a brokered, metadata-TRACED model call (governed,
+    // UNSANDBOXED, never product-trusted); GlyphSpek injects no credential (Codex
+    // authenticates from its own ~/.codex store). Distinct from glyphspek.openChat,
+    // which runs interactive Claude Code in a governed terminal.
+    const chatOutput = vscode.window.createOutputChannel('GlyphSpek Chat (Gateway)');
+    context.subscriptions.push(chatOutput);
+    context.subscriptions.push(vscode.commands.registerCommand('glyphspek.openNativeChat', () => {
+        const factory = buildNativeChatSessionFactory(context, chatOutput);
+        const panel = NativeChatPanel.createOrShow(context.extensionUri, factory);
+        panel.reveal();
+    }));
     // FIRST-PARTY WEBVIEW GESTURE GATE (sweep-20 High #3 — rework of sweep-19).
     //
     // ALL THREE trusted-run paths (governed / bridge / live) are PRODUCT-TRUSTED:
@@ -1802,6 +1979,23 @@ async function openGovernedChat(context, output) {
     }
     await openGovernedTerminalSurface(context, output, 'chat', detected);
 }
+/**
+ * Build the production {@link NativeChatSessionFactory} for the native chat window:
+ * it opens a {@link ChatSession} against the bundled, hash-pinned bridge-server, which
+ * drives chat/send through the GlyphSpek model gateway's CODEX backend. No credential
+ * is handled here; the supervisor holds none either (Codex authenticates from its own
+ * store). A test injects a fake factory instead.
+ */
+function buildNativeChatSessionFactory(context, output) {
+    return {
+        open: () => (0, supervisorBridgeRunner_1.openChatSession)({
+            bridgeServerPath: resolveBundledBridgeServerPath(context),
+            extensionVersion: resolveExtensionVersion(context),
+            runsBase: resolveRunsBase(),
+            output,
+        }),
+    };
+}
 /* ================================================================== *
  * CHAT TERMINAL VIEW WIRING (M7 — the SIDEBAR "chat that's a terminal").
  *
@@ -1843,7 +2037,10 @@ function resolveNodePtyBaseDirs(context) {
         extensionDir: context.extensionUri.fsPath,
         appRoot: vscode.env.appRoot,
         execPath: process.execPath,
-        devSpikesRoot: process.env.GLYPHSPEK_DEV_SPIKES_ROOT,
+        // SECURITY (F2): only honor the dev-spikes env hint in a Development/Test context.
+        // In Production an env var must NOT be able to add a native-module require() search
+        // dir, so this resolves to undefined and only packaged first-party paths are used.
+        devSpikesRoot: (0, nodePtyBaseDirs_1.devSpikesRootFor)(context.extensionMode, [vscode.ExtensionMode.Development, vscode.ExtensionMode.Test], process.env.GLYPHSPEK_DEV_SPIKES_ROOT),
     });
 }
 /**

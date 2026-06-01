@@ -15,6 +15,7 @@
  * fallback that keeps `npm test` working is taken from a DEDICATED env hint instead.
  */
 Object.defineProperty(exports, "__esModule", { value: true });
+exports.devSpikesRootFor = devSpikesRootFor;
 exports.computeNodePtyBaseDirs = computeNodePtyBaseDirs;
 const node_path_1 = require("node:path");
 const ptyHost_1 = require("./ptyHost");
@@ -31,6 +32,25 @@ const ptyHost_1 = require("./ptyHost");
  *   (3) DEV fallback — the spikes root, so `npm test`/dev keep working. NOT supervisorPath.
  * The first that resolves wins; if none do, the chat surfaces an honest empty state.
  */
+/**
+ * GATE the dev-spikes node-pty root by extension mode (sweep F2 security hardening).
+ *
+ * An env var (GLYPHSPEK_DEV_SPIKES_ROOT) must NOT be able to add a native-module
+ * require() search dir in a PRODUCTION trust-focused IDE — that would let the
+ * environment steer where a .node is dlopen'd from. So we only honor the env hint when
+ * the extension runs in a dev/test context.
+ *
+ * Kept vscode-free + pure so it is unit-testable beside computeNodePtyBaseDirs: the
+ * caller passes the numeric `mode` (vscode.ExtensionMode) plus the numeric mode values
+ * that count as dev/test (vscode.ExtensionMode.Development / .Test). In Production the
+ * env hint is dropped (returns undefined) and only packaged first-party module paths are
+ * used; computeNodePtyBaseDirs already degrades to an honest empty state if those are absent.
+ */
+function devSpikesRootFor(mode, devOrTestModes, env) {
+    if (!env || !env.trim())
+        return undefined;
+    return devOrTestModes.includes(mode) ? env : undefined;
+}
 function computeNodePtyBaseDirs(inputs) {
     const bases = [];
     // (1) PRIMARY: the running app's bundled, first-party node_modules (Electron ABI).

@@ -1,0 +1,88 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <!--
+      Strict CSP for the native chat webview. Scripts run only with the per-load
+      nonce; styles only from the extension media dir; no remote origins, no eval.
+      The chat NEVER fetches anything itself — every turn goes through the extension
+      host → supervisor bridge (chat/send), which drives the GlyphSpek-controlled
+      model gateway's Codex backend. The webview holds and sends NO credential.
+      default-src 'none' is therefore safe (no network from the webview at all).
+    -->
+    <meta
+      http-equiv="Content-Security-Policy"
+      content="default-src 'none'; img-src {{cspSource}} data:; style-src {{cspSource}}; script-src 'nonce-{{nonce}}'; font-src {{cspSource}};"
+    />
+    <title>GlyphSpek — Chat</title>
+    <link rel="stylesheet" href="{{stylesUri}}" />
+  </head>
+  <body class="chat-body">
+    <!-- GlyphSpek icon sprite (docs/assets/ICON-USAGE.md), inlined by the host. -->
+    {{iconsSprite}}
+    <header class="topbar">
+      <div class="topbar-title">
+        <span class="logo">
+          <svg class="gs-icon gs-logo-icon" aria-hidden="true"><use href="#gs-verifier"></use></svg>
+          GlyphSpek
+        </span>
+        <span id="chat-subtitle" class="topbar-sub">Chat — governed egress (metadata-only proxy) + run-bound trace · Codex · UNSANDBOXED</span>
+      </div>
+    </header>
+
+    <div id="chat-status" class="load-status" hidden></div>
+
+    <main class="chat-layout">
+      <section class="card chat-transcript-card">
+        <h2 class="card-title">
+          <svg class="gs-icon gs-title-icon" aria-hidden="true"><use href="#gs-actors"></use></svg>
+          Conversation
+        </h2>
+        <!--
+          HONEST GOVERNANCE COPY (must match exactly what the supervisor ENFORCES).
+          Each turn runs Codex under a supervisor-owned GOVERNED ENV: its egress is
+          forced through the supervisor's metadata-only proxy (the broker owns the
+          network) and the turn is bound to a real run whose hash-chained trace records
+          the call METADATA (who/which/how-many/outcome) — NOT the conversation content.
+          The session is UNSANDBOXED (no fs isolation) and never product-trusted.
+          GlyphSpek injects NO credential: Codex authenticates from its own ~/.codex.
+          We do NOT redact the prompt sent to Codex (no transcript redaction is claimed).
+        -->
+        <p id="chat-transcript-caption" class="panel-caption">
+          Each reply runs <strong>Codex</strong> on your own ChatGPT subscription with
+          its <strong>egress governed</strong> through GlyphSpek's metadata-only proxy
+          and bound to a <strong>run-bound trace</strong> (call metadata only — not your
+          message text). This session is <strong>UNSANDBOXED</strong> and
+          <strong>not product-trusted</strong>; GlyphSpek injects no credential (Codex
+          uses its own <code>~/.codex</code> auth). Your prompt is sent to Codex
+          as-is — it is not redacted.
+        </p>
+        <div id="chat-transcript" class="chat-transcript"></div>
+      </section>
+
+      <section class="card chat-compose-card">
+        <textarea
+          id="chat-input"
+          class="chat-input"
+          rows="3"
+          placeholder="Message Codex… (governed egress + run-bound trace · UNSANDBOXED · Cmd/Ctrl+Enter to send)"
+        ></textarea>
+        <div class="chat-compose-actions">
+          <span id="chat-hint" class="chat-context-toggle">Governed egress (metadata-only proxy) + run-bound trace · UNSANDBOXED · GlyphSpek injects no credential.</span>
+          <button id="chat-send" type="button" class="btn btn-primary">Send</button>
+        </div>
+      </section>
+    </main>
+
+    <footer id="chat-footer" class="footer">
+      Governed chat surface. Each turn runs Codex on your subscription with its egress
+      governed (metadata-only proxy) and a run-bound trace of the call metadata;
+      UNSANDBOXED and not product-trusted. GlyphSpek injects no credential (Codex uses
+      its own ~/.codex auth). Your message text is sent to Codex as-is (not redacted).
+      No credential is stored or displayed in this view.
+    </footer>
+
+    <script nonce="{{nonce}}" src="{{nativeChatUri}}"></script>
+  </body>
+</html>

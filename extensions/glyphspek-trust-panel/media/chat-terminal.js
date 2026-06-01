@@ -58,9 +58,15 @@
     // eslint-disable-next-line no-undef
     term = new Terminal({
       fontFamily: 'ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace',
-      fontSize: 12,
-      lineHeight: 1.1,
+      fontSize: 13,
+      // lineHeight stays ~1 so Claude's box-drawing (│ ┌ └ ─) renders as unbroken
+      // borders; chat "breathing room" comes from the wrapper padding instead, which
+      // does not interfere with per-cell glyph alignment.
+      lineHeight: 1.08,
       cursorBlink: true,
+      // Bar cursor reads like a chat composer caret rather than a terminal block.
+      cursorStyle: 'bar',
+      cursorWidth: 2,
       allowProposedApi: true,
       theme: THEME,
       scrollback: 5000,

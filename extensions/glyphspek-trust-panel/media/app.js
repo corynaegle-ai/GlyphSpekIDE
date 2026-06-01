@@ -1396,7 +1396,13 @@ function renderPolicyDecisions() {
     if (d.blocked) cap.appendChild(el('span', { className: 'chip chip-blocked', text: 'blocked' }));
     tr.appendChild(cap);
     const dec = el('td');
-    dec.appendChild(el('span', { className: 'chip chip-decision decision-' + d.decision, text: d.decision }));
+    // F1: a soft-plane observe-only decision is OBSERVED (bypassable default-allow),
+    // NOT a real policy allow — label it distinctly, mirroring the Network table.
+    if (d.enforcement === 'observe-only') {
+      dec.appendChild(el('span', { className: 'chip chip-decision decision-observe', text: 'observed (soft, default-allow)' }));
+    } else {
+      dec.appendChild(el('span', { className: 'chip chip-decision decision-' + d.decision, text: d.decision }));
+    }
     tr.appendChild(dec);
     tr.appendChild(el('td', { text: d.provenanceLabel || '—' }));
     const rule = el('td', { className: 'rule-cell' });

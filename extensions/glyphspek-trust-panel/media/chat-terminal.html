@@ -63,11 +63,23 @@
       #empty .sub { font-size: 11px; color: var(--text-dim); max-width: 320px; line-height: 1.45; }
       #empty .err { color: var(--claims); font-size: 12px; max-width: 340px; }
 
-      /* Terminal host — fills the view once started. */
-      #term-wrap { flex: 1 1 auto; min-height: 0; display: none; padding: 4px 6px; }
+      /*
+       * Terminal host — fills the view once started. Generous side gutters + a little
+       * top breathing room give the canvas a chat-surface feel without touching the
+       * per-cell glyph grid (so Claude's box-drawing stays crisp). The narrow sidebar
+       * means we keep the gutters modest so we don't steal columns from Claude's TUI.
+       */
+      #term-wrap { flex: 1 1 auto; min-height: 0; display: none; padding: 10px 12px 6px; }
       #term-wrap.active { display: block; }
       #terminal { width: 100%; height: 100%; }
       .xterm { height: 100%; }
+      /* Thin, unobtrusive scrollbar — chat surfaces don't show a chunky terminal rail. */
+      .xterm .xterm-viewport::-webkit-scrollbar { width: 7px; }
+      .xterm .xterm-viewport::-webkit-scrollbar-track { background: transparent; }
+      .xterm .xterm-viewport::-webkit-scrollbar-thumb {
+        background: rgba(139, 151, 166, 0.28); border-radius: 7px;
+      }
+      .xterm .xterm-viewport::-webkit-scrollbar-thumb:hover { background: rgba(139, 151, 166, 0.5); }
     </style>
   </head>
   <body>

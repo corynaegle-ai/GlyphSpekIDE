@@ -60,9 +60,11 @@ var __importStar = (this && this.__importStar) || (function () {
     };
 })();
 Object.defineProperty(exports, "__esModule", { value: true });
+exports.CHAT_BACKEND_ID = void 0;
 exports.createRunViaBridge = createRunViaBridge;
 exports.startRunViaBridge = startRunViaBridge;
 exports.startGovernedTerminalSession = startGovernedTerminalSession;
+exports.openChatSession = openChatSession;
 const os = __importStar(require("node:os"));
 const bridge_1 = require("./bridge");
 const supervisorHash_1 = require("./supervisorHash");
@@ -400,6 +402,130 @@ async function startGovernedTerminalSession(opts) {
             started: false,
             trust: 'refused',
             message: `governed terminal failed: ${String(err?.message ?? err)}`,
+        };
+    }
+}
+/** The default chat backend id the native chat window drives (codex exec). */
+exports.CHAT_BACKEND_ID = 'codex';
+/**
+ * Open a native-chat session: spawn the packaged bridge-server, connect (spawn +
+ * hash-pin + handshake), and return a {@link ChatSession} whose `sendTurn` drives
+ * each turn through chat/send and streams the chat/delta reply. The bridge child is
+ * kept ALIVE for the session's lifetime (reused across turns) and torn down by
+ * `dispose()`. Resolve-never-reject: a connect failure resolves with a non-connected
+ * outcome the command path can render honestly.
+ */
+async function openChatSession(opts) {
+    const { output } = opts;
+    // buildBridgeEnv only reads runsBase/supervisorVersion off opts; a chat session
+    // carries no §10.3 run request, so pass the env-relevant fields only.
+    const env = buildBridgeEnv(opts);
+    output.appendLine('');
+    output.appendLine('[host] GlyphSpek native chat — spawning packaged bridge-server.');
+    output.appendLine(`[host] bridge-server: ${opts.bridgeServerPath}`);
+    output.appendLine(`[host] runs base: ${env.GLYPHSPEK_RUNS_BASE}`);
+    const bridge = new bridge_1.SupervisorBridge({
+        binaryPath: opts.bridgeServerPath,
+        expectedSha256: supervisorHash_1.BUNDLED_BRIDGE_SERVER_SHA256,
+        execPath: process.execPath,
+        env,
+        cwd: env.GLYPHSPEK_RUNS_BASE,
+        extensionVersion: opts.extensionVersion,
+        log: output,
+        spawn: opts.spawn ?? bridge_1.defaultBridgeSpawn,
+        ...(opts.requestTimeoutMs !== undefined ? { requestTimeoutMs: opts.requestTimeoutMs } : {}),
+    });
+    // The chat/delta stream is delivered to the CURRENT in-flight turn's sink, which is
+    // bound BEFORE chat/send is issued (a delta can arrive synchronously with — or even
+    // ahead of — the ack, so we must already be listening). Exactly ONE turn is in
+    // flight at a time (the caller awaits each turn's settle before sending the next),
+    // so a per-connection serialized stream maps unambiguously to the active turn; we do
+    // NOT gate on turnId (which we may not yet know when the first delta lands). The
+    // event still CARRIES its turnId for the sink to render/assert.
+    let activeSink;
+    let settleActive;
+    bridge.setChatDeltaHandler((event) => {
+        if (!event)
+            return;
+        try {
+            activeSink?.(event);
+        }
+        catch (err) {
+            output.appendLine(`[host] chat-delta sink threw (ignored): ${String(err?.message ?? err)}`);
+        }
+        if (event.type === 'done')
+            settleActive?.({ ok: true });
+        else if (event.type === 'error')
+            settleActive?.({ ok: false, message: event.message });
+    });
+    let disposed = false;
+    const disposeOnce = () => {
+        if (disposed)
+            return;
+        disposed = true;
+        bridge.dispose();
+    };
+    try {
+        const connect = await bridge.connect();
+        if (connect.status !== 'connected') {
+            disposeOnce();
+            return {
+                connected: false,
+                message: connect.message || `bridge connect failed: ${connect.status}`,
+            };
+        }
+        const supervisorVersion = connect.handshake?.supervisorVersion;
+        const session = {
+            async sendTurn(messages, handlers) {
+                if (disposed) {
+                    return { ok: false, message: 'chat session is closed.' };
+                }
+                // Bind THIS turn's sink. The ack returns the turnId; deltas for it then
+                // flow to handlers.onEvent until the terminal done/error settles the turn.
+                let settled = false;
+                const settlePromise = new Promise((resolve) => {
+                    settleActive = (outcome) => {
+                        if (settled)
+                            return;
+                        settled = true;
+                        resolve(outcome);
+                    };
+                });
+                activeSink = handlers.onEvent;
+                const ack = await bridge.chatSend({ backendId: exports.CHAT_BACKEND_ID, messages });
+                if (!ack.ok) {
+                    // No stream will arrive — synthesize a terminal error so the UI finalizes.
+                    const message = ack.reason;
+                    activeSink = undefined;
+                    settleActive = undefined;
+                    try {
+                        handlers.onEvent({ turnId: 'chat-error', type: 'error', message });
+                    }
+                    catch {
+                        /* sink threw — the outcome below still reports the failure */
+                    }
+                    return { ok: false, message };
+                }
+                const outcome = await settlePromise;
+                // The turn settled (done/error delivered). Clear the active binding.
+                activeSink = undefined;
+                settleActive = undefined;
+                return { ok: outcome.ok, turnId: ack.turnId, ...(outcome.message ? { message: outcome.message } : {}) };
+            },
+            dispose: disposeOnce,
+        };
+        return {
+            connected: true,
+            ...(supervisorVersion ? { supervisorVersion } : {}),
+            message: '',
+            session,
+        };
+    }
+    catch (err) {
+        disposeOnce();
+        return {
+            connected: false,
+            message: `chat session failed: ${String(err?.message ?? err)}`,
         };
     }
 }

@@ -129,11 +129,33 @@ exports.BridgeMethod = {
      * sweep-22 #45) so a consumer cannot present a degraded session as fully trusted.
      */
     TerminalStop: 'terminal/stop',
+    /**
+     * Send ONE chat turn to the GlyphSpek-controlled model gateway (M7 chat — the
+     * "terminal that's an IDE" conversational surface). The supervisor drives the
+     * turn through the model gateway's CODEX backend and STREAMS the assistant reply
+     * back as {@link BridgeNotification.ChatDelta} notifications tagged with the
+     * returned `turnId`; this request's RESULT is only the ACK ({ turnId }). The
+     * params carry WHAT to ask (the transcript) — NEVER a credential: codex
+     * authenticates from its OWN on-disk store and egress is forced through the
+     * supervisor's governed proxy. Mirrors the streaming pattern of run/start
+     * (ack-then-notifications), not the synchronous model/call.
+     */
+    ChatSend: 'chat/send',
 };
 /** Server→client notification methods (no response expected). */
 exports.BridgeNotification = {
     /** A run lifecycle/trace event streamed back to the client for the panel. */
     RunEvent: 'run/event',
+    /**
+     * One chat-turn stream event (M7 chat). After a {@link BridgeMethod.ChatSend}
+     * ack, the supervisor emits a sequence of these tagged with the same `turnId`:
+     * zero or more `delta` events as the assistant answer arrives, then exactly one
+     * terminal `done` (full text + optional usage) or `error`. The payload is a
+     * {@link ChatStreamEvent} — the chat-turn event discriminated union plus the
+     * `turnId`. Carries assistant TEXT (the answer the UI renders), never a
+     * credential.
+     */
+    ChatDelta: 'chat/delta',
 };
 /* ============================================================== *
  * ERROR CODES

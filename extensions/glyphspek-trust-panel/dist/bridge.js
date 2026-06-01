@@ -103,6 +103,15 @@ class SupervisorBridge {
         this.onRunEvent = handler;
     }
     /**
+     * Register a handler for streamed `chat/delta` notifications (M7 chat). After a
+     * {@link chatSend} ack, the supervisor emits a sequence of {@link ChatStreamEvent}s
+     * tagged with the same `turnId`; this sink receives each one so the chat UI can
+     * append `delta.text` and finalize on the terminal `done`/`error`.
+     */
+    setChatDeltaHandler(handler) {
+        this.onChatDelta = handler;
+    }
+    /**
      * Connect to the supervisor: hash-pin the binary, spawn it, and run the
      * version-compatibility handshake. Resolves (never rejects) with a distinct
      * status. On any non-'connected' status the child (if spawned) is torn down.
@@ -311,6 +320,42 @@ class SupervisorBridge {
             return { decision: 'deny', ok: false, error: 'malformed model/call result from supervisor.' };
         }
         return result;
+    }
+    /* ============================================================== *
+     * CHAT GATEWAY RPC (M7 — the native chat window over the model gateway)
+     * ============================================================== */
+    /**
+     * Send ONE chat turn (`chat/send`) to the GlyphSpek-controlled model gateway. The
+     * params carry the transcript to answer (WHAT to ask) and `backendId` selects the
+     * gateway backend (default 'codex'); there is NO credential field — codex
+     * authenticates from its own on-disk store and egress is governed supervisor-side.
+     *
+     * ACK-THEN-NOTIFICATIONS (mirrors run/start, NOT the synchronous model/call): this
+     * method resolves with the supervisor's ACK ({ turnId }). The assistant reply then
+     * STREAMS as `chat/delta` notifications tagged with that same `turnId`, delivered to
+     * the sink registered via {@link setChatDeltaHandler}. Register the delta handler
+     * BEFORE calling this (a delta could race the ack). Resolves (never rejects); a
+     * transport/server error resolves as `{ ok: false }` so the chat UI renders an honest
+     * failure rather than throwing.
+     */
+    async chatSend(params) {
+        if (!this.ready || !this.child || this.closed) {
+            const reason = this.closeReason || 'bridge is not connected (handshake not completed).';
+            return { ok: false, reason };
+        }
+        if (!Array.isArray(params.messages) || params.messages.length === 0) {
+            return { ok: false, reason: 'chatSend requires a non-empty messages array.' };
+        }
+        const response = await this.request(bridgeProtocol_1.BridgeMethod.ChatSend, params);
+        if (response.error) {
+            this.opts.log.appendLine(`[bridge] chat/send error ${response.error.code}: ${response.error.message}`);
+            return { ok: false, reason: response.error.message };
+        }
+        const result = response.result;
+        if (!result || typeof result.turnId !== 'string' || result.turnId.length === 0) {
+            return { ok: false, reason: 'malformed chat/send ack from supervisor (no turnId).' };
+        }
+        return { ok: true, turnId: result.turnId };
     }
     /* ============================================================== *
      * GOVERNED TERMINAL SESSION RPC (M7 — the in-IDE Governed Terminal)
@@ -525,6 +570,14 @@ class SupervisorBridge {
         }
         if ((0, bridgeProtocol_1.isNotification)(parsed)) {
             const note = parsed;
+            // Route by notification method: chat/delta feeds the chat UI, everything else
+            // (run/event) feeds the Trust Panel. A chat-delta is NEVER mis-delivered to the
+            // run-event sink (and vice-versa).
+            if (note.method === bridgeProtocol_1.BridgeNotification.ChatDelta) {
+                if (this.onChatDelta)
+                    this.onChatDelta(note.params);
+                return;
+            }
             if (this.onRunEvent)
                 this.onRunEvent(note.params);
             return;

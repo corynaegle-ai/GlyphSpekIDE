@@ -1,6 +1,7 @@
 // ../spikes/p0-supervisor/bridge-server.ts
 import { createHash as createHash3 } from "node:crypto";
-import { readFileSync as readFileSync3 } from "node:fs";
+import { readFileSync as readFileSync3, statSync as statSync2 } from "node:fs";
+import { spawnSync } from "node:child_process";
 
 // ../spikes/p0-supervisor/run.ts
 import { randomUUID } from "node:crypto";
@@ -126,11 +127,33 @@ var BridgeMethod = {
    * present a degraded session as fully trusted (sweep-22 #45). The result carries
    * the runId and the signed verdict.
    */
-  TerminalStop: "terminal/stop"
+  TerminalStop: "terminal/stop",
+  /**
+   * Send ONE chat turn to the GlyphSpek-controlled model gateway (M7 chat — the
+   * "terminal that's an IDE" conversational surface). The supervisor drives the
+   * turn through the model gateway's CODEX backend and STREAMS the assistant reply
+   * back as {@link BridgeNotification.ChatDelta} notifications tagged with the
+   * returned `turnId`; this request's RESULT is only the ACK ({ turnId }). The
+   * params carry WHAT to ask (the transcript) — NEVER a credential: codex
+   * authenticates from its OWN on-disk store and egress is forced through the
+   * supervisor's governed proxy. Mirrors the streaming pattern of run/start
+   * (ack-then-notifications), not the synchronous model/call.
+   */
+  ChatSend: "chat/send"
 };
 var BridgeNotification = {
   /** A run lifecycle/trace event streamed back to the client for the panel. */
-  RunEvent: "run/event"
+  RunEvent: "run/event",
+  /**
+   * One chat-turn stream event (M7 chat). After a {@link BridgeMethod.ChatSend}
+   * ack, the supervisor emits a sequence of these tagged with the same `turnId`:
+   * zero or more `delta` events as the assistant answer arrives, then exactly one
+   * terminal `done` (full text + optional usage) or `error`. The payload is a
+   * {@link ChatStreamEvent} — the chat-turn event discriminated union plus the
+   * `turnId`. Carries assistant TEXT (the answer the UI renders), never a
+   * credential.
+   */
+  ChatDelta: "chat/delta"
 };
 var BridgeErrorCode = {
   /** Malformed envelope / JSON parse failure on the wire. */
@@ -858,6 +881,7 @@ import { createServer } from "node:http";
 import { connect as netConnect } from "node:net";
 import { randomUUID as randomUUID2 } from "node:crypto";
 import { request as httpRequest } from "node:http";
+var LOOPBACK_NO_PROXY = "localhost,127.0.0.1,::1";
 function splitHostPort(authority) {
   const trimmed = authority.trim();
   if (trimmed.startsWith("[")) {
@@ -994,6 +1018,9 @@ function startEgressProxy(options) {
       ts: Date.now(),
       kind: "http",
       decision: allowed ? "allow" : "deny",
+      // Observe-not-block ALLOWS are OBSERVATIONS, not policy authorizations: mark
+      // them so a consumer can never mistake a soft-plane observe for a real allow.
+      ...observeAll ? { enforcement: "observe-only" } : {},
       host: target.host,
       port: target.port,
       method: clientReq.method,
@@ -1061,11 +1088,13 @@ egress denied: direct IP literal not permitted (use an allowlisted name; the pro
       }
     }
     const allowed = host.length > 0 && (observeAll || isHostAllowed(allow, host, targetPort));
+    const observeOnly = observeAll && host.length > 0;
     emit({
       id: randomUUID2(),
       ts: Date.now(),
       kind: "connect",
       decision: allowed ? "allow" : "deny",
+      ...observeOnly ? { enforcement: "observe-only" } : {},
       host,
       port: targetPort,
       reason: host.length === 0 ? "no-target" : observeAll ? "observed" : "allowlist"
@@ -1260,13 +1289,15 @@ async function startGovernedTerminalProxy(opts) {
     }
   };
   const onDecision = (d) => {
+    const observeOnly = d.enforcement === "observe-only" || d.reason === "observed";
     const payload = {
       tool: "network",
       requestedCapability: `network:${d.host}:${d.port}`,
       decision: d.decision,
+      ...observeOnly ? { enforcement: "observe-only" } : {},
       provenanceLabel,
       // Non-secret human-readable rule mirroring the proxy's own reason vocabulary.
-      rule: d.decision === "allow" ? d.reason === "observed" ? `observed (governed-unsandboxed: default-allow, metadata-only trace) (${d.kind})` : `egress allowed by allowlist (${d.kind})` : d.reason === "direct-ip" ? "egress denied: direct-IP literal (controlled-resolver bypass)" : d.reason === "no-target" ? "egress denied: no target host" : `egress denied by allowlist (${d.kind})`
+      rule: d.decision === "allow" ? observeOnly ? `observed \u2014 soft default-allow, NOT a policy authorization (governed-unsandboxed: metadata-only trace) (${d.kind})` : `egress allowed by allowlist (${d.kind})` : d.reason === "direct-ip" ? "egress denied: direct-IP literal (controlled-resolver bypass)" : d.reason === "no-target" ? "egress denied: no target host" : `egress denied by allowlist (${d.kind})`
     };
     emit("policy_decision", payload);
   };
@@ -1411,6 +1442,7 @@ async function startTerminalSession(opts) {
     openedTrust = deriveSandboxTrust(caps);
     openedRuntimeTrust = caps.fsIsolated ? "trusted" : "untrusted";
   }
+  const loopbackBypass = !isolation;
   emit({
     rev: RUN_EVENT_PROTOCOL_VERSION,
     runId,
@@ -1423,7 +1455,11 @@ async function startTerminalSession(opts) {
     runtimeTrust: openedRuntimeTrust,
     extensionPosture: facts.extensionPosture,
     cliFidelity: facts.cliFidelity,
-    state: lifecycle.state
+    state: lifecycle.state,
+    ...loopbackBypass ? {
+      loopbackProxyBypass: true,
+      loopbackProxyBypassReason: "loopback (localhost,127.0.0.1,::1) is exempt from the governed egress proxy (local IPC / a CLI localhost OAuth callback, NOT external egress) \u2014 so loopback bypasses the proxy and is NOT recorded in the trace"
+    } : {}
   });
   const runCreated = {
     runId,
@@ -1648,6 +1684,34 @@ import { spawn } from "node:child_process";
 import { accessSync, constants as fsConstants, statSync } from "node:fs";
 import { delimiter as pathDelimiter, join as pathJoin } from "node:path";
 import { platform as osPlatform } from "node:os";
+function candidateNames(agent) {
+  if (osPlatform() === "win32") {
+    return [`${agent}.cmd`, `${agent}.exe`, `${agent}.bat`, agent];
+  }
+  return [agent];
+}
+function isExecutableFile(p) {
+  try {
+    const st = statSync(p);
+    if (!st.isFile()) return false;
+    if (osPlatform() !== "win32") accessSync(p, fsConstants.X_OK);
+    return true;
+  } catch {
+    return false;
+  }
+}
+function resolveOnPath(agent, env = process.env) {
+  const rawPath = env.PATH ?? env.Path ?? "";
+  if (rawPath.length === 0) return void 0;
+  const dirs = rawPath.split(pathDelimiter).filter((d) => d.length > 0);
+  for (const dir of dirs) {
+    for (const name of candidateNames(agent)) {
+      const full = pathJoin(dir, name);
+      if (isExecutableFile(full)) return full;
+    }
+  }
+  return void 0;
+}
 var PRESERVED_ENV_NAMES = [
   "PATH",
   "Path",
@@ -1702,8 +1766,8 @@ function buildGovernedEnvResult(opts) {
   env.https_proxy = opts.proxyUrl;
   env.HTTP_PROXY = opts.proxyUrl;
   env.http_proxy = opts.proxyUrl;
-  env.NO_PROXY = "localhost,127.0.0.1,::1";
-  env.no_proxy = "localhost,127.0.0.1,::1";
+  env.NO_PROXY = LOOPBACK_NO_PROXY;
+  env.no_proxy = LOOPBACK_NO_PROXY;
   return { env, posture: allowAmbient ? "untrusted" : "sanitized" };
 }
 
@@ -2080,6 +2144,359 @@ ${s.content}`,
   }
 };
 
+// ../spikes/p0-model-gateway/gateway.ts
+var ModelGateway = class {
+  backends = /* @__PURE__ */ new Map();
+  trace;
+  constructor(opts = {}) {
+    this.trace = opts.trace;
+  }
+  /** Register (or replace) a backend under its id. Returns the gateway (chainable). */
+  register(backend) {
+    this.backends.set(backend.id, backend);
+    return this;
+  }
+  /** True iff a backend is registered under `backendId`. */
+  has(backendId) {
+    return this.backends.has(backendId);
+  }
+  /** The ids of every registered backend (for an allowlist-style query). */
+  backendIds() {
+    return [...this.backends.keys()];
+  }
+  /**
+   * Drive ONE chat turn through the named backend, streaming its events and
+   * emitting a single `model_call` trace breadcrumb when the turn settles.
+   *
+   * An unknown backendId yields a single `error` event (and a breadcrumb with
+   * outcome 'error') rather than throwing — the caller gets a uniform stream.
+   * The breadcrumb's `outcome` is 'error' iff the terminal event was an error
+   * (or no terminal event arrived); otherwise 'ok'.
+   */
+  async *chatTurn(backendId, req, opts) {
+    const startedAt = Date.now();
+    const backend = this.backends.get(backendId);
+    if (!backend) {
+      const message = `unknown chat backend "${backendId}"`;
+      this.emitTrace({
+        backendId,
+        ...req.model ? { model: req.model } : {},
+        messageCount: req.messages.length,
+        outcome: "error",
+        durationMs: Date.now() - startedAt,
+        error: message
+      });
+      yield { type: "error", message };
+      return;
+    }
+    let outcome = "error";
+    let errorMessage = "chat turn produced no terminal event";
+    let inputTokens;
+    let outputTokens;
+    try {
+      for await (const event of backend.chatTurn(req, opts)) {
+        if (event.type === "done") {
+          outcome = "ok";
+          errorMessage = void 0;
+          inputTokens = event.usage?.inputTokens;
+          outputTokens = event.usage?.outputTokens;
+        } else if (event.type === "error") {
+          outcome = "error";
+          errorMessage = event.message;
+        }
+        yield event;
+      }
+    } catch (err) {
+      outcome = "error";
+      errorMessage = `chat backend "${backendId}" threw: ${String(err?.message ?? err)}`;
+      yield { type: "error", message: errorMessage };
+    } finally {
+      this.emitTrace({
+        backendId,
+        ...req.model ? { model: req.model } : {},
+        messageCount: req.messages.length,
+        outcome,
+        durationMs: Date.now() - startedAt,
+        ...inputTokens !== void 0 ? { inputTokens } : {},
+        ...outputTokens !== void 0 ? { outputTokens } : {},
+        ...outcome === "error" && errorMessage ? { error: errorMessage } : {}
+      });
+    }
+  }
+  /** Emit the per-turn trace breadcrumb, swallowing a sink failure (best-effort). */
+  emitTrace(meta) {
+    if (!this.trace) return;
+    try {
+      this.trace.modelCall(meta);
+    } catch {
+    }
+  }
+};
+
+// ../spikes/p0-model-gateway/codex-backend.ts
+import { spawn as spawn2 } from "node:child_process";
+import { isAbsolute as isAbsolute2 } from "node:path";
+
+// ../spikes/p0-model-gateway/prompt-assembly.ts
+var CHAT_INSTRUCTION = "You are a conversational coding assistant answering a CHAT message. This is a chat turn, NOT a coding task: answer the user conversationally and concisely in prose. Do NOT modify, create, or delete any files, and do NOT run any mutating or side-effecting commands \u2014 only read if you must. Reply with the answer text only.";
+var ROLE_LABEL = {
+  system: "System",
+  user: "User",
+  assistant: "Assistant"
+};
+function assembleCodexPrompt(messages) {
+  const sections = [CHAT_INSTRUCTION];
+  for (const m of messages) {
+    if (typeof m.content !== "string" || m.content.trim().length === 0) continue;
+    sections.push(`=== ${ROLE_LABEL[m.role]} ===
+${m.content.trim()}`);
+  }
+  return sections.join("\n\n");
+}
+
+// ../spikes/p0-model-gateway/codex-backend.ts
+var DEFAULT_CODEX_TIMEOUT_MS = 12e4;
+var STDERR_TAIL_LIMIT = 800;
+var REDACTED_TAIL_LIMIT = 240;
+function refuseUngovernedEnv(env) {
+  if (!env) {
+    return "refusing to run codex on the ambient process environment: a chat turn must be GOVERNED (egress forced through the supervisor proxy, ambient secrets stripped). No governed env was provided.";
+  }
+  const proxy = env.HTTPS_PROXY ?? env.https_proxy ?? env.HTTP_PROXY ?? env.http_proxy ?? "";
+  if (typeof proxy !== "string" || proxy.trim().length === 0) {
+    return "refusing to run codex on an UNGOVERNED env: no HTTPS_PROXY/HTTP_PROXY is set, so codex egress would not be brokered through the supervisor proxy.";
+  }
+  return void 0;
+}
+function redactStderrTail(raw) {
+  let s = raw;
+  s = s.replace(/\[[0-9;]*m/g, "");
+  s = s.replace(
+    /\b(api[_-]?key|apikey|token|secret|password|passwd|authorization|auth[-_]?header|bearer|access[_-]?token|refresh[_-]?token|session[_-]?token|client[_-]?secret|cookie)\b\s*[:=]?\s*("?)[^\s"']+\2/gi,
+    "$1 <redacted>"
+  );
+  s = s.replace(/\b(bearer|basic)\s+[A-Za-z0-9._\-+/=]{8,}/gi, "$1 <redacted>");
+  s = s.replace(/\b(sk-ant-[A-Za-z0-9_\-]{6,}|sk-[A-Za-z0-9_\-]{6,}|gh[pousr]_[A-Za-z0-9]{6,})\b/g, "<redacted>");
+  s = s.replace(/\beyJ[A-Za-z0-9_\-]+\.[A-Za-z0-9_\-]+\.[A-Za-z0-9_\-]+\b/g, "<redacted>");
+  s = s.replace(/\b[A-Za-z0-9+/_\-]{24,}={0,2}\b/g, "<redacted>");
+  s = s.replace(/(?:[A-Za-z]:)?[\\/](?:[^\s\\/]+[\\/])+[^\s\\/]*/g, "<path>");
+  s = s.replace(/\\\\[^\s\\/]+\\[^\s]*/g, "<path>");
+  s = s.replace(/[\u0000-\u001f\u007f]+/g, " ").replace(/\s+/g, " ").trim();
+  if (s.length > REDACTED_TAIL_LIMIT) {
+    s = `\u2026${s.slice(-REDACTED_TAIL_LIMIT)}`;
+  }
+  return s;
+}
+function asNum(v) {
+  return typeof v === "number" && Number.isFinite(v) ? v : void 0;
+}
+var CodexChatBackend = class {
+  id = "codex";
+  /**
+   * The ABSOLUTE codex path to spawn, or undefined when the caller could not
+   * resolve one. When undefined the backend is UNRESOLVED and FAILS CLOSED — it
+   * NEVER falls back to a bare `codex` re-resolved against the ambient PATH
+   * (Finding 2: the launched bytes must be the exact ones the supervisor
+   * identity-checked).
+   */
+  codexPath;
+  timeoutMs;
+  onOperatorLog;
+  constructor(opts = {}) {
+    this.codexPath = typeof opts.codexPath === "string" && isAbsolute2(opts.codexPath) ? opts.codexPath : void 0;
+    this.timeoutMs = opts.timeoutMs ?? DEFAULT_CODEX_TIMEOUT_MS;
+    this.onOperatorLog = opts.onOperatorLog;
+  }
+  /**
+   * Build the `codex exec` argv for a turn. The prompt is fed on STDIN (we pass
+   * `-` so codex reads stdin), so it never appears in argv (process listings stay
+   * free of prompt content).
+   */
+  buildArgs(req) {
+    const args = [
+      "exec",
+      "-",
+      // read the prompt from stdin
+      "--json",
+      "--sandbox",
+      "read-only",
+      "-c",
+      'approval_policy="never"',
+      "--skip-git-repo-check",
+      "--ephemeral",
+      "-C",
+      req.cwd
+    ];
+    if (req.model && req.model.trim().length > 0) {
+      args.push("-m", req.model);
+    }
+    return args;
+  }
+  async *chatTurn(req, opts) {
+    const prompt = assembleCodexPrompt(req.messages);
+    const args = this.buildArgs(req);
+    const refusal = refuseUngovernedEnv(opts?.env);
+    if (refusal) {
+      yield { type: "error", message: refusal };
+      return;
+    }
+    if (this.codexPath === void 0) {
+      yield {
+        type: "error",
+        message: "codex is not available: no absolute codex binary was resolved for this chat turn (refusing to spawn a bare `codex` from the ambient PATH)."
+      };
+      return;
+    }
+    const env = {
+      ...opts.env,
+      CI: "1"
+    };
+    const child = spawn2(this.codexPath, args, {
+      cwd: req.cwd,
+      env,
+      stdio: ["pipe", "pipe", "pipe"]
+    });
+    const events = [];
+    let resolveNext;
+    let settled = false;
+    let finished = false;
+    const wake = () => {
+      if (resolveNext) {
+        const r = resolveNext;
+        resolveNext = void 0;
+        r();
+      }
+    };
+    const push = (e) => {
+      events.push(e);
+      wake();
+    };
+    const answerChunks = [];
+    let usage;
+    let stdoutBuf = "";
+    let stderrTail = "";
+    const handleLine = (line) => {
+      const trimmed = line.trim();
+      if (trimmed.length === 0) return;
+      let evt;
+      try {
+        evt = JSON.parse(trimmed);
+      } catch {
+        return;
+      }
+      if (evt.type === "item.completed" && evt.item?.type === "agent_message") {
+        const text = typeof evt.item.text === "string" ? evt.item.text : "";
+        if (text.length > 0) {
+          answerChunks.push(text);
+          push({ type: "delta", text });
+        }
+      } else if (evt.type === "turn.completed" && evt.usage) {
+        const inputTokens = asNum(evt.usage.input_tokens);
+        const outputTokens = asNum(evt.usage.output_tokens);
+        if (inputTokens !== void 0 || outputTokens !== void 0) {
+          usage = {
+            ...inputTokens !== void 0 ? { inputTokens } : {},
+            ...outputTokens !== void 0 ? { outputTokens } : {}
+          };
+        }
+      }
+    };
+    child.stdout.setEncoding("utf8");
+    child.stdout.on("data", (chunk) => {
+      stdoutBuf += chunk;
+      let nl;
+      while ((nl = stdoutBuf.indexOf("\n")) !== -1) {
+        const line = stdoutBuf.slice(0, nl).replace(/\r$/, "");
+        stdoutBuf = stdoutBuf.slice(nl + 1);
+        handleLine(line);
+      }
+    });
+    child.stderr.setEncoding("utf8");
+    child.stderr.on("data", (chunk) => {
+      stderrTail = (stderrTail + chunk).slice(-STDERR_TAIL_LIMIT);
+    });
+    const settle = (e) => {
+      if (settled) return;
+      settled = true;
+      push(e);
+    };
+    let timedOut = false;
+    const timer = setTimeout(() => {
+      timedOut = true;
+      child.kill("SIGKILL");
+    }, this.timeoutMs);
+    if (timer.unref) timer.unref();
+    let aborted = false;
+    const onAbort = () => {
+      aborted = true;
+      child.kill("SIGKILL");
+    };
+    if (opts?.signal) {
+      if (opts.signal.aborted) onAbort();
+      else opts.signal.addEventListener("abort", onAbort, { once: true });
+    }
+    const cleanup = () => {
+      clearTimeout(timer);
+      if (opts?.signal) opts.signal.removeEventListener("abort", onAbort);
+    };
+    child.on("error", (err) => {
+      cleanup();
+      settle({
+        type: "error",
+        message: `codex spawn failed: ${String(err?.message ?? err)}`
+      });
+      finished = true;
+      wake();
+    });
+    child.on("close", (code) => {
+      cleanup();
+      if (stdoutBuf.trim().length > 0) {
+        handleLine(stdoutBuf);
+        stdoutBuf = "";
+      }
+      if (timedOut) {
+        settle({
+          type: "error",
+          message: `codex chat turn timed out after ${this.timeoutMs}ms`
+        });
+      } else if (aborted) {
+        settle({ type: "error", message: "codex chat turn aborted" });
+      } else if (code === 0) {
+        settle({ type: "done", text: answerChunks.join(""), ...usage ? { usage } : {} });
+      } else {
+        const rawTail = stderrTail.trim();
+        if (rawTail && this.onOperatorLog) {
+          try {
+            this.onOperatorLog(`codex exec exited ${code ?? "null"} (verbatim stderr tail): ${rawTail}`);
+          } catch {
+          }
+        }
+        const redacted = rawTail ? redactStderrTail(rawTail) : "";
+        settle({
+          type: "error",
+          message: `codex exec exited ${code ?? "null"}` + (redacted ? ` (redacted detail: ${redacted})` : "")
+        });
+      }
+      finished = true;
+      wake();
+    });
+    child.stdin.on("error", () => {
+    });
+    child.stdin.end(prompt, "utf8");
+    let i = 0;
+    for (; ; ) {
+      while (i < events.length) {
+        yield events[i];
+        i += 1;
+      }
+      if (finished && i >= events.length) break;
+      await new Promise((resolve2) => {
+        resolveNext = resolve2;
+      });
+    }
+  }
+};
+
 // ../spikes/p0-supervisor/bridge-server.ts
 var APPROVED_ISOLATION_RUNTIMES = [
   "docker",
@@ -2109,6 +2526,47 @@ function selfHashCheck(selfPath, pinnedSha) {
     };
   }
   return { ok: true };
+}
+var DEFAULT_CHAT_BACKEND_ID = "codex";
+var CODEX_HASH_CAP_BYTES = 256 * 1024 * 1024;
+function captureCodexBinaryIdentity(codexPath) {
+  const identity = { path: codexPath };
+  let sizeBytes;
+  try {
+    const st = statSync2(codexPath);
+    sizeBytes = st.size;
+    identity.sizeBytes = st.size;
+    identity.mtimeMs = st.mtimeMs;
+  } catch {
+  }
+  if (sizeBytes === void 0 || sizeBytes <= CODEX_HASH_CAP_BYTES) {
+    try {
+      const hash = createHash3("sha256").update(readFileSync3(codexPath)).digest("hex");
+      identity.sha256 = hash;
+    } catch {
+    }
+  }
+  try {
+    const res = spawnSync(codexPath, ["--version"], {
+      timeout: 2500,
+      encoding: "utf8",
+      shell: false,
+      maxBuffer: 64 * 1024,
+      windowsHide: true
+    });
+    if (res.status === 0 && typeof res.stdout === "string") {
+      const first = res.stdout.split(/\r?\n/, 1)[0]?.trim();
+      if (first) identity.version = first;
+    }
+  } catch {
+  }
+  return identity;
+}
+function createProductionCodexBackend(codexPath, onOperatorLog) {
+  return new CodexChatBackend({
+    ...codexPath ? { codexPath } : {},
+    onOperatorLog
+  });
 }
 var InMemoryTraceSink = class {
   events = [];
@@ -2198,12 +2656,44 @@ var BridgeServer = class {
   selfPath;
   pinnedSha;
   model;
+  chat;
   terminalModelEndpoints;
   stdinBuffer = "";
   handshakeDone = false;
   hashChecked = false;
   /** Created runs, keyed by runId (retained for run/event emission). */
   runs = /* @__PURE__ */ new Map();
+  /** The chat gateway, constructed lazily on the first chat/send. */
+  chatGateway;
+  /** Monotonic counter minting chat turn ids (per connection). */
+  chatTurnSeq = 0;
+  /**
+   * The run the IN-FLIGHT chat turn is anchored to, if any. The gateway's trace
+   * seam reads this so a `model_call` breadcrumb is mirrored to the right run's
+   * run/event stream. Set per turn (the gateway is reused across turns/runs).
+   */
+  chatActiveRunId;
+  /**
+   * The GOVERNED CHAT SESSION (Finding 1): a real supervisor-owned run + metadata-
+   * only egress proxy + hash-chained trace, created LAZILY on the first chat/send of
+   * the connection and REUSED across turns. The governed env (HTTPS_PROXY/HTTP_PROXY →
+   * `proxyUrl`, ambient secrets stripped) the chat backend runs under is built from
+   * this session's proxy URL — so a chat turn's codex egress is brokered (the broker
+   * owns the network) and the turn is run-bound + trace-backed. Absent until the
+   * first turn; a creation failure leaves it undefined and the turn errors honestly.
+   */
+  chatGovernedSession;
+  /** In-flight lazy creation of the governed chat session (de-dupes concurrent turns). */
+  chatSessionPromise;
+  /**
+   * The SINGLE codex LAUNCH object (Finding 2): the absolute path the supervisor
+   * resolved + identity-checked, flowing from that ONE resolution step into BOTH
+   * the run/trace evidence AND the production {@link CodexChatBackend}'s `spawn`,
+   * so the recorded binary identity and the launched bytes cannot drift. Captured
+   * by the governed-session step; `codexPath` is undefined when codex is not on
+   * PATH (the production backend then fails the turn closed — no bare `codex`).
+   */
+  codexLaunch;
   constructor(opts) {
     this.supervisorVersion = opts.supervisorVersion ?? DEFAULT_SUPERVISOR_VERSION;
     this.runsBaseDir = opts.runsBaseDir;
@@ -2213,6 +2703,7 @@ var BridgeServer = class {
     this.selfPath = opts.selfPath;
     this.pinnedSha = opts.pinnedSha;
     this.model = opts.model;
+    this.chat = opts.chat;
     this.terminalModelEndpoints = opts.terminalModelEndpoints;
   }
   /**
@@ -2251,6 +2742,24 @@ var BridgeServer = class {
       this.stdinBuffer = this.stdinBuffer.slice(nl + 1);
       if (line.trim().length === 0) continue;
       this.handleLine(line);
+    }
+  }
+  /**
+   * Tear down connection-scoped resources held by this server — currently the lazily
+   * opened GOVERNED CHAT SESSION (Finding 1): its egress proxy listener + run trace.
+   * In production the bridge child process exits when the extension disposes the chat
+   * session (killing the proxy with it); this is the explicit, awaitable teardown so a
+   * HEADLESS test that opened a chat session can release the proxy listener (otherwise
+   * the open socket keeps the event loop alive). Idempotent; resolve-never-reject.
+   */
+  async shutdown() {
+    const governed = this.chatGovernedSession;
+    this.chatGovernedSession = void 0;
+    if (governed) {
+      try {
+        await governed.session.stop();
+      } catch {
+      }
     }
   }
   /** Parse one NDJSON line and dispatch it (resolve-never-throw). */
@@ -2317,6 +2826,9 @@ var BridgeServer = class {
         return;
       case BridgeMethod.TerminalStop:
         void this.handleTerminalStop(req);
+        return;
+      case BridgeMethod.ChatSend:
+        void this.handleChatSend(req);
         return;
       default:
         this.emit(
@@ -2838,6 +3350,223 @@ var BridgeServer = class {
         )
       );
     }
+  }
+  /* ============================================================== *
+   * CHAT GATEWAY RPC (M7 — conversational chat)
+   * ============================================================== */
+  /**
+   * chat/send — drive ONE chat turn through the GlyphSpek-controlled model
+   * gateway and STREAM the assistant reply back as `chat/delta` notifications.
+   * The flow mirrors run/start (ack-then-notifications):
+   *   1. require a completed handshake;
+   *   2. validate the transcript;
+   *   3. mint a turnId and RETURN it immediately as the ack;
+   *   4. drive the gateway's chosen backend (default 'codex'), emitting each
+   *      ChatTurnEvent (delta/done/error) as a `chat/delta` notification tagged
+   *      with the turnId. The gateway emits one `model_call` trace breadcrumb per
+   *      turn (here, mirrored to the run/event stream when the turn names a run).
+   *
+   * The ack is returned BEFORE the stream completes; the UI renders deltas as they
+   * arrive and finalizes on the terminal `done`/`error` event. No credential is
+   * ever held or streamed: codex authenticates from its own store; egress is the
+   * governed env.
+   */
+  async handleChatSend(req) {
+    if (!this.handshakeDone) {
+      this.emit(
+        this.errorResponse(
+          req.id,
+          BridgeErrorCode.InvalidRequest,
+          "chat/send before a completed handshake"
+        )
+      );
+      return;
+    }
+    const params = req.params ?? {};
+    if (!Array.isArray(params.messages) || params.messages.length === 0 || !params.messages.every(
+      (m) => m && typeof m.role === "string" && typeof m.content === "string"
+    )) {
+      this.emit(
+        this.errorResponse(
+          req.id,
+          BridgeErrorCode.InvalidRequest,
+          "chat/send requires a non-empty messages array of {role, content}"
+        )
+      );
+      return;
+    }
+    const backendId = params.backendId || DEFAULT_CHAT_BACKEND_ID;
+    const explicitRunId = typeof params.runId === "string" ? params.runId : void 0;
+    const turnId = `chat-${++this.chatTurnSeq}`;
+    const ack = { turnId };
+    this.emit(this.successResponse(req.id, ack));
+    let runId = explicitRunId;
+    let turnEnv = this.chat?.env;
+    if (!runId || !this.runs.has(runId)) {
+      const governed = await this.ensureChatGovernedSession();
+      if (!governed) {
+        this.emitChatDelta({
+          turnId,
+          type: "error",
+          message: "could not open a governed chat session (egress proxy + run/trace) \u2014 refusing to run an ungoverned chat turn."
+        });
+        return;
+      }
+      runId = governed.runId;
+      turnEnv = this.chat?.env ?? governed.env;
+    }
+    const serverRun = runId ? this.runs.get(runId) : void 0;
+    const cwd = serverRun?.created.dir ?? process.cwd();
+    const gateway = this.ensureChatGateway();
+    this.chatActiveRunId = runId;
+    try {
+      for await (const event of gateway.chatTurn(
+        backendId,
+        { messages: params.messages, cwd },
+        turnEnv ? { env: turnEnv } : void 0
+      )) {
+        this.emitChatDelta({ turnId, ...event });
+      }
+    } catch (err) {
+      this.emitChatDelta({
+        turnId,
+        type: "error",
+        message: `chat/send stream failed: ${String(err?.message ?? err)}`
+      });
+    } finally {
+      this.chatActiveRunId = void 0;
+    }
+  }
+  /**
+   * Lazily create (and reuse) the GOVERNED CHAT SESSION (Finding 1): a real
+   * supervisor-owned run + metadata-only egress proxy + hash-chained trace, reusing
+   * the EXACT M7 governed-terminal machinery (startTerminalSession) rather than a
+   * parallel path. The session is created ONCE per connection and reused across turns.
+   *
+   * What it establishes for every chat turn bound to it:
+   *   - a real run (created via the lifecycle) whose trace the proxy projects into;
+   *   - a supervisor-owned governed proxy URL → the governed env (HTTPS_PROXY/
+   *     HTTP_PROXY = proxyUrl, ambient secrets stripped via buildGovernedEnvResult)
+   *     the codex backend runs under, so codex egress is BROKERED;
+   *   - CODEX BINARY IDENTITY (absolute path + sha256 + version), captured before
+   *     launch (TOCTOU) and threaded into run_opened + the trace as evidence.
+   *
+   * The session settles into the honest `governed-unsandboxed` posture (governed +
+   * traced, SOFT boundary, UNSANDBOXED — never product-trusted). Resolve-never-reject:
+   * a failure resolves `undefined` and the caller errors the turn honestly.
+   */
+  ensureChatGovernedSession() {
+    if (this.chatGovernedSession) return Promise.resolve(this.chatGovernedSession);
+    if (this.chatSessionPromise) return this.chatSessionPromise;
+    this.chatSessionPromise = (async () => {
+      try {
+        const codexPath = resolveOnPath("codex");
+        const actorBinary = codexPath ? captureCodexBinaryIdentity(codexPath) : void 0;
+        this.codexLaunch = { codexPath, ...actorBinary ? { actorBinary } : {} };
+        const created = createRun(this.runsBaseDir);
+        const lifecycle = new RunLifecycle(created.state);
+        const trust = "governed-unsandboxed";
+        const serverRun = {
+          created,
+          lifecycle,
+          trust,
+          // A minimal §10.3-shaped record for the retained run (codex CLI, local-exec).
+          request: {
+            actorType: "codex-cli",
+            autonomyTier: "allowlist",
+            policyPath: "",
+            policyHash: "",
+            workspaceRoot: created.dir,
+            runtimeProfile: "local-exec",
+            extensionPosture: "sovereign",
+            worktreeBase: created.dir,
+            ...actorBinary ? { actorBinary } : {}
+          },
+          runtimeIsolated: false,
+          started: true
+        };
+        this.runs.set(created.runId, serverRun);
+        const facts = {
+          runId: created.runId,
+          runDir: created.dir,
+          actorType: "codex-cli",
+          ...actorBinary?.version ? { actorVersion: actorBinary.version } : {},
+          ...actorBinary ? { actorBinary } : {},
+          runtimeProfile: "local-exec",
+          runtimeTrust: "untrusted",
+          extensionPosture: "sovereign",
+          creationTrust: trust,
+          cliFidelity: "boundary-only"
+        };
+        const session = await startTerminalSession({
+          facts,
+          modelEndpoints: this.terminalEndpoints(),
+          lifecycle,
+          emit: (event) => this.emitRunEventEnvelope(event)
+        });
+        serverRun.terminalSession = session;
+        const { env } = buildGovernedEnvResult({ proxyUrl: session.proxyUrl });
+        this.logLine(
+          `[bridge-server] chat/send \u2192 governed chat session ${created.runId} (proxy=${session.proxyUrl}, trust=${trust}${actorBinary ? `, codex=${actorBinary.path}` : ""}).`
+        );
+        this.chatGovernedSession = { runId: created.runId, proxyUrl: session.proxyUrl, env, session };
+        return this.chatGovernedSession;
+      } catch (err) {
+        this.logLine(
+          `[bridge-server] chat/send governed session failed: ${String(err?.message ?? err)}`
+        );
+        return void 0;
+      } finally {
+        this.chatSessionPromise = void 0;
+      }
+    })();
+    return this.chatSessionPromise;
+  }
+  /**
+   * Lazily construct the chat {@link ModelGateway} for this connection. The
+   * gateway holds the configured chat backend (default {@link CodexChatBackend})
+   * and a trace seam that records each turn's `model_call` breadcrumb — mirrored to
+   * the run/event stream when `runId` names a created run so the panel sees the
+   * call exactly like the model broker's model_call events. No credential is held.
+   */
+  ensureChatGateway() {
+    if (!this.chatGateway) {
+      const trace = {
+        modelCall: (meta) => {
+          const runId = this.chatActiveRunId;
+          if (!runId || !this.runs.has(runId)) return;
+          this.emitRunEvent({
+            runId,
+            type: "model_call",
+            ts: Date.now(),
+            detail: {
+              backendId: meta.backendId,
+              ...meta.model ? { model: meta.model } : {},
+              messageCount: meta.messageCount,
+              outcome: meta.outcome,
+              durationMs: meta.durationMs,
+              ...typeof meta.inputTokens === "number" ? { inputTokens: meta.inputTokens } : {},
+              ...typeof meta.outputTokens === "number" ? { outputTokens: meta.outputTokens } : {}
+            }
+          });
+        }
+      };
+      const backend = this.chat?.backend ?? createProductionCodexBackend(
+        this.codexLaunch?.codexPath,
+        (line) => this.logLine(`[bridge-server] [codex-stderr] ${line}`)
+      );
+      this.chatGateway = new ModelGateway({ trace }).register(backend);
+    }
+    return this.chatGateway;
+  }
+  /** Emit one chat/delta notification (no id) carrying a {@link ChatStreamEvent}. */
+  emitChatDelta(event) {
+    const note = {
+      glyphspek: BRIDGE_JSONRPC,
+      method: BridgeNotification.ChatDelta,
+      params: event
+    };
+    this.emit(note);
   }
   /**
    * Emit a run/event notification (no id) for the M5 live Trust Panel feed. The

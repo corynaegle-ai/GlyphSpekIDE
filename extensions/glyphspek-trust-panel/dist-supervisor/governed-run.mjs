@@ -148,6 +148,9 @@ function startEgressProxy(options) {
       ts: Date.now(),
       kind: "http",
       decision: allowed ? "allow" : "deny",
+      // Observe-not-block ALLOWS are OBSERVATIONS, not policy authorizations: mark
+      // them so a consumer can never mistake a soft-plane observe for a real allow.
+      ...observeAll ? { enforcement: "observe-only" } : {},
       host: target.host,
       port: target.port,
       method: clientReq.method,
@@ -215,11 +218,13 @@ egress denied: direct IP literal not permitted (use an allowlisted name; the pro
       }
     }
     const allowed = host.length > 0 && (observeAll || isHostAllowed(allow, host, targetPort));
+    const observeOnly = observeAll && host.length > 0;
     emit({
       id: randomUUID(),
       ts: Date.now(),
       kind: "connect",
       decision: allowed ? "allow" : "deny",
+      ...observeOnly ? { enforcement: "observe-only" } : {},
       host,
       port: targetPort,
       reason: host.length === 0 ? "no-target" : observeAll ? "observed" : "allowlist"
