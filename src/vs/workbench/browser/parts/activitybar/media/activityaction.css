@@ -228,3 +228,34 @@
 	left: auto;
 	right: 0;
 }
+
+/* ---------------------------------------------------------------------------------------------
+ *  GlyphSpek activity-item accent (PATCH-005, chrome polish).
+ *
+ *  Gives the rail icons a softly-rounded hover/active background and a crisper active indicator,
+ *  matching the rounded rail buttons in design/ide-concept/glyphspek-workbench-blended.html
+ *  (.rail-btn). Cosmetic only: backgrounds use the theme's activityBar.activeBackground token and
+ *  the indicator uses activityBar.activeBorder, so the accent inherits the GlyphSpek halo-blue
+ *  from the theme without hardcoding a color here. Does not touch sizing/geometry.
+ * ------------------------------------------------------------------------------------------- */
+
+/* Rounded hover/active surface behind the icon (inset so it never touches the rail edges). */
+.monaco-workbench .activitybar > .content :not(.monaco-menu) > .monaco-action-bar .action-item .action-label.codicon {
+	border-radius: 8px;
+	margin: 3px 6px;
+	width: calc(var(--activity-bar-width, 48px) - 12px);
+	height: calc(var(--activity-bar-action-height, 48px) - 6px);
+	transition: background-color 80ms ease;
+}
+
+.monaco-workbench .activitybar > .content :not(.monaco-menu) > .monaco-action-bar .action-item:hover .action-label.codicon,
+.monaco-workbench .activitybar > .content :not(.monaco-menu) > .monaco-action-bar .action-item.checked .action-label.codicon {
+	background-color: var(--vscode-activityBar-activeBackground, transparent);
+}
+
+/* Crisper, slightly glowing active indicator that reads with the Authority Halo. */
+.monaco-workbench:not(.hc-black):not(.hc-light) .activitybar > .content :not(.monaco-menu) > .monaco-action-bar .action-item.checked .active-item-indicator:before {
+	border-left-width: 2px;
+	border-color: var(--vscode-activityBar-activeBorder);
+	box-shadow: 0 0 8px 0 var(--vscode-activityBar-activeBorder);
+}

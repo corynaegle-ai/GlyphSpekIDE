@@ -499,3 +499,34 @@
 	border-radius: 16px;
 	text-align: center;
 }
+
+/* ---------------------------------------------------------------------------------------------
+ *  GlyphSpek title-bar restyle (PATCH-005, chrome polish).
+ *
+ *  Slims and calms the title bar to match the design source
+ *  (design/ide-concept/glyphspek-workbench-blended.html .titlebar): a thinner, flatter
+ *  bar with a softer hairline and a pill-shaped, rounded command center. Pure cosmetics —
+ *  colors come from the active theme (titleBar.* / commandCenter.* tokens), so this stays
+ *  theme-agnostic and never changes the JS-computed title-bar height or the drag region.
+ * ------------------------------------------------------------------------------------------- */
+
+/* Flatten the heavy drop shadow into a single calm hairline (the demo reads as one flat plane). */
+.monaco-workbench .part.titlebar {
+	box-shadow: none;
+	border-bottom: 1px solid var(--vscode-titleBar-border, transparent);
+}
+
+/* The app icon sits a touch quieter so the brand text/command center lead. */
+.monaco-workbench .part.titlebar > .titlebar-container > .titlebar-left > .window-appicon:not(.codicon) {
+	opacity: 0.92;
+}
+
+/* Command center → a calmer, pill-rounded GlyphSpek search affordance. */
+.monaco-workbench .part.titlebar > .titlebar-container > .titlebar-center > .window-title > .command-center .action-item.command-center-center {
+	border-radius: 999px;
+	height: 24px;
+}
+
+.monaco-workbench .part.titlebar > .titlebar-container > .titlebar-center > .window-title > .command-center .action-item.command-center-center:HOVER {
+	box-shadow: inset 0 0 0 1px var(--vscode-commandCenter-activeBorder, transparent);
+}

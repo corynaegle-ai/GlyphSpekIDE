@@ -386,6 +386,9 @@ import './contrib/welcomeViews/common/newFile.contribution.js';
 // Welcome Onboarding
 import './contrib/welcomeOnboarding/browser/welcomeOnboarding.contribution.js';
 
+// GlyphSpek Home (PATCH-004): the full-window landing surface the IDE opens on at startup.
+import './contrib/glyphspekHome/browser/glyphspekHome.contribution.js';
+
 // Call Hierarchy
 import './contrib/callHierarchy/browser/callHierarchy.contribution.js';
 

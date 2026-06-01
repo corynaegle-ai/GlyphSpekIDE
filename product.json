@@ -131,6 +131,12 @@
 	],
 	"onboardingThemes": [
 		{
+			"id": "glyphspek-dark",
+			"label": "GlyphSpek Dark",
+			"themeId": "GlyphSpek Dark",
+			"type": "dark"
+		},
+		{
 			"id": "dark-2026",
 			"label": "Dark 2026",
 			"themeId": "Dark 2026",
@@ -175,6 +181,7 @@
 		]
 	},
 	"configurationDefaults": {
-		"extensions.ignoreRecommendations": true
+		"extensions.ignoreRecommendations": true,
+		"workbench.colorTheme": "GlyphSpek Dark"
 	}
 }

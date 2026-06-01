@@ -465,6 +465,123 @@ satisfied out-of-band by the status-bar `authority:` text segment the extension 
 
 ---
 
+## PATCH-004 — GlyphSpek Home landing surface (runs-first editor-area home)
+
+- **Status:** `APPLIED` (2026-06-01).
+- **Type:** **UX / product-look patch with a trust-honesty invariant.** Threat addressed =
+  **N/A** in the classic sense — this is the agent-home / "you land on a runs-first surface"
+  experience the Blended-Workbench design (`design/ide-concept/BLENDED-WORKBENCH-SPEC.md`
+  §5.3–5.4, `IMPLEMENTATION-PLAN.md`) calls for, built as a real editor surface the way Cursor
+  ships its agent-home. Recorded here because it is a `src/vs/**` workbench diff and the ledger
+  policy requires **every** workbench diff be logged. It is **not** a security patch — it mints
+  no verdict, grants no authority, and changes no trust state — but it carries an explicit
+  **honesty invariant** (below) because it is a trust product's front door.
+
+### What it does
+
+Registers a **GlyphSpek Home** editor (an `EditorInput` + `EditorPane`, native-DOM, modeled on
+the stock Welcome/GettingStarted editor) that fills the editor area and **opens on startup** as
+the landing tab, re-openable via the `GlyphSpek: Open Home` command. It renders the
+blended-workbench mockup as a live surface: a GlyphSpek wordmark, a primary **"Start a governed
+run"** input, a governance command list (Trust Panel / Verifier / Egress / Trace / Search), and
+a **Recent governed runs** area. It reuses the Authority-Halo palette tokens so it harmonizes
+with PATCH-003.
+
+### Honesty invariant (the trust-relevant part)
+
+- **No dead buttons.** Every governance row gates on `CommandsRegistry.getCommand(id)` at render
+  time. If the GlyphSpek first-party extension is not active, the row renders **visibly disabled**
+  with a "Needs the GlyphSpek extension active" hint and live-upgrades to enabled via an
+  `onDidRegisterCommand` listener the moment the command registers. A row never looks actionable
+  while pointing at a missing command.
+- **No fabricated trust state.** Recent governed runs renders an **honest empty-state** ("No runs
+  yet — start one above") because there is no workbench-reachable runs data source today (runs are
+  owned by the extension's webview views). The surface invents zero runs and shows zero verdicts —
+  it has no path to assert `verified`/blue; trust signal still flows only through the extension +
+  Authority Halo (PATCH-003), which Home merely inherits.
+- **Real command, real arg.** The primary input invokes the actual governed-build entry command
+  `glyphspek.promoteChatToBuild` (the same path as "Build This (Governed Run)"), passing the typed
+  text as the build-intent arg; blank falls through to the command's own quick-input.
+
+### Mechanism / startup-open wiring
+
+- `GlyphspekHomeStartupContribution` (registered `AfterRestored`, mirroring stock
+  `StartupPageRunnerContribution`) opens Home only when `glyphspek.home.openOnStartup` (new
+  setting, default `true`) is on, the startup is **not** a window reload, **no** editor was
+  restored, and Home isn't already open — so it yields to a restored editor/workspace and never
+  fights the user's tabs.
+- `GlyphspekHomeEditorResolverContribution` (registered `BlockRestore`) re-maps the Home resource
+  scheme back to the pane so a persisted Home tab survives reload. Home has no per-instance state;
+  the serializer round-trips an empty object.
+- **`product.json` / `workbench.startupEditor` are NOT touched** — the open is additive and
+  settings-gated in workbench code, so a stock/Developer build mechanism is unaffected.
+
+### Commands wired (id → label), all verified to exist
+
+- `glyphspek.promoteChatToBuild` ← the "Start a governed run" input (primary).
+- `glyphspek.openTrustPanel` → Open Trust Panel · `glyphspek.runs.openTrustPanel` → Open
+  Independent Verifier · `workbench.view.extension.glyphspek-egress` → Egress / Network ·
+  `workbench.view.extension.glyphspek-trace` → Trace / Provenance · `workbench.action.findInFiles`
+  → Search (stock).
+- New: `glyphspek.home.open` → "GlyphSpek: Open Home" (palette + View category, `revealIfOpened`).
+
+### Why an extension cannot do it
+
+A surface that **fills the editor area and opens as the default landing before any workspace
+editor is restored** is workbench-level: it requires registering an `EditorInput`/`EditorPane`
+and an `AfterRestored` startup contribution against `IEditorService` lifecycle — the same
+machinery the stock Welcome page uses, none of which is reachable from an extension. (An
+extension webview can render a panel, but it cannot be the workbench's startup landing editor,
+cannot read `IKeybindingService` for live in-DOM keybinding hints, and cannot synchronously gate
+rows on `CommandsRegistry.getCommand()` without a message-passing seam.) Native DOM was chosen
+over a webview editor so Home shares the Authority-Halo CSS vars directly and invokes commands
+through `ICommandService` with no sandbox seam.
+
+### Changed files
+
+- `src/vs/workbench/contrib/glyphspekHome/browser/glyphspekHomeInput.ts` — **new** the
+  `EditorInput` (resource-keyed, single-per-resource).
+- `src/vs/workbench/contrib/glyphspekHome/browser/glyphspekHome.ts` — **new** the `EditorPane`
+  (`GlyphspekHomePage`, native-DOM render).
+- `src/vs/workbench/contrib/glyphspekHome/browser/glyphspekHomeIcons.ts` — **new** brand icon
+  sprite, vendored verbatim from `docs/assets/glyphspek-icons.svg`.
+- `src/vs/workbench/contrib/glyphspekHome/browser/glyphspekHome.contribution.ts` — **new**
+  pane/input/serializer registration, the `glyphspek.home.open` command, the editor resolver, the
+  startup auto-open runner, and the `glyphspek.home.openOnStartup` setting.
+- `src/vs/workbench/contrib/glyphspekHome/browser/media/glyphspekHome.css` — **new** styling,
+  reusing the halo palette tokens.
+- `src/vs/workbench/workbench.common.main.ts` — one import line wiring the contribution in (placed
+  after the Welcome-Onboarding include).
+
+### Acceptance test
+
+1. Launch the rebuilt app on a clean profile with no folder → **GlyphSpek Home** opens as the
+   landing editor (wordmark, "Start a governed run" input, governance rows, "No runs yet" empty
+   state).
+2. Type a task into the input and submit → `glyphspek.promoteChatToBuild` fires with that text as
+   the build intent (the governed-build flow starts).
+3. With the GlyphSpek extension **inactive**, the Trust Panel / Verifier / Egress / Trace rows
+   render **disabled** with the "needs the extension active" hint; on activation they enable live
+   (no reload).
+4. `GlyphSpek: Open Home` from the palette re-opens Home (`revealIfOpened` — no duplicate tab).
+5. Reopen with a real file/workspace, or set `glyphspek.home.openOnStartup: false`, or reload the
+   window → Home does **not** force itself over the restored editor.
+6. **Honesty:** Recent runs shows the empty-state, never a fabricated run or verdict; Home never
+   paints a `verified`/blue trust state of its own (only the halo it inherits reflects assurance).
+
+### Rollback / rebase note
+
+- **Rollback:** delete `src/vs/workbench/contrib/glyphspekHome/` and remove the one import line in
+  `workbench.common.main.ts`. The `glyphspek.home.open` command + `glyphspek.home.openOnStartup`
+  setting then disappear; nothing else is touched (the extension's commands/views are independent).
+  No data migration.
+- **Rebase risk: LOW.** The contribution is additive and self-contained; the only stock touch is
+  one import line and a dependency on the stable Welcome/GettingStarted editor-registration pattern
+  + `IEditorService`/`ILifecycleService`/`CommandsRegistry` APIs. If upstream changes the
+  startup-page contribution phase or the editor-resolver registration, re-point those two hooks.
+
+---
+
 ## GATE-002 — No-Copilot-runtime deny gate + Copilot-runtime removal (STUBBED)
 
 - **Status:** `APPLIED` (2026-05-30) — Part 1 (the honest deny gate) AND Part 2 (full
@@ -847,3 +964,99 @@ governance), not a redirectable GlyphSpek control.
 - **Rebase risk: NONE** — documentation only; no source touched. Re-audit when any stock surface
   (terminal/task/debug/tunnel/extension-host) is patched, when the Sovereign overlay/ambient-warning
   is wired, or when the Firecracker hard-egress plane lands (closes D1/D2).
+
+## PATCH-005 — GlyphSpek default theme + title/activity-bar chrome restyle (product look)
+
+- **Status:** `APPLIED` (2026-06-01).
+- **Type:** **UX / product-look patch.** Threat addressed = **N/A.** This is the GlyphSpek
+  default color theme + a light title-bar / activity-bar restyle so the workbench reads as
+  GlyphSpek (not stock Code-OSS), the way Cursor ships its own theme/chrome. Recorded here only
+  because two files are `src/vs/**` workbench CSS diffs and the ledger policy requires **every**
+  workbench diff be logged — it is **not** a security patch. It changes no trust state, grants no
+  authority, mints no verdict, and the CSS is purely cosmetic (color/radius/spacing).
+
+### What it does
+
+1. **Default color theme** — a new builtin theme extension `extensions/glyphspek-theme/`
+   contributes `GlyphSpek Dark` (`uiTheme: vs-dark`). Colors are derived from the design source
+   `design/ide-concept/glyphspek-workbench-blended.html` `:root` tokens (slate substrate
+   `#070a0f`/`#0f1419`/`#161c24`/`#1d2530`, editor bg `#0f1419`, chrome `#161c24`) and harmonized
+   with the Authority-Halo trust accents (claim/amber `#d9a441`, verdict/blue `#5b9cf0`,
+   pass/green `#3fb568`, fail/red `#e0544b`, soft/violet `#a98bff`). It is made the default on
+   **desktop** by pointing `ThemeSettingDefaults.COLOR_THEME_DARK` at `'GlyphSpek Dark'`
+   (`src/vs/workbench/services/themes/common/workbenchThemeService.ts`) — the source of truth for
+   the `workbench.colorTheme` default, the dark fallback, and legacy-id migration — and the boot
+   splash (`COLOR_THEME_DARK_INITIAL_COLORS`, same file) is re-paletted to GlyphSpek so a clean
+   first launch never flashes stock chrome. For **web** (and as documented intent) it is also set
+   via `product.json` → `configurationDefaults["workbench.colorTheme"] = "GlyphSpek Dark"`, and
+   `GlyphSpek Dark` is added to `product.json` `onboardingThemes` as the lead dark choice.
+   (Note: `product.configurationDefaults` is only consumed on the web embedder path —
+   `environmentService.options?.configurationDefaults` — so the desktop default relies on the TS
+   constant, not product.json.)
+2. **Title-bar restyle** — flattens the heavy drop shadow into a single theme hairline, rounds the
+   command center into a pill, and quiets the app icon. Colors come from the active theme's
+   `titleBar.*` / `commandCenter.*` tokens, so it stays theme-agnostic; height + drag region are
+   unchanged.
+3. **Activity-bar restyle** — softens the divider to the theme hairline, drops the stock shadow,
+   adds top breathing room, and gives the rail icons a rounded hover/active surface plus a crisper,
+   softly-glowing active indicator (uses `activityBar.activeBackground` / `activityBar.activeBorder`
+   tokens, inheriting the GlyphSpek halo-blue from the theme). Width stays the layout-driven
+   `--activity-bar-width`; no geometry change.
+
+### Why an extension cannot do (2) and (3)
+
+The title-bar and activity-bar **part** chrome is workbench layout CSS, not reachable by any
+extension surface (a webview is confined to its own rect and cannot restyle the workbench parts).
+The theme itself (1) is a normal builtin theme extension — no fork needed — but the part-CSS polish
+requires the fork.
+
+### Honesty / layout safety
+
+- The theme respects the trust-axis semantics: amber stays claim/unverified, blue stays
+  verified, violet stays soft, red stays denied/error — it does not recolor any trust accent off
+  its meaning, so it harmonizes with the Authority Halo (PATCH-003) rather than fighting it.
+- The CSS edits change only color/border/border-radius/padding and an inset rounded background on
+  icons; they touch **no** JS-computed dimension (title-bar height, activity-bar width, drag
+  region) and intercept no input.
+
+### Changed files
+
+- `extensions/glyphspek-theme/package.json` — **new** builtin theme extension manifest
+  (`contributes.themes` → `GlyphSpek Dark`).
+- `extensions/glyphspek-theme/package.nls.json` — **new** localized display strings.
+- `extensions/glyphspek-theme/themes/glyphspek-dark-color-theme.json` — **new** the color theme
+  (278 workbench colors + token/semantic colors).
+- `src/vs/workbench/services/themes/common/workbenchThemeService.ts` — `ThemeSettingDefaults.COLOR_THEME_DARK`
+  → `'GlyphSpek Dark'` (the desktop default mechanism) + `COLOR_THEME_DARK_INITIAL_COLORS`
+  re-paletted to GlyphSpek for the boot splash.
+- `product.json` — default `workbench.colorTheme` via `configurationDefaults` (web path);
+  `GlyphSpek Dark` added as the lead `onboardingThemes` dark entry. (`nameLong`/`nameShort`/branding
+  already GlyphSpek; window title `${appName}` already resolves to GlyphSpek.)
+- `src/vs/workbench/browser/parts/titlebar/media/titlebarpart.css` — appended GlyphSpek title-bar
+  restyle block.
+- `src/vs/workbench/browser/parts/activitybar/media/activitybarpart.css` — appended GlyphSpek rail
+  part restyle block.
+- `src/vs/workbench/browser/parts/activitybar/media/activityaction.css` — appended GlyphSpek rail
+  icon accent block.
+
+### How to verify it is the default
+
+1. Fresh profile / first run of the packaged build: the workbench loads in **GlyphSpek Dark**
+   without the user picking a theme (driven by `product.json` `configurationDefaults`).
+2. Command Palette → "Preferences: Color Theme" lists **GlyphSpek Dark** and shows it selected.
+3. Title bar reads as a flat hairline plane with a pill command center; the activity rail icons
+   have rounded hover/active surfaces and a glowing blue active indicator.
+
+### Acceptance test
+
+1. Launch the rebuilt app on a clean profile → theme is GlyphSpek Dark, editor bg `#0f1419`,
+   chrome `#161c24`, activity-bar active indicator halo-blue `#5b9cf0`.
+2. Switch to another theme and back → no layout shift in title bar or activity bar; sash/resize,
+   full-screen, and drag region all behave as stock.
+
+### Rollback / rebase note
+
+- **Rollback:** delete `extensions/glyphspek-theme/`, revert the two `product.json` lines, and
+  remove the three appended `/* GlyphSpek … restyle */` CSS blocks. No runtime/security impact.
+- **Rebase risk: LOW** — the CSS is appended at the end of each part stylesheet and scoped under
+  `.monaco-workbench`, so it composes with upstream rules; the theme + product.json are additive.

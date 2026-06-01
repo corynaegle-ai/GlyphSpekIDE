@@ -72,3 +72,30 @@
 	width: 100%;
 	height: 35px;
 }
+
+/* ---------------------------------------------------------------------------------------------
+ *  GlyphSpek activity-bar restyle (PATCH-005, chrome polish).
+ *
+ *  Cleans the activity rail to match the design source
+ *  (design/ide-concept/glyphspek-workbench-blended.html .rail): a calmer plane with a soft
+ *  hairline and a little breathing room at the top, so the rail reads as a governance surface
+ *  rather than a stock icon strip. Pure cosmetics — the rail color comes from the active theme
+ *  (activityBar.* tokens) and the width stays the layout-driven --activity-bar-width, so layout
+ *  geometry is unchanged.
+ * ------------------------------------------------------------------------------------------- */
+
+/* Soften the hard divider into the theme hairline; drop the stock shadow when bordered. */
+.monaco-workbench.nosidebar .part.activitybar,
+.monaco-workbench.activitybar-right .part.activitybar {
+	box-shadow: none;
+}
+
+.monaco-workbench .activitybar.left.bordered::before,
+.monaco-workbench .activitybar.right.bordered::before {
+	border-color: var(--vscode-activityBar-border, var(--vscode-contrastBorder, transparent));
+}
+
+/* A little top padding so the first icon doesn't crowd the title-bar hairline. */
+.monaco-workbench .activitybar > .content > .composite-bar {
+	padding-top: 4px;
+}
