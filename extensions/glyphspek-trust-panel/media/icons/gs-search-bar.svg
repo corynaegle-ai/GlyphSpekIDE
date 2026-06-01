@@ -1,0 +1,7 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" width="24" height="24" aria-hidden="true">
+  <!-- Solid silhouette mask for the activity bar: scoped Search.
+       Filled because VS Code renders container icons as a single-color mask.
+       gs-search.svg stays the line icon used inside the webviews. -->
+  <path fill="currentColor" fill-rule="evenodd" clip-rule="evenodd"
+    d="M10.5 3a7.5 7.5 0 0 1 5.96 12.05l4.25 4.24-1.42 1.42-4.24-4.25A7.5 7.5 0 1 1 10.5 3Zm0 2.4a5.1 5.1 0 1 0 0 10.2 5.1 5.1 0 0 0 0-10.2Z"/>
+</svg>

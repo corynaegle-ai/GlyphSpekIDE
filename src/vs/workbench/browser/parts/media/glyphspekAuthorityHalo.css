@@ -1,0 +1,136 @@
+/*---------------------------------------------------------------------------------------------
+ *  Copyright (c) Microsoft Corporation. All rights reserved.
+ *  Licensed under the MIT License. See License.txt in the project root for license information.
+ *--------------------------------------------------------------------------------------------*/
+
+/*
+ * GlyphSpek Authority Halo (PATCH-003) — the whole-workbench assurance ring.
+ *
+ * Driven ONLY by `data-glyphspek-authority` on `.monaco-workbench`, which mirrors the
+ * `glyphspek.authority` context-key the GlyphSpek extension sets (read | claimed | soft
+ * | verified | denied). Color/glow map + the deny pulse are ported from the design
+ * source `design/ide-concept/glyphspek-workbench-blended.html`.
+ *
+ * LAYOUT SAFETY: the ring is painted by a non-layout, pointer-events:none `::after`
+ * overlay inset inside the workbench box — it never changes the JS-computed
+ * `.monaco-workbench` dimensions and never intercepts input, so editor/terminal/panel
+ * resize, split layouts, full-screen, zoom, and the title-bar drag region are unaffected.
+ * The floating-frame substrate adds only border-radius + a backdrop behind the (already
+ * `overflow: hidden`) workbench; it does not inset the layout box.
+ */
+
+.monaco-workbench[data-glyphspek-authority] {
+	/* The assurance axis (load-bearing brand palette). Defaults match the design source. */
+	--glyphspek-halo: #8aa0bd;                 /* slate — read / neutral, no glow */
+	--glyphspek-halo-glow: 0 0 0 rgba(0, 0, 0, 0);
+	--glyphspek-substrate: #070a0f;            /* the void behind the floating frame */
+	--glyphspek-halo-radius: 12px;
+}
+
+/* ---- assurance → ring color + glow ---- */
+.monaco-workbench[data-glyphspek-authority='read'] {
+	--glyphspek-halo: #8aa0bd;
+	--glyphspek-halo-glow: 0 0 0 rgba(0, 0, 0, 0);
+}
+.monaco-workbench[data-glyphspek-authority='claimed'] {
+	--glyphspek-halo: #d9a441;                 /* amber — agent acted, unverified */
+	--glyphspek-halo-glow: 0 0 38px -8px #d9a441;
+}
+.monaco-workbench[data-glyphspek-authority='soft'] {
+	--glyphspek-halo: #a98bff;                 /* violet — governed-unsandboxed / SOFT */
+	--glyphspek-halo-glow: 0 0 36px -10px #a98bff;
+}
+.monaco-workbench[data-glyphspek-authority='verified'] {
+	--glyphspek-halo: #5b9cf0;                 /* blue — verifier signed (signature-verified only) */
+	--glyphspek-halo-glow: 0 0 42px -6px #5b9cf0;
+}
+.monaco-workbench[data-glyphspek-authority='denied'] {
+	--glyphspek-halo: #e0544b;                 /* red — denied / tampered */
+	--glyphspek-halo-glow: 0 0 46px -4px #e0544b;
+}
+
+/*
+ * THE RING. A border + outer glow drawn on a non-layout overlay so it cannot shift the
+ * workbench layout box. `inset: 0` aligns it to the workbench edge (ring-only by default);
+ * the floating frame below rounds its corners to match.
+ */
+.monaco-workbench[data-glyphspek-authority]::after {
+	content: '';
+	position: absolute;
+	inset: 0;
+	z-index: 1000;                             /* above parts, below modal overlays/notifications */
+	pointer-events: none;                      /* never intercept clicks, drags, or resize sashes */
+	border: 1.5px solid var(--glyphspek-halo);
+	border-radius: var(--glyphspek-halo-radius);
+	box-shadow:
+		var(--glyphspek-halo-glow),
+		inset 0 0 0 1px rgba(255, 255, 255, 0.04);
+	/* Calm cross-fade between assurance states (disabled under reduced motion). */
+	transition: border-color 0.5s ease, box-shadow 0.5s ease;
+}
+
+/* `read` is square-edged when not floating (ring hugs the stock workbench edge). */
+.monaco-workbench[data-glyphspek-authority]:not(.glyphspek-floating-frame)::after {
+	--glyphspek-halo-radius: 0px;
+}
+
+/*
+ * THE FLOATING FRAME (the demo's identity). Rounded corners + a dark substrate showing
+ * through behind the (already clipped) workbench, so the ring has somewhere to glow.
+ * This insets nothing in the layout sense — it only rounds the corners and paints the
+ * substrate + a soft drop shadow lifting the frame off the void. Behind
+ * `glyphspek.workbench.floatingFrame` (default ON).
+ */
+.monaco-workbench.glyphspek-floating-frame {
+	border-radius: var(--glyphspek-halo-radius);
+	background-color: var(--glyphspek-substrate);
+	box-shadow: 0 30px 80px -30px #000;
+}
+
+/* Tint the window backdrop behind the rounded corners to the substrate void. */
+.monaco-workbench.glyphspek-floating-frame::before {
+	content: '';
+	position: fixed;
+	inset: 0;
+	z-index: -1;                               /* behind every workbench part */
+	pointer-events: none;
+	background:
+		radial-gradient(1200px 700px at 70% -10%, #0d1a26 0%, transparent 60%),
+		var(--glyphspek-substrate);
+}
+
+/*
+ * THE DENY PULSE — a one-shot alarm on transition into `denied` (~1.1s). The contribution
+ * adds `glyphspek-halo-deny-pulse` only on the read→denied transition and re-arms it via a
+ * reflow, so it fires once per actual denial, not on every re-render.
+ */
+.monaco-workbench.glyphspek-halo-deny-pulse[data-glyphspek-authority='denied']::after {
+	animation: glyphspekDenyPulse 1.1s ease 1;
+}
+
+@keyframes glyphspekDenyPulse {
+	0%, 100% {
+		box-shadow: var(--glyphspek-halo-glow), inset 0 0 0 1px rgba(255, 255, 255, 0.04);
+	}
+	35% {
+		box-shadow: 0 0 64px -2px #e0544b, inset 0 0 0 1px rgba(255, 255, 255, 0.04);
+	}
+}
+
+/*
+ * REDUCED MOTION (accessibility, BLENDED-WORKBENCH-SPEC §7). Disable the cross-fade and the
+ * deny pulse, keep the STATIC assurance color. Honored via BOTH the OS preference and the
+ * `glyphspek.workbench.haloMotion` setting (the contribution adds the class when the setting
+ * is off; the media query covers the OS preference independently).
+ */
+.monaco-workbench.glyphspek-halo-reduce-motion[data-glyphspek-authority]::after {
+	transition: none;
+	animation: none;
+}
+
+@media (prefers-reduced-motion: reduce) {
+	.monaco-workbench[data-glyphspek-authority]::after {
+		transition: none;
+		animation: none;
+	}
+}

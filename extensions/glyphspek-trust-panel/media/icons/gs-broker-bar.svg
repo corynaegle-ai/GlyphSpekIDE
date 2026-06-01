@@ -1,0 +1,7 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" width="24" height="24" aria-hidden="true">
+  <!-- Solid silhouette mask for the activity bar: the model-call BROKER (two planes
+       joined through a hub). Filled because VS Code renders container icons as a
+       single-color mask. gs-broker.svg stays the line icon used inside the webviews. -->
+  <path fill="currentColor" fill-rule="evenodd" clip-rule="evenodd"
+    d="M4.5 4h15v5H4.5V4Zm0 11h15v5h-15v-5ZM11.3 9.2h1.4v1.4h1.6v1.4h-1.6v1.4h-1.4v-1.4H9.7V10.6h1.6V9.2Z"/>
+</svg>

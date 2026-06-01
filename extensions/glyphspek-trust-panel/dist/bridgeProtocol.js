@@ -159,6 +159,20 @@ exports.BridgeMethod = {
      * ack-then-notifications style. MIRRORS the canonical spikes/p0-contracts/bridge.ts.
      */
     AgenticBuildStart: 'build/start',
+    /**
+     * Abort an in-flight run (the remote-control / agentic build engine). SIGKILLs the
+     * run's actor child (e.g. `codex exec`), transitions the lifecycle to `aborted`, and
+     * emits a terminal run/build event. Idempotent: an unknown/already-terminal run acks
+     * `cancelled:false` (never errors). Additive; mirrors the canonical contract.
+     */
+    RunCancel: 'run/cancel',
+    /**
+     * Resolve a PENDING governed build's up-front authority grant (the remote-coding flow:
+     * a `coding.messages.send`/pending `build/start` parks a build awaiting approval).
+     * `allow` starts the held build down the approved path (codex spawned, signed verdict);
+     * `deny` discards it (no codex, terminal error). Additive; mirrors the canonical contract.
+     */
+    ApprovalRespond: 'approval/respond',
 };
 /** Server→client notification methods (no response expected). */
 exports.BridgeNotification = {

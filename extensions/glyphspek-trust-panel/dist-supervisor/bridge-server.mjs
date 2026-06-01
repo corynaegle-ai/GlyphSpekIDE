@@ -158,7 +158,29 @@ var BridgeMethod = {
    * carries the {@link AgenticBuildReview} render contract. Mirrors run/start's
    * ack-then-notifications style.
    */
-  AgenticBuildStart: "build/start"
+  AgenticBuildStart: "build/start",
+  /**
+   * CANCEL an in-flight run (remote-control: the phone's `runs.cancel`). The
+   * supervisor ABORTS the run's actor child process (e.g. the agentic build's
+   * `codex exec`), transitions the run lifecycle to the terminal `aborted` state,
+   * and emits a terminal `build/event {state:'aborted'}` / `run_closed`. Idempotent:
+   * cancelling an already-terminal or unknown run is acknowledged without error.
+   * The result is only the ACK ({ runId, cancelled }). Additive — existing run
+   * lifecycles are unchanged when no cancel is issued.
+   */
+  RunCancel: "run/cancel",
+  /**
+   * RESPOND to a PENDING approval (remote-control: the phone's `approvals.respond`).
+   * The only interactive approval today is a PENDING governed build: a build request
+   * created via {@link AgenticBuildStart} WITHOUT `approved:true` is held as a
+   * pending approval (codex NOT spawned) rather than refused. On `allow`, the
+   * supervisor GRANTS the authority and starts the held build down the SAME approved
+   * path (`approved:true`) — governed codex edits files + the signed verdict streams.
+   * On `deny`, the pending build is DISCARDED (a terminal `build/event` error, no
+   * codex). The result is only the ACK ({ approvalId, decision, runId? }). Additive:
+   * a direct `build/start {approved:true}` still starts immediately as today.
+   */
+  ApprovalRespond: "approval/respond"
 };
 var BridgeNotification = {
   /** A run lifecycle/trace event streamed back to the client for the panel. */
@@ -3331,6 +3353,13 @@ var BridgeServer = class {
   codexLaunch;
   /** Monotonic counter minting agentic-build run ids (per connection). */
   buildSeq = 0;
+  /**
+   * PENDING governed builds awaiting a remote approval decision, keyed by approvalId
+   * (remote-control). A non-approved `build/start` in pending mode parks the request
+   * here (codex NOT spawned) until `approval/respond` grants/denies it. Empty in the
+   * desktop flow (a non-approved build is refused there, not parked).
+   */
+  pendingBuilds = /* @__PURE__ */ new Map();
   constructor(opts) {
     this.supervisorVersion = opts.supervisorVersion ?? DEFAULT_SUPERVISOR_VERSION;
     this.runsBaseDir = opts.runsBaseDir;
@@ -3470,6 +3499,12 @@ var BridgeServer = class {
         return;
       case BridgeMethod.AgenticBuildStart:
         void this.handleAgenticBuildStart(req);
+        return;
+      case BridgeMethod.RunCancel:
+        this.handleRunCancel(req);
+        return;
+      case BridgeMethod.ApprovalRespond:
+        this.handleApprovalRespond(req);
         return;
       default:
         this.emit(
@@ -4139,21 +4174,62 @@ var BridgeServer = class {
     const runId = params.runId && typeof params.runId === "string" ? params.runId : `build-${++this.buildSeq}`;
     const ack = { runId };
     this.emit(this.successResponse(req.id, ack));
-    if (params.approved !== true) {
-      this.logLine(
-        `[bridge-server] build/start ${runId} REFUSED \u2014 no authority approval (cwd=${cwd}).`
-      );
-      this.emitAgenticBuildEvent({
-        runId,
-        type: "error",
-        message: `agentic build requires explicit authority approval (it may edit files and run commands in ${cwd})`
-      });
+    if (params.approved === true) {
+      await this.runApprovedBuild(runId, prompt, cwd);
       return;
     }
+    if (params.pendingApproval === true) {
+      const approvalId = `apr-${runId}`;
+      this.pendingBuilds.set(approvalId, { approvalId, runId, prompt, cwd });
+      this.logLine(
+        `[bridge-server] build/start ${runId} PENDING approval ${approvalId} (cwd=${cwd}).`
+      );
+      this.emitAgenticBuildEvent({ runId, type: "state", state: `pending_approval:${approvalId}` });
+      return;
+    }
+    this.logLine(
+      `[bridge-server] build/start ${runId} REFUSED \u2014 no authority approval (cwd=${cwd}).`
+    );
+    this.emitAgenticBuildEvent({
+      runId,
+      type: "error",
+      message: `agentic build requires explicit authority approval (it may edit files and run commands in ${cwd})`
+    });
+  }
+  /**
+   * Run a GOVERNED AGENTIC BUILD that has been AUTHORIZED (`approved:true`, either
+   * up-front or via an `approval/respond` ALLOW of a pending build). This is the
+   * extracted approved path of `build/start`: record the authority grant into the
+   * run's ONE hash-chained trace, then drive {@link runGovernedAgenticBuild} under an
+   * AbortController so `run/cancel` can SIGKILL the `codex exec` child. Everything
+   * runs in an outer try/catch so a failure becomes a terminal `error` event.
+   */
+  async runApprovedBuild(runId, prompt, cwd) {
+    const abort = new AbortController();
     try {
       const buildRun = createRun(this.agentic?.runsBaseDir ?? this.runsBaseDir);
       const tracePath = join6(runSubdirPath(buildRun.dir, "trace"), "trace.jsonl");
       const sink = createTraceWriter(tracePath);
+      const buildLifecycle = new RunLifecycle(buildRun.state);
+      const buildServerRun = {
+        created: buildRun,
+        lifecycle: buildLifecycle,
+        trust: "governed-unsandboxed",
+        request: {
+          actorType: "codex-cli",
+          autonomyTier: "allowlist",
+          policyPath: "",
+          policyHash: "",
+          workspaceRoot: cwd,
+          runtimeProfile: "local-exec",
+          extensionPosture: "sovereign",
+          worktreeBase: cwd
+        },
+        runtimeIsolated: false,
+        started: true,
+        buildAbort: abort
+      };
+      this.runs.set(runId, buildServerRun);
       const approvalId = `apr-${runId}`;
       const requested = {
         approvalId,
@@ -4195,6 +4271,10 @@ var BridgeServer = class {
         // signed verdict), and a verdict bound to the REAL accumulated trace root —
         // never a second run id, never GENESIS.
         existingRun: { runId, tracePath, sink },
+        // CANCELLATION: thread the run's AbortController signal so run/cancel SIGKILLs
+        // the `codex exec` child (runAgenticBuild listens for abort) and the build
+        // finalizes honestly rather than hanging.
+        signal: abort.signal,
         ...this.agentic?.runsBaseDir ? { runsBaseDir: this.agentic.runsBaseDir } : this.runsBaseDir ? { runsBaseDir: this.runsBaseDir } : {},
         ...this.agentic?.verifyCommand ? { verifyCommand: this.agentic.verifyCommand } : {},
         ...this.agentic?.denyDirectIp !== void 0 ? { denyDirectIp: this.agentic.denyDirectIp } : {},
@@ -4202,12 +4282,22 @@ var BridgeServer = class {
         emit: (event) => this.streamGovernedAgenticEvent(runId, event),
         onOperatorLog: (line) => this.logLine(`[bridge-server] [build ${runId}] ${line}`)
       });
+      if (this.runs.get(runId)?.buildTerminal === true) {
+        this.logLine(`[bridge-server] build/start ${runId} was cancelled mid-flight; suppressing result.`);
+        return;
+      }
       const review = projectAgenticBuildReview(runId, prompt, result);
+      this.markRunTerminal(runId, "completed");
       this.emitAgenticBuildEvent({ runId, type: "result", review });
       this.logLine(
         `[bridge-server] build/start ${runId} \u2192 ${review.verdict.overall} (${review.changedFiles.length} changed file(s), ${review.commands.length} command(s)).`
       );
     } catch (err) {
+      if (this.runs.get(runId)?.buildTerminal === true) {
+        this.logLine(`[bridge-server] build/start ${runId} threw after cancel; suppressing error.`);
+        return;
+      }
+      this.markRunTerminal(runId, "failed");
       this.logLine(
         `[bridge-server] build/start ${runId} failed: ${String(err?.message ?? err)}`
       );
@@ -4217,6 +4307,132 @@ var BridgeServer = class {
         message: `agentic build failed: ${String(err?.message ?? err)}`
       });
     }
+  }
+  /**
+   * Mark a build run terminal: flip `buildTerminal`, clear its AbortController, and
+   * best-effort transition the run's lifecycle to the terminal state (legal from any
+   * non-terminal state). Idempotent — a second call (e.g. cancel racing completion)
+   * is a no-op once terminal.
+   */
+  markRunTerminal(runId, to) {
+    const run = this.runs.get(runId);
+    if (!run) return;
+    if (run.buildTerminal === true) return;
+    run.buildTerminal = true;
+    run.buildAbort = void 0;
+    try {
+      if (!run.lifecycle.isTerminal && run.lifecycle.canTransitionTo(to)) {
+        run.lifecycle.transition(to, `build ${to}`);
+      } else if (!run.lifecycle.isTerminal) {
+        if (run.lifecycle.canTransitionTo("executing")) {
+          run.lifecycle.transition("executing", "build executing (finalize)");
+        }
+        if (run.lifecycle.canTransitionTo(to)) run.lifecycle.transition(to, `build ${to}`);
+      }
+    } catch {
+    }
+  }
+  /**
+   * run/cancel — ABORT an in-flight run (remote-control). The supervisor signals the
+   * run's AbortController (SIGKILLing the agentic build's `codex exec` child via
+   * runAgenticBuild's abort listener), transitions the lifecycle to the terminal
+   * `aborted` state, and emits the terminal `build/event {state:'aborted'}`. Idempotent:
+   * an unknown or already-terminal run is acknowledged with `cancelled:false` rather
+   * than erroring. The result is the ACK only; the run's terminal events stream.
+   */
+  handleRunCancel(req) {
+    if (!this.handshakeDone) {
+      this.emit(
+        this.errorResponse(req.id, BridgeErrorCode.InvalidRequest, "run/cancel before a completed handshake")
+      );
+      return;
+    }
+    const params = req.params ?? {};
+    const runId = typeof params.runId === "string" ? params.runId : "";
+    if (runId.trim().length === 0) {
+      this.emit(
+        this.errorResponse(req.id, BridgeErrorCode.InvalidRequest, "run/cancel requires a non-empty runId")
+      );
+      return;
+    }
+    const run = this.runs.get(runId);
+    if (!run || run.buildTerminal === true || run.buildAbort === void 0) {
+      this.emit(this.successResponse(req.id, { runId, cancelled: false }));
+      return;
+    }
+    const controller = run.buildAbort;
+    this.markRunTerminal(runId, "aborted");
+    try {
+      controller.abort();
+    } catch {
+    }
+    this.emitAgenticBuildEvent({ runId, type: "state", state: "aborted" });
+    this.emitAgenticBuildEvent({ runId, type: "error", message: "run cancelled by operator" });
+    this.logLine(`[bridge-server] run/cancel ${runId} \u2192 aborted.`);
+    this.emit(this.successResponse(req.id, { runId, cancelled: true }));
+  }
+  /**
+   * approval/respond — resolve a PENDING governed-build approval (remote-control). On
+   * `allow`, GRANT the held build's authority and start it down the SAME approved path
+   * (`runApprovedBuild`) — governed codex edits files + the signed verdict streams. On
+   * `deny`, DISCARD the pending build (terminal `build/event` error, codex NOT spawned).
+   * Idempotent: an unknown approvalId is acknowledged with `resolved:false`.
+   */
+  handleApprovalRespond(req) {
+    if (!this.handshakeDone) {
+      this.emit(
+        this.errorResponse(req.id, BridgeErrorCode.InvalidRequest, "approval/respond before a completed handshake")
+      );
+      return;
+    }
+    const params = req.params ?? {};
+    const approvalId = typeof params.approvalId === "string" ? params.approvalId : "";
+    const decision = params.decision === "allow" || params.decision === "deny" ? params.decision : void 0;
+    if (approvalId.trim().length === 0 || decision === void 0) {
+      this.emit(
+        this.errorResponse(
+          req.id,
+          BridgeErrorCode.InvalidRequest,
+          "approval/respond requires an approvalId and decision allow|deny"
+        )
+      );
+      return;
+    }
+    const pending = this.pendingBuilds.get(approvalId);
+    if (!pending) {
+      this.emit(
+        this.successResponse(req.id, { approvalId, decision, resolved: false })
+      );
+      return;
+    }
+    this.pendingBuilds.delete(approvalId);
+    if (decision === "deny") {
+      this.logLine(`[bridge-server] approval/respond ${approvalId} DENIED \u2014 discarding build ${pending.runId}.`);
+      this.emitAgenticBuildEvent({
+        runId: pending.runId,
+        type: "error",
+        message: "agentic build authority denied by operator"
+      });
+      this.emit(
+        this.successResponse(req.id, {
+          approvalId,
+          decision,
+          runId: pending.runId,
+          resolved: true
+        })
+      );
+      return;
+    }
+    this.logLine(`[bridge-server] approval/respond ${approvalId} ALLOWED \u2014 starting build ${pending.runId}.`);
+    this.emit(
+      this.successResponse(req.id, {
+        approvalId,
+        decision,
+        runId: pending.runId,
+        resolved: true
+      })
+    );
+    void this.runApprovedBuild(pending.runId, pending.prompt, pending.cwd);
   }
   /**
    * Map ONE {@link GovernedAgenticEvent} from the runner onto the build/event wire

@@ -82,6 +82,8 @@ const agenticBuildReview_1 = require("./agenticBuildReview");
 const agenticBuildPromotion_1 = require("./agenticBuildPromotion");
 const statusBarSegments_1 = require("./statusBarSegments");
 const haloChrome_1 = require("./haloChrome");
+const provenanceGutter_1 = require("./provenanceGutter");
+const governedRunsCardView_1 = require("./governedRunsCardView");
 /** The file names that make up a run bundle, in load order. */
 const BUNDLE_FILE_NAMES = [
     'trace.jsonl',
@@ -359,6 +361,34 @@ function getRunStatusController() {
         runStatusController = new RunStatusController();
     return runStatusController;
 }
+/* ================================================================== *
+ * PROVENANCE GUTTER CONTROLLER (Slice 3 — §5.5 / §8).
+ *
+ * The module-private PROVENANCE GUTTER controller. One per extension process; fed
+ * the SAME run/event stream the Trust Panel renders (TrustPanel.postRunEvent calls
+ * notify()), the SAME webview signature-verified confirmation the status bar reads
+ * (the `glyphspekAuthority` message → confirmVerified, the amber→blue flip / tamper
+ * revert), and the agentic build's real git diff (the one honest hunk-granularity
+ * source). It paints the four trust-state decorations onto the editor gutter/minimap/
+ * row at the HONEST granularity (whole-file amber for changed files; hunk where a
+ * real diff exists; blue ONLY on verifier-covered hunks of a webview-verified run;
+ * SOFT never blue). Created+attached in activate(); its dispose drops the decoration
+ * types on deactivate. Needs the extensionUri (for the colored-bar icon assets), so
+ * unlike the other singletons it is created in activate(), not lazily on first use.
+ */
+let provenanceGutterController;
+function getProvenanceGutterController() {
+    return provenanceGutterController;
+}
+/**
+ * The Governed Runs CARD view provider (Slice 4). Holds the same per-run webview-
+ * verified flag the status bar + gutter hold, so the green VERIFIED card flips ONLY
+ * on the signature gate (confirmVerified), and follows the focused run.
+ */
+let governedRunsCardView;
+function getGovernedRunsCardView() {
+    return governedRunsCardView;
+}
 /** Human-readable byte size for size-cap error messages. */
 function formatBytes(bytes) {
     if (bytes < 1024)
@@ -569,6 +599,17 @@ class TrustPanel {
                 if (typeof msg.runId === 'string' &&
                     typeof msg.authority === 'string') {
                     getRunStatusController().confirmVerified(msg.runId, msg.authority === 'verified');
+                    // PROVENANCE GUTTER (Slice 3): the SAME webview gate drives the editor's
+                    // amber→blue flip / tamper revert. 'verified' moves the run's covered
+                    // hunks to blue; any other value clears the flag so a later tamper drops
+                    // them off blue. The host never decides 'verified' itself — this is the
+                    // only door to blue, exactly as the status bar reads it.
+                    getProvenanceGutterController()?.confirmVerified(msg.runId, msg.authority === 'verified');
+                    // GOVERNED RUNS CARDS (Slice 4): the SAME webview gate flips a run card
+                    // amber→green (and a later tamper reverts it). The card view never decides
+                    // 'verified' itself — this is its only door to green, exactly as the status
+                    // bar reads it and the gutter reads blue.
+                    getGovernedRunsCardView()?.confirmVerified(msg.runId, msg.authority === 'verified');
                 }
             }
             else if (msg.type === 'startTrustedRun') {
@@ -619,6 +660,13 @@ class TrustPanel {
         // Also focus the status-bar segments on this run (Slice 2). View-only — confers
         // no trust; a no-op if the run hasn't streamed to the status model yet.
         getRunStatusController().focus(runId);
+        // Focus the PROVENANCE GUTTER on this run too (Slice 3) so the editor paints the
+        // selected run's changed files. View-only; a no-op if the run is unknown to the
+        // gutter model yet.
+        getProvenanceGutterController()?.focus(runId);
+        // Focus the GOVERNED RUNS CARDS' "Changed in run" list on this run too (Slice 4),
+        // so the side cards + the editor gutter agree on which run is in focus. View-only.
+        getGovernedRunsCardView()?.focus(runId);
         if (!this.ready) {
             this.pendingSelectRunId = runId;
             return;
@@ -642,6 +690,14 @@ class TrustPanel {
         // (esp. the revert) to EXACTLY this review's changedFiles. Keyed by runId.
         if (review && typeof review.runId === 'string' && review.runId.length > 0) {
             this.reviewsByRunId.set(review.runId, { review, preview, ...(cwd ? { cwd } : {}) });
+            // PROVENANCE GUTTER (Slice 3): the agentic build's git diff is the ONE honest
+            // source of real hunk ranges. Attach it so the run's changed files promote from
+            // whole-file amber to HUNK granularity. The blue gate is unchanged — hunks paint
+            // amber/violet until the webview confirms a signature-verified authority; the
+            // diff only refines WHERE we paint, never WHETHER we may paint blue.
+            if (typeof review.diff === 'string' && review.diff.length > 0) {
+                getProvenanceGutterController()?.attachDiff(review.runId, review.diff);
+            }
         }
         if (!this.ready) {
             this.pendingAgenticReview = { review, preview };
@@ -876,6 +932,12 @@ class TrustPanel {
         // `authority:` / `sandboxed worktree` / `N traced events` reflect the focused
         // run honestly. It does its own validate-then-fold and ignores malformed input.
         getRunStatusController().notify(rawEvent);
+        // Feed the PROVENANCE GUTTER controller (Slice 3, §5.5/§8) from the SAME stream
+        // so the editor gutter/minimap paints the run's changed files at the honest
+        // granularity (whole-file amber; hunk where a real diff exists; blue only on a
+        // webview-verified run's covered hunks). It does its own validate-then-fold and
+        // ignores malformed input, so this never paints from a foreign/malformed event.
+        getProvenanceGutterController()?.notify(rawEvent);
         const validation = (0, runEventProtocol_1.validateRunEvent)(rawEvent);
         if (!validation.ok) {
             // SCHEMA-VERSION MISMATCH (sweep-19 Medium #6 — FAIL CLOSED). A `rev` problem
@@ -1670,10 +1732,69 @@ function activate(context) {
     const statusController = getRunStatusController();
     statusController.attach(context);
     context.subscriptions.push({ dispose: () => void statusController.dispose() });
+    // PROVENANCE GUTTER (Slice 3, §5.5/§8). The editor-area trust-origin decorations:
+    // per-region amber (claimed) / blue (verified) / violet (soft) / slate (human)
+    // gutter bars + minimap stripes + whole-line tint over the focused run's changed
+    // files. Created here (it needs the extensionUri for the colored-bar icon assets),
+    // fed the SAME run/event stream (TrustPanel.postRunEvent → notify), the SAME webview
+    // signature-verified confirmation (glyphspekAuthority → confirmVerified — the
+    // amber→blue flip / tamper revert), and the agentic build's git diff (the honest
+    // hunk source). attach() wires the active-editor change listener and pushes the
+    // controller's dispose (which drops the four decoration types) into subscriptions.
+    provenanceGutterController = new provenanceGutter_1.ProvenanceGutterController(context.extensionUri);
+    provenanceGutterController.attach(context);
     context.subscriptions.push(vscode.window.createTreeView('glyphspek.runs', {
         treeDataProvider: runsTree,
         showCollapseAll: false,
     }));
+    // ACTIVITY-BAR "Governed Runs" CARDS view (Slice 4, §5.4 — the card-webview upgrade
+    // of the run row). A webview-view rendering the SAME run model as the cards mockup:
+    // colored left-border + status PILL (acting/verified/blocked) per run, then the
+    // focused run's "Changed in run" list with provenance dots. Reuses the provenance
+    // gutter as the changed-files + dot seam, and the SAME signature gate (confirmVerified)
+    // the status bar + gutter use — so a SOFT run is capped at ACTING and VERIFIED-green
+    // appears ONLY on the webview-confirmed signature. A card click runs openRun, which
+    // focuses the Trust Panel + gutter on that run.
+    governedRunsCardView = new governedRunsCardView_1.GovernedRunsCardViewProvider(context.extensionUri, runsModel, {
+        changedFilesFor: (runId) => getProvenanceGutterController()?.changedFilesFor(runId) ?? [],
+        fileDotState: (path, runId) => getProvenanceGutterController()?.fileDotState(path, runId) ?? 'human',
+        focusedRun: () => getProvenanceGutterController()?.focusedRun(),
+    });
+    context.subscriptions.push(vscode.window.registerWebviewViewProvider(governedRunsCardView_1.GovernedRunsCardViewProvider.viewType, governedRunsCardView, { webviewOptions: { retainContextWhenHidden: true } }));
+    context.subscriptions.push({
+        dispose: () => {
+            governedRunsCardView?.dispose();
+            governedRunsCardView = undefined;
+        },
+    });
+    // RAIL GOVERNANCE-SURFACE containers (Slice 4, §5.3 / §1.11). Each governance icon in
+    // the rail is its own activity-bar view container (package.json viewsContainers). The
+    // Runs surface is fully built (the cards above); Trace/Policy/Verifier/Egress/Model-
+    // Calls/Workspace/Search are registered with an EMPTY tree provider so their declared
+    // viewsWelcome (an honest, clearly-labeled placeholder pointing at the Trust Panel
+    // where that evidence renders today) shows — the icons are live, not dead, and full
+    // per-surface detail is a deliberate follow-on (§1.11). NOTE: making the rail
+    // governance-ONLY (hiding the stock Explorer/Extensions icons) is a FORK tweak — an
+    // extension cannot hide stock containers — deferred to the integration fork build.
+    const SURFACE_VIEW_IDS = [
+        'glyphspek.surface.trace',
+        'glyphspek.surface.policy',
+        'glyphspek.surface.verifier',
+        'glyphspek.surface.egress',
+        'glyphspek.surface.modelcalls',
+        'glyphspek.surface.workspace',
+        'glyphspek.surface.search',
+    ];
+    const emptySurfaceProvider = {
+        getTreeItem: (e) => e,
+        getChildren: () => [],
+    };
+    for (const id of SURFACE_VIEW_IDS) {
+        context.subscriptions.push(vscode.window.createTreeView(id, {
+            treeDataProvider: emptySurfaceProvider,
+            showCollapseAll: false,
+        }));
+    }
     // ACTIVITY-BAR "Chat" view (the SIDEBAR "chat that's a terminal"). A webview-view
     // hosting an xterm.js terminal connected to a real PTY running the user's
     // interactive `claude`, governed. Reuses the entire governed stack (bridge session,
@@ -2957,6 +3078,13 @@ function deactivate() {
     if (runStatusController) {
         void runStatusController.dispose();
         runStatusController = undefined;
+    }
+    // Drop the provenance-gutter decoration types (Slice 3). attach() also pushed this
+    // dispose into context.subscriptions, so this is belt-and-suspenders; clearing the
+    // singleton lets a re-activate in the same process build a fresh controller.
+    if (provenanceGutterController) {
+        provenanceGutterController.dispose();
+        provenanceGutterController = undefined;
     }
 }
 //# sourceMappingURL=extension.js.map

@@ -351,6 +351,120 @@ visible selection — so the resolver fails closed to a GlyphSpek-only invariant
 
 ---
 
+## PATCH-003 — Whole-frame Authority Halo ring (product look; reads a context-key, paints chrome)
+
+- **Status:** `APPLIED` (2026-06-01).
+- **Type:** **UX / product-look patch.** Threat addressed = **N/A**. This is the cosmetic
+  "Authority Halo" the Blended-Workbench design (`design/ide-concept/BLENDED-WORKBENCH-SPEC.md`
+  §5.1/§7, `IMPLEMENTATION-PLAN.md` §1.1/§2.2) calls fork-only. It is recorded here because it is
+  a `src/vs/**` workbench diff and the ledger policy requires **every** workbench diff be logged —
+  but it is **not** a security patch: it only **reads** an existing context-key and **paints
+  chrome**. It cannot change trust state, grant authority, mint a verdict, or make a lower-assurance
+  run read as verified-blue. It is ambient signal, not a modal and not a grant.
+
+### What it does
+
+Mirrors the focused-run **assurance** to the whole workbench frame as a thin border ring + outer
+glow, optionally floating the workbench on a dark substrate so the ring has somewhere to glow:
+
+| `glyphspek.authority` | Ring | Glow |
+|---|---|---|
+| `read` (default) | slate `#8aa0bd` | none (neutral) |
+| `claimed` | amber `#d9a441` | soft |
+| `soft` | violet `#a98bff` | soft |
+| `verified` | blue `#5b9cf0` | bright |
+| `denied` | red `#e0544b` | + one-shot `glyphspekDenyPulse` (~1.1s) |
+
+State changes cross-fade over `0.5s`; `denied` plays a one-shot pulse on the *transition into*
+denied (re-armed via a reflow, so it fires once per denial, not on every re-render).
+
+### Mechanism (read-only — it consumes assurance, it does not derive it)
+
+A workbench contribution (`GlyphSpekAuthorityHaloContribution`) observes the `glyphspek.authority`
+**context-key** the GlyphSpek first-party extension already sets on every assurance change
+(`extension/src/extension.ts` `setContext('glyphspek.authority', <level>)`; values
+`read|claimed|soft|verified|denied`, default `read`). It mirrors that value to a
+`data-glyphspek-authority` attribute on the `.monaco-workbench` root (`IWorkbenchLayoutService.mainContainer`);
+companion CSS keys the ring color/glow off that attribute. An unknown/unset key resolves to the
+neutral `read` slate (no glow). The contribution **never** computes trust — it reflects exactly
+the assurance the extension computed honestly. The honesty invariant is preserved end to end: the
+extension only sets `verified` on a **signature-verified product verdict**, so a non-isolating /
+SOFT run never wears the blue ring; the fork consumes that, it does not re-derive it.
+
+### Why an extension cannot do it
+
+The outer `.monaco-workbench` frame is workbench layout chrome, not reachable by any extension
+surface — a webview is confined to its own rect and cannot draw a ring around (or a substrate
+behind) the whole window, tint the frame edge, or play a frame-level pulse. Tinting the entire
+workbench frame requires workbench-level DOM, hence the fork. (The extension *does* ship a cheaper
+honest pre-fork fallback — opt-in `workbench.colorCustomizations` edge tint in
+`extension/src/haloChrome.ts` — which this ring supersedes 1:1, reading the same context-key, so no
+extension change was needed when this landed.)
+
+### Layout safety (verified — the floating-frame decision)
+
+`.monaco-workbench` is sized in JS (`layout.ts` `size(this.mainContainer, …)` +
+`workbenchGrid.layout(w, h)`) to the full window's `getClientArea`, and on desktop the parent is
+`document.body`, whose `getClientArea` returns `innerWidth/innerHeight` (NOT the padded content
+box). So a true CSS inset of the frame would desync the JS-computed grid dimensions from the
+rendered box and break sash hit-testing / overflow. **Decision: ship the RING on the existing
+workbench edge (ring-only), not a layout inset.** The ring is drawn by a non-layout,
+`pointer-events: none` `::after` overlay (`position: absolute; inset: 0`) inside the
+already-`overflow: hidden` workbench box, so it changes **no** layout dimension and intercepts
+**no** input — editor/terminal/panel resize, split layouts, full-screen, zoom, and the title-bar
+drag region are all unaffected (verified on the rebuilt app). The "floating frame" identity is
+delivered safely as rounded corners + a substrate backdrop showing through behind the clipped
+workbench (no inset), behind the setting `glyphspek.workbench.floatingFrame` (default ON,
+toggleable). The RING reflects assurance regardless of that setting.
+
+### Accessibility
+
+Honors **both** the OS `prefers-reduced-motion` (CSS media query) **and** a
+`glyphspek.workbench.haloMotion` setting (contribution toggles a class): either disables the
+deny pulse + the cross-fade and keeps the static assurance color. Non-color redundancy is
+satisfied out-of-band by the status-bar `authority:` text segment the extension already ships
+(Slice 2), so the ring is never the sole carrier of the trust state.
+
+### Changed files
+
+- `src/vs/workbench/browser/parts/glyphspekAuthorityHalo.ts` — **new** contribution
+  (`GlyphSpekAuthorityHaloContribution`, registered `registerWorkbenchContribution2` @
+  `WorkbenchPhase.AfterRestored`) + the two `glyphspek.workbench.*` settings registration.
+- `src/vs/workbench/browser/parts/media/glyphspekAuthorityHalo.css` — **new** the ring color/glow
+  map, `0.5s` cross-fade, `glyphspekDenyPulse`, floating-frame substrate, reduced-motion rules.
+- `src/vs/workbench/workbench.common.main.ts` — one import line wiring the contribution in.
+
+### Acceptance test
+
+1. Launch the rebuilt app. The workbench wears a neutral slate ring (`read`, no glow) with the
+   floating-frame substrate + rounded corners.
+2. Drive a run's assurance via the extension (Trust Panel / demo run): the ring tracks
+   `glyphspek.authority` — `claimed`→amber, `soft`→violet, `verified`→blue (only on a
+   signature-verified verdict), each a calm `0.5s` cross-fade.
+3. A denied/tampered verdict (`denied`) flips the ring red with a one-shot pulse (~1.1s).
+4. With OS "reduce motion" on **or** `glyphspek.workbench.haloMotion: false`, no pulse / no
+   cross-fade — the static assurance color remains.
+5. Toggle `glyphspek.workbench.floatingFrame: false` — the substrate/rounded frame drops to the
+   stock square edge; the assurance ring still reflects state.
+6. **Layout regression:** resize editor/terminal/panel splits, toggle full-screen, zoom, and drag
+   the title bar — all behave exactly as stock (the ring overlay is non-layout + non-interactive).
+7. **Honesty:** a `governed-unsandboxed` / SOFT run never shows the blue `verified` ring (the
+   extension never sets `verified` for it; the fork only consumes the key).
+
+### Rollback / rebase note
+
+- **Rollback:** delete `src/vs/workbench/browser/parts/glyphspekAuthorityHalo.ts` +
+  `…/media/glyphspekAuthorityHalo.css` and remove the one import line in
+  `workbench.common.main.ts`. The `data-glyphspek-authority` attribute and the two settings then
+  disappear; nothing else is touched (the extension's context-key + status-bar segment are
+  independent and unaffected). No data migration.
+- **Rebase risk: LOW.** The contribution is additive and self-contained; the only stock touch is
+  one import line in `workbench.common.main.ts` and a dependency on the stable
+  `IWorkbenchLayoutService.mainContainer` + `IContextKeyService.onDidChangeContext` APIs. If
+  upstream renames `.monaco-workbench` or `mainContainer`, re-point the attribute target.
+
+---
+
 ## GATE-002 — No-Copilot-runtime deny gate + Copilot-runtime removal (STUBBED)
 
 - **Status:** `APPLIED` (2026-05-30) — Part 1 (the honest deny gate) AND Part 2 (full

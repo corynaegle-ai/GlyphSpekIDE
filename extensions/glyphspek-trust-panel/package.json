@@ -21,6 +21,7 @@
     "onStartupFinished",
     "onView:glyphspek.chat",
     "onView:glyphspek.runs",
+    "onView:glyphspek.runs.cards",
     "onCommand:glyphspek.openTrustPanel",
     "onCommand:glyphspek.loadRunBundle",
     "onCommand:glyphspek.runGovernedTask",
@@ -127,25 +128,123 @@
       "activitybar": [
         {
           "id": "glyphspek",
-          "title": "GlyphSpek",
+          "title": "Governed Runs",
+          "icon": "media/icons/gs-run-bar.svg"
+        },
+        {
+          "id": "glyphspek-trace",
+          "title": "Trace / Provenance",
+          "icon": "media/icons/gs-trace-bar.svg"
+        },
+        {
+          "id": "glyphspek-policy",
+          "title": "Policy-as-code",
+          "icon": "media/icons/gs-policy-bar.svg"
+        },
+        {
+          "id": "glyphspek-verifier",
+          "title": "Independent Verifier",
           "icon": "media/icons/gs-activitybar.svg"
+        },
+        {
+          "id": "glyphspek-egress",
+          "title": "Egress / Network",
+          "icon": "media/icons/gs-network-bar.svg"
+        },
+        {
+          "id": "glyphspek-modelcalls",
+          "title": "Model Calls / Actors",
+          "icon": "media/icons/gs-broker-bar.svg"
+        },
+        {
+          "id": "glyphspek-workspace",
+          "title": "Workspace",
+          "icon": "media/icons/gs-worktree-bar.svg"
+        },
+        {
+          "id": "glyphspek-search",
+          "title": "Search",
+          "icon": "media/icons/gs-search-bar.svg"
         }
       ]
     },
     "views": {
       "glyphspek": [
         {
+          "id": "glyphspek.runs.cards",
+          "name": "Governed Runs",
+          "type": "webview",
+          "icon": "media/icons/gs-run.svg",
+          "contextualTitle": "GlyphSpek Governed Runs"
+        },
+        {
+          "id": "glyphspek.runs",
+          "name": "Runs (list)",
+          "icon": "media/icons/gs-run.svg",
+          "contextualTitle": "GlyphSpek Governed Runs (list)"
+        },
+        {
           "id": "glyphspek.chat",
           "name": "Chat",
           "type": "webview",
           "icon": "media/icons/gs-activitybar.svg",
           "contextualTitle": "GlyphSpek Chat"
-        },
+        }
+      ],
+      "glyphspek-trace": [
         {
-          "id": "glyphspek.runs",
-          "name": "Governed Runs",
-          "icon": "media/icons/gs-run.svg",
-          "contextualTitle": "GlyphSpek Governed Runs"
+          "id": "glyphspek.surface.trace",
+          "name": "Trace / Provenance",
+          "icon": "media/icons/gs-trace.svg",
+          "contextualTitle": "GlyphSpek Trace"
+        }
+      ],
+      "glyphspek-policy": [
+        {
+          "id": "glyphspek.surface.policy",
+          "name": "Policy-as-code",
+          "icon": "media/icons/gs-policy.svg",
+          "contextualTitle": "GlyphSpek Policy"
+        }
+      ],
+      "glyphspek-verifier": [
+        {
+          "id": "glyphspek.surface.verifier",
+          "name": "Independent Verifier",
+          "icon": "media/icons/gs-verifier.svg",
+          "contextualTitle": "GlyphSpek Verifier"
+        }
+      ],
+      "glyphspek-egress": [
+        {
+          "id": "glyphspek.surface.egress",
+          "name": "Egress / Network",
+          "icon": "media/icons/gs-network.svg",
+          "contextualTitle": "GlyphSpek Egress"
+        }
+      ],
+      "glyphspek-modelcalls": [
+        {
+          "id": "glyphspek.surface.modelcalls",
+          "name": "Model Calls / Actors",
+          "icon": "media/icons/gs-broker.svg",
+          "contextualTitle": "GlyphSpek Model Calls"
+        }
+      ],
+      "glyphspek-workspace": [
+        {
+          "id": "glyphspek.surface.workspace",
+          "name": "Workspace",
+          "icon": "media/icons/gs-worktree.svg",
+          "contextualTitle": "GlyphSpek Workspace"
+        }
+      ],
+      "glyphspek-search": [
+        {
+          "id": "glyphspek.surface.search",
+          "name": "Search",
+          "icon": "media/icons/gs-search.svg",
+          "contextualTitle": "GlyphSpek Search"
         }
       ]
     },
@@ -153,6 +252,34 @@
       {
         "view": "glyphspek.runs",
         "contents": "No governed runs yet.\n\nGlyphSpek governs an agent's egress (metadata-only) and signs a tamper-evident trace. Open a Governed Terminal to start an honest, governed (soft, unsandboxed) session.\n\n[New Governed Terminal](command:glyphspek.runs.newGovernedTerminal)\n\nOr open the Trust Panel to load an existing run bundle.\n[Open Trust Panel](command:glyphspek.runs.openTrustPanel)"
+      },
+      {
+        "view": "glyphspek.surface.trace",
+        "contents": "The hash-chained, tamper-evident TRACE for the focused run.\n\nThe trace is rendered as evidence inside the Trust Panel today. This dedicated surface is a follow-on; open the Trust Panel to inspect the trace.\n\n[Open Trust Panel](command:glyphspek.runs.openTrustPanel)"
+      },
+      {
+        "view": "glyphspek.surface.policy",
+        "contents": "POLICY-as-code decisions (allow / deny / ask) for governed runs.\n\nPolicy decisions render inside the Trust Panel today. This dedicated surface is a follow-on.\n\n[Open Trust Panel](command:glyphspek.runs.openTrustPanel)"
+      },
+      {
+        "view": "glyphspek.surface.verifier",
+        "contents": "The INDEPENDENT verifier re-runs the declared checks in a clean trust domain and signs a verdict.\n\nA verdict is product-authoritative only after the Trust Panel's in-browser Ed25519 signature gate passes.\n\n[Open Trust Panel](command:glyphspek.runs.openTrustPanel)"
+      },
+      {
+        "view": "glyphspek.surface.egress",
+        "contents": "EGRESS / network posture for governed runs.\n\nToday the soft governed terminal is observe-and-trace (metadata-only) — NOT a hard allowlist. The honest egress evidence renders inside the Trust Panel.\n\n[Open Trust Panel](command:glyphspek.runs.openTrustPanel)"
+      },
+      {
+        "view": "glyphspek.surface.modelcalls",
+        "contents": "MODEL CALLS / actors — the brokered model RPCs and the bound actor.\n\nModel-call evidence renders inside the Trust Panel / Chat today. This dedicated surface is a follow-on.\n\n[Open Trust Panel](command:glyphspek.runs.openTrustPanel)"
+      },
+      {
+        "view": "glyphspek.surface.workspace",
+        "contents": "WORKSPACE files, scoped to the focused run.\n\nThe per-run changed-file list with provenance dots lives in the Governed Runs view. Open it to see what the focused run changed.\n\n[Open Trust Panel](command:glyphspek.runs.openTrustPanel)"
+      },
+      {
+        "view": "glyphspek.surface.search",
+        "contents": "Scoped SEARCH across the workspace.\n\nThis dedicated surface is a follow-on; use the stock Search for now."
       }
     ],
     "menus": {
@@ -239,7 +366,7 @@
     "bundle:supervisor": "node scripts/build-supervisor.mjs",
     "compile": "npm run bundle:supervisor && tsc -p .",
     "//test": "Explicit curated list (NOT a glob — a broad glob has caused env inspector-port hangs here). When you add a new test/*.test.mjs, ADD IT TO THIS LIST or CI stays green without it.",
-    "test": "npm run bundle:supervisor && tsc -p . && node --test test/inlineScript.test.mjs test/configScope.test.mjs test/supervisorRunner.test.mjs test/policyHash.test.mjs test/bridgeProtocol.test.mjs test/bridgeContractConformance.test.mjs test/bridge.test.mjs test/bridgeServerSpawn.test.mjs test/liveRunStream.test.mjs test/runEventProtocol.test.mjs test/liveRunModel.test.mjs test/mockRunStream.test.mjs test/liveReducerGolden.test.mjs test/chatViewModel.test.mjs test/chatDemoState.test.mjs test/chatModelSelection.test.mjs test/operatorGesture.test.mjs test/runGovernedTaskGate.test.mjs test/webviewGestureGate.test.mjs test/liveSchemaGate.test.mjs test/governedTerminalEnv.test.mjs test/governedTerminalSession.test.mjs test/openGovernedTerminalCommand.test.mjs test/openChatCommand.test.mjs test/governedTerminalResolution.test.mjs test/agentCliCodex.test.mjs test/iconSpriteInjection.test.mjs test/livePanelLabels.test.mjs test/liveRunTrustIngestion.test.mjs test/runTrustBadge.test.mjs test/governedRunsModel.test.mjs test/governedRunsView.test.mjs test/agentLaunch.test.mjs test/openChatBinaryPin.test.mjs test/agentBinaryIdentity.test.mjs test/ptyHost.test.mjs test/chatTerminalView.test.mjs test/loginShellResolve.test.mjs test/nodePtyBaseDirs.test.mjs test/chatSendBridge.test.mjs test/nativeChatCommand.test.mjs test/chatParticipantAgent.test.mjs test/chatProviderFailClosed.test.mjs test/chatTurnSerialization.test.mjs test/agenticBuildReview.test.mjs test/agenticBuildBridge.test.mjs test/agenticBuildPromotion.test.mjs test/promoteChatToBuildCommand.test.mjs test/frictionSurface.test.mjs test/statusBarSegments.test.mjs test/haloChrome.test.mjs test/authorityLadder.test.mjs",
+    "test": "npm run bundle:supervisor && tsc -p . && node --test test/inlineScript.test.mjs test/configScope.test.mjs test/supervisorRunner.test.mjs test/policyHash.test.mjs test/bridgeProtocol.test.mjs test/bridgeContractConformance.test.mjs test/bridge.test.mjs test/bridgeServerSpawn.test.mjs test/liveRunStream.test.mjs test/runEventProtocol.test.mjs test/liveRunModel.test.mjs test/mockRunStream.test.mjs test/liveReducerGolden.test.mjs test/chatViewModel.test.mjs test/chatDemoState.test.mjs test/chatModelSelection.test.mjs test/operatorGesture.test.mjs test/runGovernedTaskGate.test.mjs test/webviewGestureGate.test.mjs test/liveSchemaGate.test.mjs test/governedTerminalEnv.test.mjs test/governedTerminalSession.test.mjs test/openGovernedTerminalCommand.test.mjs test/openChatCommand.test.mjs test/governedTerminalResolution.test.mjs test/agentCliCodex.test.mjs test/iconSpriteInjection.test.mjs test/livePanelLabels.test.mjs test/liveRunTrustIngestion.test.mjs test/runTrustBadge.test.mjs test/governedRunsModel.test.mjs test/governedRunsView.test.mjs test/governedRunsCard.test.mjs test/governedRunsCardView.test.mjs test/agentLaunch.test.mjs test/openChatBinaryPin.test.mjs test/agentBinaryIdentity.test.mjs test/ptyHost.test.mjs test/chatTerminalView.test.mjs test/loginShellResolve.test.mjs test/nodePtyBaseDirs.test.mjs test/chatSendBridge.test.mjs test/nativeChatCommand.test.mjs test/chatParticipantAgent.test.mjs test/chatProviderFailClosed.test.mjs test/chatTurnSerialization.test.mjs test/agenticBuildReview.test.mjs test/agenticBuildBridge.test.mjs test/agenticBuildPromotion.test.mjs test/promoteChatToBuildCommand.test.mjs test/frictionSurface.test.mjs test/statusBarSegments.test.mjs test/haloChrome.test.mjs test/authorityLadder.test.mjs test/provenanceGutter.test.mjs",
     "package": "npm run bundle:supervisor && tsc -p . && vsce package --no-dependencies"
   },
   "devDependencies": {
