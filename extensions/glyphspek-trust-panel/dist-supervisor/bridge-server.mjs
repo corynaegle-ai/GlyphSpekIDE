@@ -1,8 +1,8 @@
 // ../spikes/p0-supervisor/bridge-server.ts
 import { createHash as createHash3 } from "node:crypto";
-import { readFileSync as readFileSync3, statSync as statSync2 } from "node:fs";
+import { readFileSync as readFileSync4, statSync as statSync2 } from "node:fs";
 import { spawnSync } from "node:child_process";
-import { join as join6 } from "node:path";
+import { join as join7 } from "node:path";
 
 // ../spikes/p0-supervisor/run.ts
 import { randomUUID } from "node:crypto";
@@ -2905,6 +2905,8 @@ async function* runAgenticBuild(req, opts = {}) {
 // ../spikes/p0-model-gateway/governed-agentic-run.ts
 var execFileAsync2 = promisify2(execFile2);
 var AGENTIC_RUN_POSTURE = "governed-unsandboxed";
+var NOT_VERIFIED_CHECK_NAME = "changed-files only \u2014 NOT independently verified by a build/test";
+var VERIFY_DEFAULT_TIMEOUT_MS = 15 * 6e4;
 var AGENTIC_AGENT_BACKEND = "codex-cli";
 function checkStatusForExit(exitCode) {
   return exitCode === 0 ? "pass" : "fail";
@@ -2923,9 +2925,17 @@ async function runVerifyCheck(command, cwd, env, timeoutMs) {
     });
     return { name, command: [...command], status: "pass" };
   } catch (err) {
-    const code = err.code;
-    if (typeof code === "number") {
-      return { name, command: [...command], status: checkStatusForExit(code) };
+    const e = err;
+    const timedOut = e.killed === true || e.signal === "SIGTERM";
+    if (timedOut) {
+      return {
+        name: `${name} \u2014 verifier timed out after ${Math.round(timeoutMs / 1e3)}s`,
+        command: [...command],
+        status: "error"
+      };
+    }
+    if (typeof e.code === "number") {
+      return { name, command: [...command], status: checkStatusForExit(e.code) };
     }
     return { name, command: [...command], status: "error" };
   }
@@ -3064,25 +3074,30 @@ async function runGovernedAgenticBuild(opts) {
   const codexOk = agentic !== void 0 && agentic.exitCode === 0 && !buildError;
   transition(codexOk ? "completed" : "failed", codexOk ? "agentic build completed" : `agentic build failed: ${buildError ?? `codex exit ${agentic?.exitCode ?? "unknown"}`}`);
   const checks = [];
-  if (opts.verifyCommand && opts.verifyCommand.length > 0) {
+  const verifyRan = !!(opts.verifyCommand && opts.verifyCommand.length > 0);
+  if (verifyRan) {
     const check = await runVerifyCheck(
       opts.verifyCommand,
       opts.cwd,
       governedEnv,
-      opts.timeoutMs ?? 12e4
+      // Generous but BOUNDED: Swift/Xcode test builds are slow. We give the check a
+      // wide window (default 15 min) yet still hard-bound it, so a hung toolchain
+      // surfaces an honest "verifier timed out" rather than hanging the run. A caller
+      // may raise it further via `timeoutMs` (e.g. an even larger Xcode build).
+      opts.timeoutMs ?? VERIFY_DEFAULT_TIMEOUT_MS
     );
     checks.push(check);
   } else {
     const changed = agentic?.changedFiles.length ?? 0;
     checks.push({
-      name: "changed-files",
+      name: `${NOT_VERIFIED_CHECK_NAME} (${changed} file(s) changed)`,
       command: [],
-      status: changed > 0 ? "pass" : "fail"
+      status: "skipped"
     });
   }
   const anyFail = checks.some((c) => c.status === "fail");
   const anyError = checks.some((c) => c.status === "error") || buildError !== void 0;
-  const overallVerdict = anyError ? "error" : anyFail ? "fail" : "pass";
+  const overallVerdict = anyError ? "error" : anyFail ? "fail" : verifyRan ? "pass" : "fail";
   let traceRootHash = lastTraceHash ?? GENESIS_HASH;
   try {
     const events = readTrace(tracePath);
@@ -3102,7 +3117,147 @@ async function runGovernedAgenticBuild(opts) {
     posture: AGENTIC_RUN_POSTURE,
     credentialPosture,
     ...agentic ? { agentic } : {},
-    verdict
+    verdict,
+    verifyRan
+  };
+}
+
+// ../spikes/p0-model-gateway/verify-command.ts
+import { existsSync as existsSync2, readFileSync as readFileSync3, readdirSync } from "node:fs";
+import { join as join6 } from "node:path";
+import { execFileSync as execFileSync2 } from "node:child_process";
+var VERIFY_OVERRIDE_PATH = ".glyphspek/verify.json";
+var defaultVerifyResolverDeps = {
+  fileExists: (p) => existsSync2(p),
+  readFile: (p) => readFileSync3(p, "utf8"),
+  listDir: (dir) => {
+    try {
+      return readdirSync(dir);
+    } catch {
+      return [];
+    }
+  },
+  runXcodebuildList: (cwd) => {
+    try {
+      return execFileSync2("xcodebuild", ["-list", "-json"], {
+        cwd,
+        encoding: "utf8",
+        // `xcodebuild -list` is metadata-only and fast; keep a tight bound so a
+        // missing/hung toolchain falls back to the honest `none` rather than stalling.
+        timeout: 3e4,
+        maxBuffer: 8 * 1024 * 1024,
+        stdio: ["ignore", "pipe", "ignore"]
+      });
+    } catch {
+      return void 0;
+    }
+  }
+};
+function asStringArray(v) {
+  if (Array.isArray(v) && v.length > 0 && v.every((x) => typeof x === "string" && x.length > 0)) {
+    return v;
+  }
+  return void 0;
+}
+function readOverride(cwd, deps) {
+  const path3 = join6(cwd, VERIFY_OVERRIDE_PATH);
+  if (!deps.fileExists(path3)) return void 0;
+  let raw;
+  try {
+    raw = JSON.parse(deps.readFile(path3));
+  } catch {
+    return void 0;
+  }
+  const bare = asStringArray(raw);
+  if (bare) return bare;
+  if (raw && typeof raw === "object") {
+    const obj = raw;
+    const verify = asStringArray(obj.verify);
+    if (verify) return verify;
+    for (const field of ["verify", "verificationTargets"]) {
+      const matrix = obj[field];
+      if (Array.isArray(matrix)) {
+        for (const row of matrix) {
+          const argv = asStringArray(row);
+          if (argv) return argv;
+        }
+      }
+    }
+  }
+  return void 0;
+}
+function resolveXcodeScheme(cwd, preferredName, deps) {
+  const out = deps.runXcodebuildList(cwd);
+  if (!out) return void 0;
+  let parsed;
+  try {
+    parsed = JSON.parse(out);
+  } catch {
+    return void 0;
+  }
+  if (!parsed || typeof parsed !== "object") return void 0;
+  const root = parsed;
+  const container = root.project ?? root.workspace;
+  const schemes = asStringArray(container?.schemes);
+  if (!schemes || schemes.length === 0) return void 0;
+  if (preferredName) {
+    const match = schemes.find((s) => s === preferredName);
+    if (match) return match;
+  }
+  return schemes[0];
+}
+function xcodeProjectBaseName(entries) {
+  const proj = entries.find((e) => e.endsWith(".xcodeproj") || e.endsWith(".xcworkspace"));
+  if (!proj) return void 0;
+  return proj.replace(/\.(xcodeproj|xcworkspace)$/, "");
+}
+function resolveVerifyCommand(cwd, deps = defaultVerifyResolverDeps) {
+  const override = readOverride(cwd, deps);
+  if (override) {
+    return { command: override, label: override.join(" "), source: "override" };
+  }
+  const entries = deps.listDir(cwd);
+  const has = (name) => deps.fileExists(join6(cwd, name));
+  if (has("Package.swift")) {
+    return { command: ["swift", "test"], label: "swift test", source: "swiftpm" };
+  }
+  const hasXcode = entries.some(
+    (e) => e.endsWith(".xcodeproj") || e.endsWith(".xcworkspace")
+  );
+  if (hasXcode) {
+    const preferred = xcodeProjectBaseName(entries);
+    const scheme = resolveXcodeScheme(cwd, preferred, deps);
+    if (!scheme) {
+      return {
+        source: "none",
+        note: `an Xcode project was detected but no scheme could be resolved (xcodebuild may be unavailable, or the project lists no shared scheme). Add ${VERIFY_OVERRIDE_PATH} with the exact check argv, e.g. ["xcodebuild","test","-scheme","<YourScheme>","-destination","platform=macOS"].`
+      };
+    }
+    const command = [
+      "xcodebuild",
+      "test",
+      "-scheme",
+      scheme,
+      "-destination",
+      "platform=macOS"
+    ];
+    return { command, label: "xcodebuild test", source: "xcode" };
+  }
+  if (has("package.json")) {
+    try {
+      const pkg = JSON.parse(deps.readFile(join6(cwd, "package.json")));
+      if (pkg.scripts && typeof pkg.scripts.test === "string" && pkg.scripts.test.trim()) {
+        return { command: ["npm", "test"], label: "npm test", source: "npm" };
+      }
+    } catch {
+    }
+  }
+  if (entries.some((e) => /\.test\.(js|ts|mjs)$/.test(e))) {
+    return { command: ["node", "--test"], label: "node --test", source: "node" };
+  }
+  return {
+    source: "none",
+    note: `no build/test check could be auto-detected for this repo. The verdict will be labeled "changed-files only \u2014 NOT independently verified by a build/test". Add ${VERIFY_OVERRIDE_PATH} (a JSON array of strings) with the exact check argv to get a real verified verdict, e.g. ["npm","test"] or ["xcodebuild","test","-scheme","<YourScheme>","-destination","platform=macOS"].`
   };
 }
 
@@ -3121,7 +3276,7 @@ function selfHashCheck(selfPath, pinnedSha) {
   }
   let actual;
   try {
-    actual = createHash3("sha256").update(readFileSync3(selfPath)).digest("hex");
+    actual = createHash3("sha256").update(readFileSync4(selfPath)).digest("hex");
   } catch (err) {
     return {
       ok: false,
@@ -3150,7 +3305,7 @@ function captureCodexBinaryIdentity(codexPath) {
   }
   if (sizeBytes === void 0 || sizeBytes <= CODEX_HASH_CAP_BYTES) {
     try {
-      const hash = createHash3("sha256").update(readFileSync3(codexPath)).digest("hex");
+      const hash = createHash3("sha256").update(readFileSync4(codexPath)).digest("hex");
       identity.sha256 = hash;
     } catch {
     }
@@ -3286,8 +3441,11 @@ function projectAgenticBuildReview(runId, prompt, result) {
     egress,
     verdict: {
       overall: verdict.overallVerdict,
-      // The in-line check ran over the worktree → full assurance for this path.
-      assurance: "full",
+      // HONEST ASSURANCE: 'full' ONLY when a REAL build/test check ran over the
+      // worktree. When NO independent check ran (changed-files only, verifyRan:false)
+      // the assurance is 'degraded' — the verdict is NOT a fully-verified PASS and a
+      // consumer must not render it as one.
+      assurance: result.verifyRan === false ? "degraded" : "full",
       checks: verdict.checks.map((c) => ({ name: c.name, status: c.status })),
       ...verdict.signature ? {
         signature: {
@@ -4208,7 +4366,7 @@ var BridgeServer = class {
     const abort = new AbortController();
     try {
       const buildRun = createRun(this.agentic?.runsBaseDir ?? this.runsBaseDir);
-      const tracePath = join6(runSubdirPath(buildRun.dir, "trace"), "trace.jsonl");
+      const tracePath = join7(runSubdirPath(buildRun.dir, "trace"), "trace.jsonl");
       const sink = createTraceWriter(tracePath);
       const buildLifecycle = new RunLifecycle(buildRun.state);
       const buildServerRun = {
@@ -4261,6 +4419,20 @@ var BridgeServer = class {
       });
       this.emitAgenticBuildEvent({ runId, type: "state", state: "approved" });
       const codexPath = this.agentic?.codexPath ?? resolveOnPath("codex") ?? "";
+      let verifyCommand = this.agentic?.verifyCommand;
+      if (!verifyCommand) {
+        const resolved = resolveVerifyCommand(cwd);
+        if (resolved.command) {
+          verifyCommand = resolved.command;
+          this.logLine(
+            `[bridge-server] [build ${runId}] verify check: ${resolved.label} (source=${resolved.source}).`
+          );
+        } else {
+          this.logLine(
+            `[bridge-server] [build ${runId}] NO build/test check resolved (source=${resolved.source}); verdict will be labeled NOT-independently-verified.` + (resolved.note ? ` ${resolved.note}` : "")
+          );
+        }
+      }
       const runner = this.agentic?.runner ?? runGovernedAgenticBuild;
       const result = await runner({
         prompt,
@@ -4276,7 +4448,7 @@ var BridgeServer = class {
         // finalizes honestly rather than hanging.
         signal: abort.signal,
         ...this.agentic?.runsBaseDir ? { runsBaseDir: this.agentic.runsBaseDir } : this.runsBaseDir ? { runsBaseDir: this.runsBaseDir } : {},
-        ...this.agentic?.verifyCommand ? { verifyCommand: this.agentic.verifyCommand } : {},
+        ...verifyCommand ? { verifyCommand } : {},
         ...this.agentic?.denyDirectIp !== void 0 ? { denyDirectIp: this.agentic.denyDirectIp } : {},
         // Stream each governed-run event out as a build/event tagged with our runId.
         emit: (event) => this.streamGovernedAgenticEvent(runId, event),

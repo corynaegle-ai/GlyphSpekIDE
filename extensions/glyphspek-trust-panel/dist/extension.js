@@ -1776,6 +1776,16 @@ function activate(context) {
     // per-surface detail is a deliberate follow-on (§1.11). NOTE: making the rail
     // governance-ONLY (hiding the stock Explorer/Extensions icons) is a FORK tweak — an
     // extension cannot hide stock containers — deferred to the integration fork build.
+    //
+    // ROBUST REGISTRATION (defense-in-depth): createTreeView THROWS if a view id is not yet
+    // registered in the manifest. After adding a NEW activity-bar container, the host only
+    // fully registers it on a FULL RELAUNCH — a Reload Window can leave the just-added
+    // container un-registered, so createTreeView for it throws. We wrap each call in its own
+    // try/catch: a successfully-created view still registers, a not-yet-registered one is
+    // skipped (logged, not surfaced) so activate() never throws out / pops a "No view is
+    // registered with id: …" notification. The user picks up the new surfaces on next FULL
+    // relaunch; this guard covers the reload-window window. (The views ARE declared in
+    // package.json — this is purely defensive registration, not a removal.)
     const SURFACE_VIEW_IDS = [
         'glyphspek.surface.trace',
         'glyphspek.surface.policy',
@@ -1789,11 +1799,23 @@ function activate(context) {
         getTreeItem: (e) => e,
         getChildren: () => [],
     };
+    const surfaceOutput = vscode.window.createOutputChannel('GlyphSpek');
+    context.subscriptions.push(surfaceOutput);
     for (const id of SURFACE_VIEW_IDS) {
-        context.subscriptions.push(vscode.window.createTreeView(id, {
-            treeDataProvider: emptySurfaceProvider,
-            showCollapseAll: false,
-        }));
+        try {
+            context.subscriptions.push(vscode.window.createTreeView(id, {
+                treeDataProvider: emptySurfaceProvider,
+                showCollapseAll: false,
+            }));
+        }
+        catch (err) {
+            // Not-yet-registered (e.g. after a Reload Window that didn't pick up a newly-added
+            // activity-bar container) — skip it silently and CONTINUE; it registers on next
+            // FULL relaunch. Never let this throw out of activate() / surface a notification.
+            const message = String(err?.message ?? err);
+            surfaceOutput.appendLine(`[host] surface view "${id}" not registered yet (${message}); skipping — it registers on a full relaunch.`);
+            console.warn(`[glyphspek] skipping un-registered surface view "${id}": ${message}`);
+        }
     }
     // ACTIVITY-BAR "Chat" view (the SIDEBAR "chat that's a terminal"). A webview-view
     // hosting an xterm.js terminal connected to a real PTY running the user's
@@ -2105,14 +2127,19 @@ async function promoteChatToBuild(context, gate, output, intentArg) {
     if (!intent && candidateCwd) {
         // Only prompt for an intent when there IS a workspace folder — otherwise the
         // preflight below surfaces the no-folder error first (don't ask for a task we
-        // can't run).
+        // can't run). validateInput REFUSES to submit a blank/whitespace-only task (it
+        // shows an inline error and re-prompts in place) so an empty Enter can never reach
+        // the preflight's "no build task given" path — only Escape (→ undefined) cancels.
         intent = await vscode.window.showInputBox({
             prompt: 'GlyphSpek — what should the governed agent build? (it WILL edit files + run commands)',
             placeHolder: 'e.g. "add input validation to the signup form and a test for it"',
             ignoreFocusOut: true,
+            validateInput: (v) => v.trim().length === 0
+                ? 'Enter a task — what should the agent build? (it WILL edit files + run commands)'
+                : undefined,
         });
         if (intent === undefined)
-            return; // cancelled the quick-input
+            return; // cancelled the quick-input (Escape)
     }
     const preflight = (0, agenticBuildPromotion_1.resolveBuildPreflight)(candidateCwd, intent);
     if (!preflight.ok) {
