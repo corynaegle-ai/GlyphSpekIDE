@@ -112,6 +112,16 @@ class SupervisorBridge {
         this.onChatDelta = handler;
     }
     /**
+     * Register a handler for streamed `build/event` notifications (Phase C agentic
+     * build). After a {@link startAgenticBuild} ack, the supervisor emits a sequence of
+     * {@link AgenticBuildStreamEvent}s tagged with the same `runId`; this sink receives
+     * each one so the build UI can surface progress (state/command/summary/fileChange)
+     * and finalize on the terminal `result` (carrying the AgenticBuildReview) or `error`.
+     */
+    setBuildEventHandler(handler) {
+        this.onBuildEvent = handler;
+    }
+    /**
      * Connect to the supervisor: hash-pin the binary, spawn it, and run the
      * version-compatibility handshake. Resolves (never rejects) with a distinct
      * status. On any non-'connected' status the child (if spawned) is torn down.
@@ -358,6 +368,59 @@ class SupervisorBridge {
         return { ok: true, turnId: result.turnId };
     }
     /* ============================================================== *
+     * AGENTIC BUILD RPC (Phase C — the chat→ACTOR promotion)
+     * ============================================================== */
+    /**
+     * Start a GOVERNED AGENTIC BUILD (`build/start`). The params carry WHAT to build
+     * (`prompt`), WHERE (`cwd`), and the EXPLICIT authority grant (`approved`); there is
+     * NO credential field — codex authenticates from its own ~/.codex store and egress
+     * is governed supervisor-side.
+     *
+     * AUTHORITY GATE (the load-bearing invariant): the supervisor REFUSES the build
+     * (terminal `build/event` error, codex NOT spawned) unless `approved === true`. This
+     * client method does NOT itself synthesize approval — the caller is responsible for
+     * the up-front operator approval before passing `approved: true` (see the promotion
+     * command). A defensive client-side check refuses to send a request whose `approved`
+     * is not strictly `true`, so a malformed/forged params object can never reach the wire
+     * as an approved build.
+     *
+     * ACK-THEN-NOTIFICATIONS (mirrors run/start / chat/send): this method resolves with
+     * the supervisor's ACK ({ runId }). The build then STREAMS as `build/event`
+     * notifications tagged with that same `runId`, delivered to the sink registered via
+     * {@link setBuildEventHandler}. Register the build-event handler BEFORE calling this
+     * (an event could race the ack). Resolves (never rejects); a transport/server error
+     * resolves as `{ ok: false }` so the build UI renders an honest failure rather than
+     * throwing.
+     */
+    async startAgenticBuild(params) {
+        if (!this.ready || !this.child || this.closed) {
+            const reason = this.closeReason || 'bridge is not connected (handshake not completed).';
+            return { ok: false, reason };
+        }
+        if (typeof params.prompt !== 'string' || params.prompt.trim().length === 0) {
+            return { ok: false, reason: 'startAgenticBuild requires a non-empty prompt.' };
+        }
+        if (typeof params.cwd !== 'string' || params.cwd.trim().length === 0) {
+            return { ok: false, reason: 'startAgenticBuild requires an absolute cwd.' };
+        }
+        // DEFENSE-IN-DEPTH AUTHORITY GUARD: never put an un-approved (or non-strictly-true)
+        // build request on the wire. The supervisor also refuses, but refusing here means a
+        // forged/partial params object cannot even reach the sensitive boundary.
+        if (params.approved !== true) {
+            return { ok: false, reason: 'startAgenticBuild refused: build is not approved (no authority grant).' };
+        }
+        const response = await this.request(bridgeProtocol_1.BridgeMethod.AgenticBuildStart, params);
+        if (response.error) {
+            this.opts.log.appendLine(`[bridge] build/start error ${response.error.code}: ${response.error.message}`);
+            return { ok: false, reason: response.error.message };
+        }
+        const result = response.result;
+        if (!result || typeof result.runId !== 'string' || result.runId.length === 0) {
+            return { ok: false, reason: 'malformed build/start ack from supervisor (no runId).' };
+        }
+        return { ok: true, runId: result.runId };
+    }
+    /* ============================================================== *
      * GOVERNED TERMINAL SESSION RPC (M7 — the in-IDE Governed Terminal)
      * ============================================================== */
     /**
@@ -570,12 +633,18 @@ class SupervisorBridge {
         }
         if ((0, bridgeProtocol_1.isNotification)(parsed)) {
             const note = parsed;
-            // Route by notification method: chat/delta feeds the chat UI, everything else
-            // (run/event) feeds the Trust Panel. A chat-delta is NEVER mis-delivered to the
-            // run-event sink (and vice-versa).
+            // Route by notification method: chat/delta feeds the chat UI, build/event feeds
+            // the agentic-build progress + review sink, and everything else (run/event) feeds
+            // the Trust Panel. Each notification stream is delivered ONLY to its own sink — a
+            // build-event is NEVER mis-delivered to the chat or run-event sink (and vice-versa).
             if (note.method === bridgeProtocol_1.BridgeNotification.ChatDelta) {
                 if (this.onChatDelta)
                     this.onChatDelta(note.params);
+                return;
+            }
+            if (note.method === bridgeProtocol_1.BridgeNotification.AgenticBuildEvent) {
+                if (this.onBuildEvent)
+                    this.onBuildEvent(note.params);
                 return;
             }
             if (this.onRunEvent)

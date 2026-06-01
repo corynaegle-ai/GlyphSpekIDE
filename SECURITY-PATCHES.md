@@ -239,6 +239,118 @@ key is added at apply time by whoever applies the patch.
 
 ---
 
+## PATCH-002 — Workbench chat-default resolver honors the first-party GlyphSpek vendor
+
+- **Status:** `APPLIED` (2026-06-01).
+- **Required:** for the de-Copilot fork to answer in the stock "Build with Agent" chat panel.
+  Without it the panel's default "Auto" send throws "Language model unavailable" and never
+  reaches the GlyphSpek chat participant.
+
+### Patched symbol
+
+`ExtHostLanguageModels.getDefaultLanguageModel`
+(`src/vs/workbench/api/common/extHostLanguageModels.ts`). The resolver now resolves the
+chat-default model in two passes: (1) keep upstream's preference for a Copilot chat-default
+(vestigial — no Copilot provider ships in this build), THEN (2) fall back to the chat-default
+model whose `vendor === GLYPHSPEK_DEFAULT_MODEL_VENDOR` (`'glyphspek'`, a named constant
+defined in the same file with a comment, kept in sync with the extension's registered vendor
+`CHAT_MODEL_VENDOR`). It deliberately does **not** fall back to an arbitrary non-Copilot
+vendor: if neither a Copilot nor a `glyphspek` chat-default exists it **fails closed**
+(returns `undefined` → honest "Language model unavailable") so a future proposal-granted or
+developer provider cannot win the "Auto" picker by registration order.
+
+This patch is load-bearing in concert with two non-workbench changes (recorded here for the
+full picture; only the `.ts` resolver is the `src/vs/**` security diff):
+
+- the embedded extension publishes exactly one language model marked `isDefault: true`,
+  vendor `glyphspek` (`extension/src/chatParticipant.ts`,
+  `extension/package.json` `contributes.languageModelChatProviders` + `chatParticipants`);
+- `product.json` grants the `defaultChatParticipant` + `chatProvider` API proposals to
+  `glyphspek.glyphspek` (`extensionEnabledApiProposals`). The `chatProvider` grant is what
+  lets the host honor the model's `isDefault`/`isUserSelectable` flags and land
+  `isDefault: true` in `metadata.isDefaultForLocation[ChatAgentLocation.Chat]` — the exact
+  field this resolver reads.
+
+### Threat addressed (rationale)
+
+The de-Copilot fork strips the Copilot language-model provider (see GATE-002), but the
+workbench's default chat-model resolver, `getDefaultLanguageModel`, was hard-wired to prefer
+**only** `vendor === COPILOT_VENDOR_ID`. With Copilot gone, the resolver found no default and
+the stock chat input on "Auto" (an empty `userSelectedModelId`) threw "Language model
+unavailable" — the panel refused to send and never reached the GlyphSpek chat participant.
+This is **not** a security regression in the trust sense, but it breaks the fork's only chat
+surface, and the tightening below **is** a trust property: the resolver must resolve the
+**GlyphSpek-owned governed provider** as the implicit "Auto" default, never some other
+vendor's model. A non-GlyphSpek provider silently becoming the "Auto" default would route a
+user's unattributed prompt through an unintended (and potentially un-governed) model with no
+visible selection — so the resolver fails closed to a GlyphSpek-only invariant.
+
+### Why extension/supervisor boundaries are insufficient
+
+- The resolver `getDefaultLanguageModel` lives in the **workbench extension host**
+  (`src/vs/workbench/api/common/`), not in any extension. An extension can register/publish a
+  model (and the GlyphSpek extension does, with `isDefault: true`), but it cannot change
+  which vendor the host *prefers* when picking the implicit default — the host's preference
+  order is fork-internal code. With the stock order honoring **only** Copilot, no published
+  metadata from any extension makes the host select a non-Copilot model as the "Auto"
+  default; the model exists and is user-selectable, yet the *implicit* default stays unset.
+- The supervisor governs the runs/terminals/chat GlyphSpek creates; it has no hook into the
+  host's default-model selection that the stock chat input consults before a participant is
+  ever invoked.
+- A `product.json`/manifest change alone cannot express "prefer vendor X for the chat
+  default": `product.json` grants proposals and configures defaults, but the vendor-preference
+  branch is procedural code inside the resolver. Hence a minimal workbench diff is required,
+  scoped to that one method plus a named constant.
+
+### Changed files
+
+- `src/vs/workbench/api/common/extHostLanguageModels.ts` — added the
+  `GLYPHSPEK_DEFAULT_MODEL_VENDOR = 'glyphspek'` named constant (with comment) and rewrote the
+  two-pass fallback in `getDefaultLanguageModel` to prefer that vendor's chat-default after
+  Copilot, failing closed otherwise. (The only `src/vs/**` security diff.)
+- `src/vs/workbench/api/test/common/extHostLanguageModels.test.ts` — the resolver/adversarial
+  acceptance test (see below).
+- *Non-workbench (recorded for context, not part of this `src/vs` diff):*
+  `extension/src/chatParticipant.ts` + `extension/package.json` (the `isDefault: true`,
+  vendor `glyphspek` model metadata); `product.json` `extensionEnabledApiProposals` granting
+  `defaultChatParticipant` + `chatProvider` to `glyphspek.glyphspek`.
+
+### Acceptance test
+
+- `src/vs/workbench/api/test/common/extHostLanguageModels.test.ts` —
+  `suite('ExtHostLanguageModels')`:
+  1. **Happy path:** with only the `glyphspek` chat-default provider registered (the shipped
+     config), `getDefaultLanguageModel` resolves the `glyphspek`/`glyphspek-codex-gateway`
+     model (chat keeps working on "Auto").
+  2. **Adversarial / order-independence:** a second non-Copilot `isDefault` provider (vendor
+     `'other'`) registers **before** the `glyphspek` one; the resolver still resolves the
+     `glyphspek` model, never `'other'` — registration order cannot hand "Auto" to a
+     non-GlyphSpek vendor.
+  3. **Fail-closed:** with only the `'other'` provider registered (no `glyphspek`, no
+     Copilot), `getDefaultLanguageModel` returns `undefined` (honest "Language model
+     unavailable"), proving a non-GlyphSpek default cannot win "Auto".
+- `extension/test/chatParticipantAgent.test.mjs` — asserts the embedded extension registers
+  its LM provider under `CHAT_MODEL_VENDOR` (`glyphspek`) and publishes the single model with
+  `{ id: CHAT_MODEL_ID, isDefault: true, isUserSelectable: true }` — the exact metadata the
+  resolver above depends on.
+
+### Rollback / rebase note
+
+- **Rollback:** revert `extHostLanguageModels.ts` (drop the constant + restore the stock
+  Copilot-only preference) and the test. The chat panel then regresses to "Language model
+  unavailable" on a de-Copilot build — so do not roll back unless a `product.json`-owned
+  default-model-vendor field (or an upstream change) can express a first-party default-model
+  vendor *without* a workbench diff. The extension's `isDefault`/vendor metadata and the
+  `chatProvider` proposal grant are independent and can stay.
+- **Rebase risk: LOW–MEDIUM.** `getDefaultLanguageModel` is small and stable upstream, but
+  upstream may refactor its default-model selection. On rebase, **re-apply the
+  vendor-preference fallback**: keep the Copilot pass first, then prefer
+  `vendor === GLYPHSPEK_DEFAULT_MODEL_VENDOR`, then fail closed. Re-verify upstream hasn't
+  renamed `isDefaultForLocation`/`ChatAgentLocation.Chat`/`COPILOT_VENDOR_ID`, and keep the
+  constant in sync with the extension's `CHAT_MODEL_VENDOR`.
+
+---
+
 ## GATE-002 — No-Copilot-runtime deny gate + Copilot-runtime removal (STUBBED)
 
 - **Status:** `APPLIED` (2026-05-30) — Part 1 (the honest deny gate) AND Part 2 (full

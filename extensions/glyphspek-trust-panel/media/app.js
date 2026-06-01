@@ -1816,6 +1816,23 @@ function setStatus(msg, kind) {
 const vscodeApi =
   typeof acquireVsCodeApi === 'function' ? acquireVsCodeApi() : null;
 
+/*
+ * SHARED HOST POSTER. acquireVsCodeApi() may be called only ONCE per webview, and
+ * app.js owns that single handle. live.js (the Agentic Build Review decision
+ * controls) posts to the host through this global instead of acquiring a second
+ * handle. It is a thin pass-through — the host is the trust boundary, this is only
+ * a message channel. No-op (returns false) when not hosted in a webview.
+ */
+window.GLYPHSPEK_POST = function (message) {
+  if (!vscodeApi) return false;
+  try {
+    vscodeApi.postMessage(message);
+    return true;
+  } catch (_) {
+    return false;
+  }
+};
+
 /**
  * Normalize the capstone-style actor-claims.json shape
  * ({ plan, summary, claimedFilesChanged, claimedChecks:[{name, claimedStatus}] })

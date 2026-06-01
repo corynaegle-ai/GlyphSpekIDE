@@ -20,6 +20,12 @@
 #     (5) Pinned hashes      — src/supervisorHash.ts BUNDLED_*_SHA256 (SOURCE)
 #                              must equal the sha256 of the EMBEDDED bundled
 #                              .mjs the runtime gates spawn.
+#     (6) API-proposal grants — every proposal the extension DECLARES
+#                              (package.json enabledApiProposals) must be GRANTED to
+#                              the real extension id (publisher.name) in
+#                              product.json extensionEnabledApiProposals. A declared
+#                              proposal with no grant, or a grant under the wrong id,
+#                              fails. product.json may grant a superset.
 #
 #   (5) is the load-bearing one: the extension's runtime refuses to spawn a
 #   supervisor bundle whose on-disk sha256 != the constant compiled into
@@ -218,6 +224,105 @@ else
 fi
 echo
 
+# ---- (6) API-proposal grant conformance (sweep finding #3) ------------------
+# The extension DECLARES the API proposals it needs in package.json
+# (enabledApiProposals, e.g. "defaultChatParticipant", which the chat participant's
+# isDefault:true depends on). The FORK GRANTS proposals per-extension in product.json
+# (extensionEnabledApiProposals["<publisher>.<name>"]). Nothing previously asserted
+# the two AGREE: a renamed publisher/name, a new declared proposal with no grant, or a
+# grant keyed to the WRONG id would silently disable the proposal at runtime (the chat
+# panel would stop defaulting / refuse to send) with a green build.
+#
+# This subgate asserts, for the REAL extension id (publisher.name, which surfaces (1/2)
+# already proved the embedded copy matches source on):
+#   - product.json grants that EXACT id (the granted id is not stale/misspelled), and
+#   - every proposal the extension declares in enabledApiProposals is in that grant.
+# product.json may grant a SUPERSET (extra granted proposals are fine); a DECLARED
+# proposal with NO grant — or a grant under the wrong id — FAILS.
+PRODUCT_JSON="$REPO_ROOT/product.json"
+if [ ! -f "$PRODUCT_JSON" ]; then
+	echo "FAIL: product.json not found at $PRODUCT_JSON (cannot verify proposal grants)"
+	drift=$((drift + 1))
+elif [ ! -f "$SRC_PKG" ] || [ ! -f "$EMB_PKG" ]; then
+	echo "FAIL: package.json missing — cannot verify API-proposal grant conformance"
+	drift=$((drift + 1))
+else
+	# The check runs against the SOURCE package.json (the canonical declaration); (1/2)
+	# already fail the gate when the embedded package.json drifts from source, so the
+	# SOURCE is authoritative for what the shipped extension declares.
+	PROPOSAL_REPORT="$(python3 - "$SRC_PKG" "$EMB_PKG" "$PRODUCT_JSON" <<'PY'
+import json, sys
+
+src = json.load(open(sys.argv[1]))
+emb = json.load(open(sys.argv[2]))
+product = json.load(open(sys.argv[3]))
+
+problems = []
+
+def ext_id(pkg, which):
+    pub = pkg.get("publisher")
+    name = pkg.get("name")
+    if not pub or not name:
+        problems.append(f"{which} package.json missing publisher/name (publisher={pub!r}, name={name!r})")
+        return None
+    return f"{pub}.{name}"
+
+src_id = ext_id(src, "SOURCE")
+emb_id = ext_id(emb, "EMBEDDED")
+# The real shipped extension id. (1/2) already gate package.json drift, but assert the
+# id itself matches between source and embedded so a renamed publisher/name cannot slip
+# past via this surface either.
+if src_id and emb_id and src_id != emb_id:
+    problems.append(f"extension id DRIFT: SOURCE '{src_id}' != EMBEDDED '{emb_id}'")
+
+ext_id_val = src_id
+
+declared = src.get("enabledApiProposals", []) or []
+# Contributed chat-participant ids and LM-provider vendors are reported for visibility
+# and sanity (the participant id is publisher-namespaced as '<name>.<...>').
+participant_ids = [c.get("id") for c in src.get("contributes", {}).get("chatParticipants", [])]
+lm_vendors = [c.get("vendor") for c in src.get("contributes", {}).get("languageModelChatProviders", [])]
+
+grants = product.get("extensionEnabledApiProposals", {}) or {}
+
+if ext_id_val is not None:
+    granted = grants.get(ext_id_val)
+    if granted is None:
+        # The grant must be keyed to the REAL extension id. Surface near-misses to help.
+        near = [k for k in grants.keys() if k.split(".")[-1] == ext_id_val.split(".")[-1] or k.split(".")[0] == ext_id_val.split(".")[0]]
+        hint = f" (product.json has grants for: {sorted(grants.keys())}; possible misspelling: {near})" if grants else " (product.json grants nothing)"
+        if declared:
+            problems.append(f"product.json has NO extensionEnabledApiProposals grant for '{ext_id_val}', "
+                            f"but the extension declares {declared}{hint}")
+    else:
+        granted_set = set(granted)
+        for p in declared:
+            if p not in granted_set:
+                problems.append(f"declared API proposal '{p}' is NOT granted to '{ext_id_val}' in product.json "
+                                f"(granted: {sorted(granted_set)})")
+
+# Emit a compact summary line then the problems (if any).
+print("SUMMARY id=%s declared=%s participants=%s lmVendors=%s grant=%s"
+      % (ext_id_val, declared, participant_ids, lm_vendors,
+         grants.get(ext_id_val) if ext_id_val else None))
+for p in problems:
+    print("PROBLEM " + p)
+sys.exit(1 if problems else 0)
+PY
+	)"
+	proposal_rc=$?
+	# Echo the summary line for the operator.
+	echo "$PROPOSAL_REPORT" | sed -n 's/^SUMMARY /  /p'
+	if [ "$proposal_rc" -ne 0 ]; then
+		echo "FAIL: API-proposal grant conformance DRIFT:"
+		echo "$PROPOSAL_REPORT" | sed -n 's/^PROBLEM /      - /p'
+		drift=$((drift + 1))
+	else
+		echo "PASS: API-proposal grants — every declared proposal is granted to the real extension id"
+	fi
+fi
+echo
+
 # ---- verdict ----------------------------------------------------------------
 echo "=== verdict ==="
 if [ "$drift" -gt 0 ]; then
@@ -229,5 +334,6 @@ if [ "$drift" -gt 0 ]; then
 	exit 1
 fi
 echo "RESULT: PASS — embedded extension conforms to source (commands, activation,"
-echo "        dist/ set, dist-supervisor/ set, and pinned supervisor hashes)."
+echo "        dist/ set, dist-supervisor/ set, pinned supervisor hashes, and the"
+echo "        product.json API-proposal grants match the real extension id)."
 exit 0

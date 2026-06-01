@@ -74,6 +74,106 @@
       in-browser, and a non-isolated runtime can never reach a product-trusted state.
     -->
     <main class="layout live-layout" id="live-view" hidden>
+      <!--
+        SLICE 1 — BLENDED FRICTION SURFACE (BLENDED-WORKBENCH-SPEC.md §5.8, §6).
+        The header carries the assurance halo strip + the friction surface. live.js
+        sets data-tier (friction axis) + data-authority (assurance axis) on
+        #live-view from already-computed HONEST run state — this markup only holds
+        the slots; no trust decision lives in the DOM/CSS. The Promote button posts
+        `glyphspekPromote` to the host (→ glyphspek.promoteChatToBuild); it does NOT
+        grant authority (that command's own modal does).
+      -->
+      <section class="friction-header" id="friction-header">
+        <div class="friction-headrow">
+          <svg class="gs-icon gs-title-icon" aria-hidden="true"><use href="#gs-verifier"></use></svg>
+          <span class="friction-title">Trust posture</span>
+          <span class="authority-level" id="authority-level" data-glyph="•">read · no authority yet</span>
+        </div>
+
+        <!--
+          SLICE 2 — AUTHORITY LADDER (§1.3, §6). A five-rung radiogroup that DRIVES
+          data-tier on #live-view (which Slice 1's friction surface + dimming already
+          read). CRITICAL HONESTY (§2.4, §6 "tier is enforced authority, not a UI
+          hint"): selecting a rung is a VIEW control — it chooses which evidence to
+          show, it does NOT grant authority. The active rung borrows --halo (the
+          assurance color). The ONE enforced transition (Governed→Sensitive) ties to
+          the real grant: Promote's modal / the agentic build's `approved` gate —
+          never to the rung itself. live.js wires ARIA radio semantics + keyboard.
+        -->
+        <div
+          class="ladder"
+          id="authority-ladder"
+          role="radiogroup"
+          aria-label="Authority ladder — choose which evidence to view (does not grant authority)"
+        >
+          <button type="button" class="rung" role="radio" aria-checked="false" data-tier="ask" tabindex="-1">Ask</button>
+          <button type="button" class="rung" role="radio" aria-checked="false" data-tier="inline" tabindex="-1">Inline edit</button>
+          <button type="button" class="rung" role="radio" aria-checked="true" data-tier="governed" tabindex="0">Governed run</button>
+          <button type="button" class="rung" role="radio" aria-checked="false" data-tier="sensitive" tabindex="-1">Sensitive</button>
+          <button type="button" class="rung" role="radio" aria-checked="false" data-tier="sovereign" tabindex="-1">Sovereign</button>
+        </div>
+        <!-- The reflect-not-grant disclaimer: makes the view-vs-grant distinction
+             legible (§2.4). Shown whenever the ladder selection is MANUAL. -->
+        <div class="ladder-note" id="ladder-note">
+          The ladder reflects the run's posture — it selects which evidence to view,
+          it does not grant authority. Authority comes from the supervisor (Promote's
+          approval · the build's sensitive-boundary grant), never from a rung.
+        </div>
+        <!-- per-tier copy, set in live.js setFrictionSurface() -->
+        <div class="friction-note" id="friction-note">
+          Governed run: the full trust stack is on — sandbox, policy, trace, independent verifier.
+        </div>
+        <!-- Promote to governed run: visible only at data-tier ask|inline (CSS) -->
+        <button id="promote-btn" type="button" class="promote-btn">Promote to governed run ▸</button>
+        <!-- sensitive-boundary strip: shown at data-tier sensitive|sovereign (CSS).
+             The list is CANONICAL (§6) and must not drift. -->
+        <div class="sensitive-strip" id="sensitive-strip">
+          <div class="ss-h">⚠ Sensitive boundary — fresh approval required</div>
+          <div class="ss-tags">secrets · network · infra · migrations · auth · CI/CD · deploy</div>
+        </div>
+        <!-- sovereign posture line: shown at data-tier sovereign (CSS). -->
+        <div class="sovereign-note" id="sovereign-note">
+          Sovereign: curated extensions · offline verification · no call-home · hard runtime
+        </div>
+      </section>
+
+      <!--
+        SLICE 2 — ASK-TIER SURFACE (§1.7, §5.5.1). Shown ONLY at data-tier="ask" (CSS).
+        The editor-recede overlay is fork-only, so in the panel this is the Ask surface:
+        a kicker asserting NO EXECUTION AUTHORITY, the honest one-line reason (answers
+        are useful context, NOT independently verified; acting requires promotion across
+        the canonical sensitive surfaces), and the two promotion actions. At Ask, NO
+        sandbox/trace/verifier chrome is active and NO verdict is ever shown — Slice 1's
+        dimming already quiets the evidence; this surface makes Ask read as PRE-RUN.
+
+        HONESTY: "Propose edit ▸" is a VIEW promotion to the inline tier (still pre-run,
+        a proposed diff — no execution). "Start a governed run ▸" is the EXPLICIT
+        promotion entry point: it posts glyphspekPromote → glyphspek.promoteChatToBuild,
+        whose OWN modal is the authority gate. Neither button grants authority here.
+      -->
+      <section class="card ask-surface" id="ask-surface" hidden>
+        <div class="ask-kicker">ASK · NO EXECUTION AUTHORITY</div>
+        <h2 class="ask-heading">Ask, explain, reason — without granting authority</h2>
+        <p class="ask-reason">
+          At Ask the agent is an <b>assistant</b>, not an actor: no file mutation, no
+          commands, no network, no secrets. Answers are useful context,
+          <b>not independently verified</b> — there is no sandbox, trace, or verifier
+          here, and Ask never shows a verdict. Acting requires an explicit promotion,
+          because it crosses a real boundary:
+        </p>
+        <div class="ask-boundary" id="ask-boundary">
+          file mutation · commands · network · secrets · infra · CI/CD · migrations · auth · deploy
+        </div>
+        <div class="ask-actions">
+          <button type="button" class="ask-btn ask-propose" id="ask-propose-btn">Propose edit ▸</button>
+          <button type="button" class="ask-btn ask-run" id="ask-run-btn">Start a governed run ▸</button>
+        </div>
+        <p class="ask-foot">
+          “Propose edit” shows a reviewable diff (still pre-run). “Start a governed run”
+          opens the governed-run promotion — its own approval is the authority gate.
+        </p>
+      </section>
+
       <section class="card" id="live-runlist-card">
         <h2 class="card-title">
           <svg class="gs-icon gs-title-icon" aria-hidden="true"><use href="#gs-run"></use></svg>
@@ -124,6 +224,28 @@
         </div>
       </section>
 
+      <!--
+        SOFT side-chat card (§5.8). Present but visually CAPPED (violet). It states
+        the side chat is lower assurance, metadata-only, and never product-trusted.
+        Shown only when the selected run is a SOFT posture (governed-unsandboxed /
+        boundary-only / sandboxed-soft-egress); live.js toggles `hidden`. The cap is
+        enforced in STATE (productTrustEligible + CREATION_TRUST_BADGE.productTrusted)
+        — this card only PAINTS that decided state in violet, never re-decides it.
+      -->
+      <section class="card soft-card" id="soft-chat-card" hidden>
+        <h2 class="card-title">
+          <svg class="gs-icon gs-title-icon" aria-hidden="true"><use href="#gs-actors"></use></svg>
+          Side chat — SOFT
+          <span class="soft-pill">SOFT · governed-unsandboxed</span>
+        </h2>
+        <p class="soft-note">
+          This side chat is <b>lower assurance</b>: metadata-only egress observation,
+          never decrypted, and <b>never product-trusted</b>. It can be governed and
+          traced, but it cannot reach a signed verifier verdict — it is capped at SOFT
+          and never merged into a trusted run's verdict.
+        </p>
+      </section>
+
       <section class="card">
         <h2 class="card-title">
           <svg class="gs-icon gs-title-icon" aria-hidden="true"><use href="#gs-trace"></use></svg>
@@ -162,6 +284,90 @@
           </h2>
           <div id="live-policy-body"></div>
         </div>
+      </section>
+    </main>
+
+    <!--
+      AGENTIC BUILD REVIEW VIEW (Phase B). Hidden until the host posts an
+      `agenticBuildReview` message (real backend or the preview fixture command).
+      Renders a governed agent run as a COMPACT EVIDENCE OBJECT so a reviewer can
+      accept/reject/request-changes from EVIDENCE — task intent + actor + honest
+      posture, the verifier verdict + signature state, changed files, a unified-diff
+      viewer, commands + exit codes, and observed egress — instead of reading the
+      transcript. The posture label is honestly `governed-unsandboxed` (NOT
+      product-trusted): this surface governs and traces a run, it does not contain it.
+      All rendering is in media/live.js (renderAgenticBuildReview); the diff string is
+      rendered via textContent/DOM (never innerHTML) under the same strict CSP.
+    -->
+    <main class="layout abr-layout" id="agentic-review-view" hidden>
+      <section class="card abr-header-card" id="abr-header-card">
+        <h2 class="card-title">
+          <svg class="gs-icon gs-title-icon" aria-hidden="true"><use href="#gs-verifier"></use></svg>
+          Agentic build review
+          <span class="panel-tag abr-preview-tag" id="abr-preview-tag" hidden>PREVIEW · fixture</span>
+        </h2>
+        <p class="panel-caption">
+          Review the agent's work from <em>evidence</em>, not the transcript. The
+          verdict is shown honestly: it is never a product-trusted success unless its
+          signature verifies against an out-of-band key.
+        </p>
+        <div id="abr-header-body"></div>
+      </section>
+
+      <section class="card" id="abr-summary-card">
+        <h2 class="card-title">
+          <svg class="gs-icon gs-title-icon" aria-hidden="true"><use href="#gs-actors"></use></svg>
+          What the agent says it did
+          <span class="panel-tag tag-claims">self-reported · NOT authoritative</span>
+        </h2>
+        <div id="abr-summary-body"></div>
+      </section>
+
+      <section class="card" id="abr-files-card">
+        <h2 class="card-title">
+          <svg class="gs-icon gs-title-icon" aria-hidden="true"><use href="#gs-diff"></use></svg>
+          Changed files
+        </h2>
+        <div id="abr-files-body"></div>
+      </section>
+
+      <section class="card" id="abr-diff-card">
+        <h2 class="card-title">
+          <svg class="gs-icon gs-title-icon" aria-hidden="true"><use href="#gs-diff"></use></svg>
+          Diff
+        </h2>
+        <p class="panel-caption">Unified diff (<code>git diff</code>). Added / removed / context lines are colored; hunk headers separate ranges.</p>
+        <div id="abr-diff-body"></div>
+      </section>
+
+      <section class="derived-grid">
+        <div class="card">
+          <h2 class="card-title">
+            <svg class="gs-icon gs-title-icon" aria-hidden="true"><use href="#gs-terminal"></use></svg>
+            Commands run
+          </h2>
+          <div id="abr-commands-body"></div>
+        </div>
+        <div class="card">
+          <h2 class="card-title">
+            <svg class="gs-icon gs-title-icon" aria-hidden="true"><use href="#gs-network"></use></svg>
+            Egress (metadata-only)
+          </h2>
+          <div id="abr-egress-body"></div>
+        </div>
+      </section>
+
+      <section class="card abr-decision-card" id="abr-decision-card">
+        <h2 class="card-title">
+          <svg class="gs-icon gs-title-icon" aria-hidden="true"><use href="#gs-policy"></use></svg>
+          Your decision
+        </h2>
+        <p class="panel-caption">
+          Accept, reject, or request changes. Applying / reverting the work and the
+          sensitive-boundary approval are wired in Phase C — here the decision is
+          recorded and posted to the host.
+        </p>
+        <div id="abr-decision-body"></div>
       </section>
     </main>
 

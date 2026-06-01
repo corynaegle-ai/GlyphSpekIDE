@@ -168,6 +168,12 @@
 		}
 	],
 	"sessionsWindowAllowedExtensions": [],
+	"extensionEnabledApiProposals": {
+		"glyphspek.glyphspek": [
+			"defaultChatParticipant",
+			"chatProvider"
+		]
+	},
 	"configurationDefaults": {
 		"extensions.ignoreRecommendations": true
 	}

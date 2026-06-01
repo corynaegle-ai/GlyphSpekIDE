@@ -65,6 +65,7 @@ exports.createRunViaBridge = createRunViaBridge;
 exports.startRunViaBridge = startRunViaBridge;
 exports.startGovernedTerminalSession = startGovernedTerminalSession;
 exports.openChatSession = openChatSession;
+exports.runAgenticBuild = runAgenticBuild;
 const os = __importStar(require("node:os"));
 const bridge_1 = require("./bridge");
 const supervisorHash_1 = require("./supervisorHash");
@@ -475,42 +476,62 @@ async function openChatSession(opts) {
             };
         }
         const supervisorVersion = connect.handshake?.supervisorVersion;
-        const session = {
-            async sendTurn(messages, handlers) {
-                if (disposed) {
-                    return { ok: false, message: 'chat session is closed.' };
-                }
-                // Bind THIS turn's sink. The ack returns the turnId; deltas for it then
-                // flow to handlers.onEvent until the terminal done/error settles the turn.
-                let settled = false;
-                const settlePromise = new Promise((resolve) => {
-                    settleActive = (outcome) => {
-                        if (settled)
-                            return;
-                        settled = true;
-                        resolve(outcome);
-                    };
-                });
-                activeSink = handlers.onEvent;
-                const ack = await bridge.chatSend({ backendId: exports.CHAT_BACKEND_ID, messages });
-                if (!ack.ok) {
-                    // No stream will arrive — synthesize a terminal error so the UI finalizes.
-                    const message = ack.reason;
-                    activeSink = undefined;
-                    settleActive = undefined;
-                    try {
-                        handlers.onEvent({ turnId: 'chat-error', type: 'error', message });
-                    }
-                    catch {
-                        /* sink threw — the outcome below still reports the failure */
-                    }
-                    return { ok: false, message };
-                }
-                const outcome = await settlePromise;
-                // The turn settled (done/error delivered). Clear the active binding.
+        // SINGLE-TURN SERIALIZATION (sweep finding #2). The chat/delta stream is a
+        // per-connection serialized feed routed to the ONE in-flight turn's sink
+        // (activeSink/settleActive are single slots). Two overlapping sendTurn() calls
+        // would otherwise both write activeSink and cross their streams / mis-settle.
+        // We therefore CHAIN every send behind the previous one: each call appends to a
+        // tail promise so a turn only binds the active slots AFTER the prior turn has
+        // settled and cleared them. Callers may fire concurrently; the session runs them
+        // FIFO, each to completion, with no crossed streams and no hang. The tail never
+        // rejects (runOneTurn resolves-never-rejects), so a failed turn does not wedge
+        // the queue for the next caller.
+        let turnQueue = Promise.resolve();
+        const runOneTurn = async (messages, handlers) => {
+            if (disposed) {
+                return { ok: false, message: 'chat session is closed.' };
+            }
+            // Bind THIS turn's sink. The ack returns the turnId; deltas for it then
+            // flow to handlers.onEvent until the terminal done/error settles the turn.
+            let settled = false;
+            const settlePromise = new Promise((resolve) => {
+                settleActive = (outcome) => {
+                    if (settled)
+                        return;
+                    settled = true;
+                    resolve(outcome);
+                };
+            });
+            activeSink = handlers.onEvent;
+            const ack = await bridge.chatSend({ backendId: exports.CHAT_BACKEND_ID, messages });
+            if (!ack.ok) {
+                // No stream will arrive — synthesize a terminal error so the UI finalizes.
+                const message = ack.reason;
                 activeSink = undefined;
                 settleActive = undefined;
-                return { ok: outcome.ok, turnId: ack.turnId, ...(outcome.message ? { message: outcome.message } : {}) };
+                try {
+                    handlers.onEvent({ turnId: 'chat-error', type: 'error', message });
+                }
+                catch {
+                    /* sink threw — the outcome below still reports the failure */
+                }
+                return { ok: false, message };
+            }
+            const outcome = await settlePromise;
+            // The turn settled (done/error delivered). Clear the active binding.
+            activeSink = undefined;
+            settleActive = undefined;
+            return { ok: outcome.ok, turnId: ack.turnId, ...(outcome.message ? { message: outcome.message } : {}) };
+        };
+        const session = {
+            sendTurn(messages, handlers) {
+                // Enqueue behind the current tail so turns run strictly FIFO; the next turn
+                // starts only after this one resolves and has cleared the active slots.
+                const result = turnQueue.then(() => runOneTurn(messages, handlers));
+                // Advance the tail with a never-rejecting link so a thrown turn can't wedge
+                // the queue. (runOneTurn resolves-never-rejects, but be defensive.)
+                turnQueue = result.then(() => undefined, () => undefined);
+                return result;
             },
             dispose: disposeOnce,
         };
@@ -526,6 +547,120 @@ async function openChatSession(opts) {
         return {
             connected: false,
             message: `chat session failed: ${String(err?.message ?? err)}`,
+        };
+    }
+}
+/**
+ * Spawn the packaged bridge-server, connect (spawn + hash-pin + handshake), register
+ * the build-event sink, send `build/start` (carrying the up-front authority grant),
+ * KEEP THE CHILD ALIVE across the streamed `build/event` sequence, capture the terminal
+ * `result` (the AgenticBuildReview) or `error`, then dispose.
+ *
+ * Resolve-never-reject: a connect/refusal/transport failure resolves with a populated,
+ * non-started outcome the command path can render honestly (and NEVER spawns codex when
+ * unapproved — the supervisor refuses, and {@link SupervisorBridge.startAgenticBuild}
+ * additionally refuses to put an un-approved request on the wire).
+ */
+async function runAgenticBuild(opts) {
+    const { output } = opts;
+    const env = buildBridgeEnv(opts);
+    output.appendLine('');
+    output.appendLine('[host] GlyphSpek governed agentic build — spawning packaged bridge-server.');
+    output.appendLine(`[host] bridge-server: ${opts.bridgeServerPath}`);
+    output.appendLine(`[host] cwd (REAL, governed-unsandboxed): ${opts.cwd}`);
+    const bridge = new bridge_1.SupervisorBridge({
+        binaryPath: opts.bridgeServerPath,
+        expectedSha256: supervisorHash_1.BUNDLED_BRIDGE_SERVER_SHA256,
+        execPath: process.execPath,
+        env,
+        cwd: env.GLYPHSPEK_RUNS_BASE,
+        extensionVersion: opts.extensionVersion,
+        log: output,
+        spawn: opts.spawn ?? bridge_1.defaultBridgeSpawn,
+        ...(opts.requestTimeoutMs !== undefined ? { requestTimeoutMs: opts.requestTimeoutMs } : {}),
+    });
+    let disposed = false;
+    const disposeOnce = () => {
+        if (disposed)
+            return;
+        disposed = true;
+        bridge.dispose();
+    };
+    // The build is SINGLE-IN-FLIGHT for this connection (one build per runAgenticBuild
+    // call), so a per-connection sink maps unambiguously to the active build. Capture the
+    // terminal result/error to settle the streamed promise. Register the sink BEFORE any
+    // RPC so an event that races the ack is never dropped.
+    let capturedReview;
+    let settle;
+    bridge.setBuildEventHandler((event) => {
+        if (!event)
+            return;
+        try {
+            opts.onBuildEvent(event);
+        }
+        catch (err) {
+            output.appendLine(`[host] build-event sink threw (ignored): ${String(err?.message ?? err)}`);
+        }
+        if (event.type === 'result') {
+            capturedReview = event.review;
+            settle?.({ ok: true });
+        }
+        else if (event.type === 'error') {
+            settle?.({ ok: false, message: event.message });
+        }
+    });
+    try {
+        const connect = await bridge.connect();
+        if (connect.status !== 'connected') {
+            disposeOnce();
+            return {
+                started: false,
+                message: connect.message || `bridge connect failed: ${connect.status}`,
+            };
+        }
+        const supervisorVersion = connect.handshake?.supervisorVersion;
+        // Bind the terminal-event settle BEFORE build/start so a result/error that races the
+        // ack still settles the build.
+        const settlePromise = new Promise((resolve) => {
+            settle = resolve;
+        });
+        const ack = await bridge.startAgenticBuild({
+            prompt: opts.prompt,
+            cwd: opts.cwd,
+            approved: opts.approved,
+        });
+        if (!ack.ok) {
+            // Refused (unapproved) or transport error — no stream will arrive. Synthesize a
+            // terminal error event so the caller's UI finalizes, then return not-started.
+            try {
+                opts.onBuildEvent({ runId: 'build-refused', type: 'error', message: ack.reason });
+            }
+            catch {
+                /* sink threw — the outcome below still reports the failure */
+            }
+            disposeOnce();
+            return {
+                started: false,
+                ...(supervisorVersion ? { supervisorVersion } : {}),
+                message: ack.reason,
+            };
+        }
+        // The build was accepted; wait for the terminal result/error to settle.
+        const outcome = await settlePromise;
+        disposeOnce();
+        return {
+            started: true,
+            runId: ack.runId,
+            ...(capturedReview ? { review: capturedReview } : {}),
+            ...(supervisorVersion ? { supervisorVersion } : {}),
+            message: outcome.ok ? '' : (outcome.message ?? 'build failed'),
+        };
+    }
+    catch (err) {
+        disposeOnce();
+        return {
+            started: false,
+            message: `governed agentic build failed: ${String(err?.message ?? err)}`,
         };
     }
 }

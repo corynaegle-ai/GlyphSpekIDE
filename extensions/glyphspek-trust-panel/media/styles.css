@@ -8,26 +8,97 @@
  * signed verdict.
  */
 
+/*
+ * BLENDED WORKBENCH TOKENS (BLENDED-WORKBENCH-SPEC.md §3).
+ *
+ * Slice 1 evolves the shipped Trust Panel palette to the blended token system
+ * WITHOUT renaming anything the JS reads. The load-bearing rule: every token the
+ * shipped app.js / live.js reference by name (--bg, --bg-card, --bg-elev, --border,
+ * --text, --text-dim, --claims, --claims-bg, --verdict, --verdict-bg, --pass,
+ * --fail, --warn, --neutral, --mono) STILL resolves to the same (or, for --verdict,
+ * the spec-brightened) value. Old names are mapped onto the new 4-plane model via
+ * var() so there is exactly one source of truth per color and no JS contract breaks.
+ *
+ *   OLD (JS-read)   →   NEW (canonical)        note
+ *   --bg            →   --plane-0  #0f1419     workbench base, UNCHANGED (continuity)
+ *   --bg-card       →   --plane-1  #161c24     working surfaces, UNCHANGED
+ *   --bg-elev       →   --plane-2  #1d2530     elevated panels, UNCHANGED
+ *   --claims        →   --claim    #d9a441     amber, UNCHANGED
+ *   --verdict       →   --verdict  #5b9cf0     blue, BRIGHTENED from #4b8fe0 (§3.2)
+ *   --warn          →   --claim    #d9a441     warn shares the claim amber, UNCHANGED
+ *   --neutral       →   #6b7686                UNCHANGED
+ */
 :root {
-  --bg: #0f1419;
-  --bg-card: #161c24;
-  --bg-elev: #1d2530;
+  /* Substrate + 4 elevation planes (§3.1). */
+  --substrate: #070a0f; /* the void behind the workbench; where the halo lives */
+  --plane-0: #0f1419;   /* workbench base — SAME as shipped --bg (continuity) */
+  --plane-1: #161c24;   /* working surfaces — was --bg-card */
+  --plane-2: #1d2530;   /* elevated panels — was --bg-elev */
+  --plane-3: #232d3a;   /* NEW decision plane — approvals / signed verdicts rise here */
+
   --border: #2a333f;
+  --border-lit: #36424f; /* brighter hairline for elevated edges */
+
   --text: #d7dde5;
+  --text-2: #aeb9c7; /* NEW secondary text */
   --text-dim: #8b97a6;
+  --icon: #e9ecff;
   --mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
 
-  /* Actor (claims) = amber/caution. Verifier (verdict) = blue/authority. */
-  --claims: #d9a441;
-  --claims-bg: #2a2113;
-  --verdict: #4b8fe0;
+  /* ---- THE TRUST AXIS (brand-load-bearing — do not re-hue) ---- */
+  --claim: #d9a441; /* amber = ASSERTED / actor-claimed / unverified */
+  --claim-bg: #2a2113;
+  --verdict: #5b9cf0; /* blue = INDEPENDENTLY VERIFIED (brightened from #4b8fe0, §3.2) */
   --verdict-bg: #11202f;
-
   --pass: #3fb568;
   --fail: #e0544b;
-  --warn: #d9a441;
+  --human: #8aa0bd; /* slate = human-authored / neutral provenance (new) */
   --neutral: #6b7686;
+  /* SOFT (graft, §3.2): governed-unsandboxed / lower assurance. Capped — it is the
+     violet ceiling and NEVER reaches verifier-blue. The cap is enforced in STATE
+     (live.js productTrustEligible + CREATION_TRUST_BADGE.productTrusted:false); this
+     color only PAINTS that already-decided state, it never re-decides trust. */
+  --soft: #a98bff; /* violet */
+  --soft-bg: #1c1730;
+
+  /* radii (§3.3) */
+  --r-sm: 6px;
+  --r-md: 9px;
+  --r-lg: 13px;
+  --r-pill: 999px;
+
+  /* Back-compat aliases: the shipped JS/CSS read these names verbatim. */
+  --bg: var(--plane-0);
+  --bg-card: var(--plane-1);
+  --bg-elev: var(--plane-2);
+  --claims: var(--claim);
+  --claims-bg: var(--claim-bg);
+  --warn: var(--claim);
+
+  /* --halo: the assurance color, driven by [data-authority] on the panel root
+     (§3 + §7). Default = human/slate ("read" — no execution authority yet). */
+  --halo: var(--human);
+  --halo-glow: 0 0 0 rgba(0, 0, 0, 0);
 }
+
+/*
+ * AUTHORITY HALO (assurance axis, §5.1 / §7). The panel root carries data-authority
+ * (set HONESTLY in live.js from run lifecycle + productTrustEligible + the signature
+ * gate + SOFT posture). The halo color/level chip borrow --halo. The webview cannot
+ * draw the whole-workbench frame ring (that is the fork's job, §1.1) — here the halo
+ * is expressed as a top accent strip on the panel (honest, extension-only fallback).
+ *
+ *   read     slate  — read-only / no execution authority yet
+ *   claimed  amber  — agent has acted, UNVERIFIED
+ *   soft     violet — governed-unsandboxed side session (capped)
+ *   verified blue   — verifier signature verified
+ *   denied   red    — a denied action / tampered trace (the only animated state)
+ */
+[data-authority="read"]     { --halo: var(--human);   --halo-glow: 0 0 0 rgba(0, 0, 0, 0); }
+[data-authority="claimed"]  { --halo: var(--claim);   --halo-glow: 0 0 30px -10px var(--claim); }
+[data-authority="soft"]     { --halo: var(--soft);    --halo-glow: 0 0 30px -10px var(--soft); }
+[data-authority="verified"] { --halo: var(--verdict); --halo-glow: 0 0 34px -8px var(--verdict); }
+[data-authority="denied"]   { --halo: var(--fail);    --halo-glow: 0 0 38px -6px var(--fail); }
 
 * {
   box-sizing: border-box;
@@ -980,6 +1051,214 @@ input[type="file"] {
   color: var(--text-dim);
 }
 
+/* ================================================================== *
+ * AGENTIC BUILD REVIEW (Phase B — view layer).
+ *
+ * Reuses the panel's card / mini-table / verdict-pill / chip / creation-badge
+ * vocabulary. The new component is the unified-DIFF viewer: per-file sections
+ * with +/- line coloring, plus the accept/reject/request-changes decision
+ * controls. Colors come from the shared --pass/--fail/--warn theme tokens.
+ * --------------------------------------------------------------------------- */
+.abr-layout[hidden] {
+  display: none;
+}
+
+.abr-field {
+  margin-bottom: 10px;
+}
+.abr-intent {
+  font-size: 15px;
+  font-weight: 600;
+  color: var(--text);
+}
+.abr-badge-row {
+  margin: 8px 0 12px;
+}
+.abr-verdict-banner {
+  margin-top: 4px;
+}
+.abr-verdict-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
+  margin-bottom: 10px;
+}
+.abr-sig-chip {
+  font-size: 11px;
+  padding: 2px 8px;
+  border-radius: 4px;
+  border: 1px solid var(--border);
+}
+.abr-sig-present {
+  color: var(--verdict);
+  border-color: var(--verdict);
+}
+.abr-sig-none {
+  color: var(--fail);
+  border-color: var(--fail);
+  font-weight: 700;
+}
+.abr-check-table {
+  margin-top: 4px;
+}
+.abr-summary {
+  margin: 0;
+  color: var(--text);
+}
+.abr-preview-tag {
+  background: rgba(217, 164, 65, 0.16);
+  border: 1px dashed var(--warn);
+  color: var(--warn);
+  font-size: 10px;
+  letter-spacing: 0.5px;
+  padding: 1px 7px;
+  border-radius: 4px;
+}
+.abr-preview-tag[hidden] {
+  display: none;
+}
+
+/* changed-files status + counts */
+.abr-file-status,
+.abr-diff-status {
+  font-family: var(--mono);
+  font-size: 11px;
+  font-weight: 700;
+  padding: 0 6px;
+  border-radius: 3px;
+  text-transform: uppercase;
+}
+.abr-diff-status-added {
+  color: var(--pass);
+  border: 1px solid var(--pass);
+}
+.abr-diff-status-modified {
+  color: var(--warn);
+  border: 1px solid var(--warn);
+}
+.abr-diff-status-deleted {
+  color: var(--fail);
+  border: 1px solid var(--fail);
+}
+.abr-file-counts {
+  font-family: var(--mono);
+  font-size: 12px;
+  white-space: nowrap;
+}
+.abr-adds {
+  color: var(--pass);
+  margin-right: 8px;
+}
+.abr-dels {
+  color: var(--fail);
+}
+
+/* ---------- unified diff viewer ---------- */
+.abr-diff-file {
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  overflow: hidden;
+  margin-bottom: 12px;
+}
+.abr-diff-file-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 6px 10px;
+  background: var(--bg-elev);
+  border-bottom: 1px solid var(--border);
+}
+.abr-diff-path {
+  font-size: 12px;
+  color: var(--text);
+}
+.abr-diff-lines {
+  font-size: 12px;
+  line-height: 1.5;
+  overflow-x: auto;
+}
+.abr-diff-line {
+  display: flex;
+  white-space: pre;
+  padding: 0 10px;
+  border-left: 3px solid transparent;
+}
+.abr-diff-line-text {
+  white-space: pre;
+}
+.abr-line-add {
+  background: rgba(63, 181, 104, 0.12);
+  border-left-color: var(--pass);
+  color: #b7f0cd;
+}
+.abr-line-del {
+  background: rgba(224, 84, 75, 0.12);
+  border-left-color: var(--fail);
+  color: #f3b9b4;
+}
+.abr-line-context {
+  color: var(--text-dim);
+}
+.abr-line-hunk {
+  background: var(--verdict-bg);
+  color: var(--verdict);
+  font-weight: 600;
+}
+.abr-line-meta {
+  color: var(--text-dim);
+  background: rgba(255, 255, 255, 0.02);
+}
+
+/* ---------- decision controls ---------- */
+.abr-decision-controls {
+  display: flex;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+.abr-btn {
+  font-weight: 700;
+}
+.abr-accept {
+  background: var(--pass);
+  color: #04210f;
+  border-color: var(--pass);
+}
+.abr-changes {
+  background: transparent;
+  color: var(--warn);
+  border-color: var(--warn);
+}
+.abr-reject {
+  background: transparent;
+  color: var(--fail);
+  border-color: var(--fail);
+}
+.abr-decision-result {
+  padding: 10px 14px;
+  border-radius: 8px;
+  font-weight: 700;
+}
+.abr-decision-note {
+  font-weight: 400;
+  color: var(--text-dim);
+}
+.abr-decided-accepted {
+  background: rgba(63, 181, 104, 0.14);
+  border: 1px solid var(--pass);
+  color: var(--pass);
+}
+.abr-decided-rejected {
+  background: rgba(224, 84, 75, 0.14);
+  border: 1px solid var(--fail);
+  color: var(--fail);
+}
+.abr-decided-changes {
+  background: rgba(217, 164, 65, 0.14);
+  border: 1px solid var(--warn);
+  color: var(--warn);
+}
+
 /* ---------- footer ---------- */
 .footer {
   max-width: 1180px;
@@ -1122,4 +1401,413 @@ input[type="file"] {
   display: flex;
   gap: 8px;
   margin-top: 8px;
+}
+
+/* ============================================================ *
+ * SLICE 1 — BLENDED FRICTION SURFACE + AUTHORITY HALO
+ *
+ * Promotes the shipped Trust Panel to the blended look-and-feel:
+ *   - the tier-aware friction surface in the live header (§5.8, §6),
+ *   - the assurance halo strip (extension-only honest fallback, §1.1/§2.2),
+ *   - the SOFT side-chat card (violet, capped — §5.8),
+ *   - tier-driven evidence dimming (§6),
+ *   - non-color redundancy + reduced-motion (§3.4 / §3.3 / §14).
+ *
+ * HONESTY: nothing here re-decides trust. data-tier (friction) and data-authority
+ * (assurance) are set in live.js from already-computed honest state; this CSS only
+ * paints what state already decided. SOFT (violet) can never reach verifier-blue.
+ * ============================================================ */
+
+/* The panel root (set in live.js) carries data-tier + data-authority; default to
+   the full governed stack so the panel reads exactly as it shipped until a run
+   re-tiers it. */
+#live-view {
+  --tier: governed;
+}
+
+/* ---- assurance halo strip: an honest, extension-only top accent on the live
+   header (the whole-workbench frame ring is fork-only, §1.1). It borrows --halo,
+   which is driven by data-authority. No box outside our rect is faked. ---- */
+#live-view .friction-header {
+  position: relative;
+  border: 1px solid var(--border);
+  border-top: 2px solid var(--halo);
+  border-radius: var(--r-md);
+  padding: 14px 16px 12px;
+  margin-bottom: 8px;
+  background: linear-gradient(180deg, color-mix(in srgb, var(--halo) 7%, var(--plane-1)) 0, var(--plane-1) 60px);
+  box-shadow: var(--halo-glow);
+  transition: border-color 0.5s ease, box-shadow 0.5s ease, background 0.5s ease;
+}
+
+/* The level chip restates the assurance level in words + borrows the halo color.
+   It is the always-legible textual backstop for the halo (§1.12 spirit). */
+.friction-headrow {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+.friction-title {
+  font-size: 13px;
+  font-weight: 700;
+  letter-spacing: 0.2px;
+}
+.authority-level {
+  font-family: var(--mono);
+  font-size: 10.5px;
+  letter-spacing: 0.4px;
+  text-transform: uppercase;
+  color: var(--halo);
+  background: color-mix(in srgb, var(--halo) 14%, transparent);
+  border: 1px solid color-mix(in srgb, var(--halo) 40%, transparent);
+  padding: 2px 9px;
+  border-radius: var(--r-pill);
+  white-space: nowrap;
+  transition: color 0.4s, background 0.4s, border-color 0.4s;
+}
+/* Non-color redundancy on the level chip (§3.4): a glyph + the tier name so the
+   assurance state survives grayscale / color-blindness. */
+.authority-level::before {
+  content: attr(data-glyph) " ";
+  font-weight: 800;
+}
+
+/* The friction note: per-tier copy, set in live.js. */
+.friction-note {
+  font-size: 12px;
+  line-height: 1.5;
+  margin-top: 10px;
+  padding: 9px 11px;
+  border-radius: var(--r-md);
+  border: 1px solid var(--border);
+  background: var(--plane-0);
+  color: var(--text-2);
+  transition: border-color 0.4s;
+}
+.friction-note b {
+  color: var(--halo);
+}
+
+/* Promote to governed run — visible ONLY at data-tier ask|inline. It does NOT
+   grant authority: it posts glyphspekPromote → glyphspek.promoteChatToBuild, whose
+   OWN modal is the authority gate. */
+.promote-btn {
+  display: none;
+  margin-top: 10px;
+  width: 100%;
+  text-align: center;
+  background: color-mix(in srgb, var(--claim) 16%, var(--plane-0));
+  border: 1px solid color-mix(in srgb, var(--claim) 48%, transparent);
+  color: var(--text);
+  border-radius: var(--r-sm);
+  padding: 9px 10px;
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+}
+.promote-btn:hover {
+  border-color: var(--verdict);
+}
+[data-tier="ask"] .promote-btn,
+[data-tier="inline"] .promote-btn {
+  display: block;
+}
+
+/* Sensitive-boundary strip — shown at data-tier sensitive|sovereign. The list is
+   CANONICAL (§6): secrets · network · infra · migrations · auth · CI/CD · deploy. */
+.sensitive-strip {
+  display: none;
+  margin-top: 10px;
+  padding: 9px 11px;
+  border-radius: var(--r-md);
+  border: 1px dashed color-mix(in srgb, var(--claim) 55%, transparent);
+  background: var(--claim-bg);
+}
+.sensitive-strip .ss-h {
+  font-size: 11.5px;
+  font-weight: 700;
+  color: var(--claim);
+}
+.sensitive-strip .ss-tags {
+  font-size: 11px;
+  color: var(--text-2);
+  margin-top: 4px;
+  font-family: var(--mono);
+}
+[data-tier="sensitive"] .sensitive-strip,
+[data-tier="sovereign"] .sensitive-strip {
+  display: block;
+}
+
+/* Sovereign posture line — shown only at data-tier sovereign. */
+.sovereign-note {
+  display: none;
+  margin-top: 9px;
+  font-size: 11px;
+  color: var(--verdict);
+  font-family: var(--mono);
+  line-height: 1.5;
+}
+[data-tier="sovereign"] .sovereign-note {
+  display: block;
+}
+
+/* ---- tier-driven evidence dimming (§6). At Ask/Inline the heavy evidence
+   recedes (opacity + grayscale, NOT removal — the stack stays visible but quiet).
+   At Inline the claims/verdict split stays legible (it is about the proposed
+   diff). Scoped to the live view's evidence sections only. ---- */
+[data-tier="ask"] #live-badges-card,
+[data-tier="ask"] .claims-verdict,
+[data-tier="ask"] #live-view > .card,
+[data-tier="ask"] #live-view .derived-grid,
+[data-tier="inline"] #live-badges-card,
+[data-tier="inline"] #live-view > .card,
+[data-tier="inline"] #live-view .derived-grid {
+  opacity: 0.26;
+  filter: grayscale(0.5);
+  transition: opacity 0.45s ease, filter 0.45s ease;
+}
+/* Inline edit: keep the proposed diff's claims/verdict split legible. */
+[data-tier="inline"] .claims-verdict {
+  opacity: 0.92;
+  filter: none;
+  transition: opacity 0.45s ease, filter 0.45s ease;
+}
+
+/* ---- SOFT side-chat card (§5.8): present but visually capped (violet). States
+   the side chat is lower assurance, metadata-only, never product-trusted. The
+   violet is the ceiling; the cap itself is enforced in live.js STATE. ---- */
+.soft-card {
+  border: 1px solid color-mix(in srgb, var(--soft) 40%, transparent) !important;
+  background: linear-gradient(180deg, var(--soft-bg) 0, var(--bg-card) 80px);
+}
+.soft-card .card-title {
+  color: var(--soft);
+}
+.soft-card .soft-note {
+  font-size: 12px;
+  color: var(--text-2);
+  line-height: 1.5;
+}
+/* SOFT non-color redundancy (§3.4): solid muted + an explicit label. */
+.soft-pill {
+  display: inline-block;
+  font-size: 10px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  padding: 2px 8px;
+  border-radius: var(--r-pill);
+  color: var(--soft);
+  background: var(--soft-bg);
+  border: 1px solid color-mix(in srgb, var(--soft) 45%, transparent);
+}
+
+/* ============================================================ *
+ * NON-COLOR REDUNDANCY (§3.4, REQUIRED) — every trust state carries a non-color
+ * signal (shape/fill + label), so the system survives grayscale & deuteranopia.
+ * These re-state, in shape, the panel's existing color contract:
+ *   amber  = DASHED border + "self-reported / claimed"  (claims pane, already dashed)
+ *   soft   = SOLID muted + "SOFT · governed-unsandboxed"
+ *   verified = SOLID border + "signed / verified"        (verdict pane, already solid)
+ *   denied = pulse + ✕ glyph + "UNTRUSTED"
+ * The claims pane is already `border: 2px dashed`; the verdict pane `2px solid` —
+ * that shape difference IS the redundancy and is preserved. The additions below
+ * make the SAME redundancy explicit on the halo level chip + the denied state.
+ * ============================================================ */
+
+/* DENIED — the only animated state (§3.3): a one-shot deny-pulse on the halo strip
+   + a ✕ glyph via the level chip's data-glyph. Pulse plays once; the static red
+   border remains after. */
+[data-authority="denied"] #live-view .friction-header {
+  animation: glyphspekDenyPulse 1.1s ease 1;
+}
+@keyframes glyphspekDenyPulse {
+  0%, 100% { box-shadow: var(--halo-glow); }
+  35% { box-shadow: 0 0 26px -2px var(--fail); }
+}
+
+/*
+ * MOTION POLICY (§3.3 / §14): animation is reserved for trust transitions only
+ * (the amber→blue verify cross-fade on the halo, the deny-pulse). prefers-reduced-
+ * motion (and the implied Settings "reduce motion") disables ALL of it — the static
+ * trust color stays, only the motion is removed.
+ */
+@media (prefers-reduced-motion: reduce) {
+  #live-view .friction-header,
+  .authority-level,
+  .friction-note,
+  .ladder .rung,
+  [data-tier] #live-badges-card,
+  [data-tier] .claims-verdict,
+  [data-tier] #live-view > .card,
+  [data-tier] #live-view .derived-grid {
+    transition: none !important;
+    animation: none !important;
+  }
+}
+
+/* ============================================================ *
+ * SLICE 2 — AUTHORITY LADDER + ASK-TIER SURFACE
+ *
+ * The Authority Ladder (§1.3, §6) is a five-rung radiogroup in the friction
+ * header that DRIVES data-tier on #live-view (which Slice 1's friction surface +
+ * dimming already read). The active rung borrows --halo (assurance), visually
+ * tying the two axes WITHOUT conflating them — the ladder is the FRICTION axis;
+ * --halo is the ASSURANCE axis. The Ask surface (§1.7, §5.5.1) is the pre-run,
+ * no-verdict entry surface shown only at data-tier="ask".
+ *
+ * HONESTY: nothing here grants authority. The ladder is a VIEW control (which
+ * evidence to show); the ladder-note states that in words. The Ask surface asserts
+ * NO sandbox/trace/verifier is active and never shows a verdict.
+ * ============================================================ */
+
+/* ---- Authority Ladder: a pill strip of five rungs. ---- */
+.ladder {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  margin-top: 10px;
+  padding: 3px;
+  background: var(--plane-0);
+  border: 1px solid var(--border-lit);
+  border-radius: var(--r-pill);
+  flex-wrap: wrap;
+}
+.ladder .rung {
+  position: relative;
+  background: transparent;
+  border: 0;
+  color: var(--text-dim);
+  font: inherit;
+  font-size: 11px;
+  padding: 4px 11px;
+  border-radius: var(--r-pill);
+  cursor: pointer;
+  white-space: nowrap;
+  transition: color 0.25s ease, background 0.25s ease, box-shadow 0.25s ease;
+}
+.ladder .rung:hover {
+  color: var(--text);
+}
+/* The "›" separators between rungs (decorative). */
+.ladder .rung:not(:last-child)::after {
+  content: "\203A";
+  margin-left: 9px;
+  margin-right: -6px;
+  color: var(--text-dim);
+  opacity: 0.5;
+}
+/* Active rung borrows the halo color (assurance) for its tint — the two axes
+   meet here visually but the rung still only selects the FRICTION view. */
+.ladder .rung[aria-checked="true"] {
+  color: var(--text);
+  background: color-mix(in srgb, var(--halo) 20%, var(--plane-2));
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--halo) 50%, transparent);
+}
+/* Keyboard focus must be clearly visible (§14.4 keyboard reachability). */
+.ladder .rung:focus-visible {
+  outline: 2px solid var(--verdict);
+  outline-offset: 1px;
+}
+
+/* The reflect-not-grant disclaimer under the ladder (§2.4). */
+.ladder-note {
+  margin-top: 8px;
+  font-size: 10.5px;
+  line-height: 1.5;
+  color: var(--text-dim);
+  font-style: italic;
+}
+
+/* ---- Ask-tier surface (§1.7, §5.5.1): shown only at data-tier="ask". ---- */
+.ask-surface {
+  display: none;
+  border: 1px solid var(--border-lit) !important;
+  background: linear-gradient(180deg, color-mix(in srgb, var(--human) 6%, var(--plane-1)) 0, var(--plane-1) 120px) !important;
+}
+[data-tier="ask"] .ask-surface {
+  display: block;
+}
+.ask-kicker {
+  font-family: var(--mono);
+  font-size: 10.5px;
+  letter-spacing: 0.6px;
+  color: var(--human);
+  text-transform: uppercase;
+}
+.ask-heading {
+  margin: 8px 0;
+  font-size: 18px;
+  font-weight: 700;
+}
+.ask-reason {
+  margin: 0 0 12px;
+  color: var(--text-2);
+  font-size: 13px;
+  line-height: 1.55;
+}
+.ask-reason b {
+  color: var(--text);
+}
+/* The canonical boundary list (§6) — the surfaces that require promotion. */
+.ask-boundary {
+  font-family: var(--mono);
+  font-size: 11px;
+  color: var(--text-2);
+  padding: 9px 11px;
+  border-radius: var(--r-md);
+  border: 1px dashed var(--border-lit);
+  background: var(--plane-0);
+  margin-bottom: 14px;
+}
+.ask-actions {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.ask-btn {
+  flex: 1 1 auto;
+  border-radius: var(--r-sm);
+  padding: 9px 12px;
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+  color: var(--text);
+}
+/* Propose edit → the inline (still pre-run, diff) tier: amber-edged. */
+.ask-propose {
+  border: 1px solid color-mix(in srgb, var(--claim) 48%, transparent);
+  background: color-mix(in srgb, var(--claim) 16%, var(--plane-0));
+}
+.ask-propose:hover {
+  border-color: var(--claim);
+}
+/* Start a governed run → the explicit promotion (the command's modal gates it). */
+.ask-run {
+  border: 1px solid color-mix(in srgb, var(--verdict) 48%, transparent);
+  background: color-mix(in srgb, var(--verdict) 16%, var(--plane-0));
+}
+.ask-run:hover {
+  border-color: var(--verdict);
+}
+.ask-btn:focus-visible {
+  outline: 2px solid var(--verdict);
+  outline-offset: 1px;
+}
+.ask-foot {
+  margin: 12px 0 0;
+  font-size: 11px;
+  color: var(--text-dim);
+  line-height: 1.5;
+}
+
+/* At Ask the heavy evidence recedes (Slice 1 dims #live-view > .card), but the
+   Ask surface itself + the friction header (which holds the ladder) must NOT dim
+   — they ARE the Ask view. Re-assert full visibility for them. */
+[data-tier="ask"] #ask-surface,
+[data-tier="ask"] #live-view > .friction-header {
+  opacity: 1 !important;
+  filter: none !important;
 }

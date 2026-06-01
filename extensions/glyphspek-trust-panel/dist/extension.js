@@ -69,6 +69,7 @@ const chatTerminalView_1 = require("./chatTerminalView");
 const ptyHost_1 = require("./ptyHost");
 const nodePtyBaseDirs_1 = require("./nodePtyBaseDirs");
 const inlineScript_1 = require("./inlineScript");
+const chatParticipant_1 = require("./chatParticipant");
 const bridgeProtocol_1 = require("./bridgeProtocol");
 const policyHash_1 = require("./policyHash");
 const runEventProtocol_1 = require("./runEventProtocol");
@@ -77,6 +78,10 @@ const webviewGestureGate_1 = require("./webviewGestureGate");
 const configScope_1 = require("./configScope");
 const governedRunsModel_1 = require("./governedRunsModel");
 const governedRunsTree_1 = require("./governedRunsTree");
+const agenticBuildReview_1 = require("./agenticBuildReview");
+const agenticBuildPromotion_1 = require("./agenticBuildPromotion");
+const statusBarSegments_1 = require("./statusBarSegments");
+const haloChrome_1 = require("./haloChrome");
 /** The file names that make up a run bundle, in load order. */
 const BUNDLE_FILE_NAMES = [
     'trace.jsonl',
@@ -127,6 +132,232 @@ function getGovernedRunsModel() {
     if (!governedRunsModel)
         governedRunsModel = new governedRunsModel_1.GovernedRunsModel();
     return governedRunsModel;
+}
+/* ================================================================== *
+ * RUN STATUS CONTROLLER (Slice 2 — status-bar segments + halo fallback +
+ * the `glyphspek.authority` context-key).
+ *
+ * Owns the vscode side effects for three honest surfaces, all fed by the SAME
+ * run/event stream the Trust Panel + Governed Runs view read (TrustPanel.
+ * postRunEvent calls notify() on every event):
+ *
+ *   (1) STATUS-BAR SEGMENTS (§1.12 / §5.10): four items — `authority: <level>`
+ *       (colored by ThemeColor to match the halo/assurance), `sandboxed worktree`,
+ *       `N traced events`, `policy: .glyphspek/policy.yml`. Computed by the PURE
+ *       StatusBarSegments model (statusBarSegments.ts), disposed on deactivate.
+ *
+ *   (2) HALO FALLBACK (§1.1/§2.2 option 1): an OPT-IN (glyphspek.halo.tintChrome,
+ *       default OFF) tint of real chrome edges (titleBar/activityBar/statusBar) to
+ *       the assurance color via workbench.colorCustomizations — FULLY REVERSIBLE
+ *       (snapshot on first enable, restore on disable/deactivate). When OFF, the
+ *       `authority:` segment + Slice 1's header accent are the honest backstop.
+ *
+ *   (3) The `glyphspek.authority` CONTEXT-KEY: set on every assurance change so the
+ *       FUTURE FORK halo ring (§1.1) reads it with NO extension change.
+ *
+ * HONESTY (enforced here, not in styling): the ladder/manual-view never feeds this
+ * — only real run facts do. `authority` reaches `verified` ONLY when the webview
+ * posts a signature-VERIFIED confirmation (confirmVerified), the same gate the
+ * verdict pane uses. The halo/`authority:` reflect ONLY the computed assurance.
+ */
+class RunStatusController {
+    constructor() {
+        this.model = new statusBarSegments_1.StatusBarSegments();
+        this.attached = false;
+        /** The last assurance level pushed to the context-key + halo (no-op guard). */
+        this.lastAuthority = null;
+        /** True while our tint is currently applied (so we only restore once). */
+        this.haloApplied = false;
+    }
+    /**
+     * Create the four status-bar items + wire the halo setting watcher. Idempotent.
+     * The caller pushes the controller's dispose into context.subscriptions.
+     */
+    attach(context) {
+        if (this.attached)
+            return;
+        this.attached = true;
+        // Seed the policy file from the setting if one is configured (honest segment).
+        const policyPath = vscode.workspace
+            .getConfiguration('glyphspek')
+            .get('policyPath');
+        this.model.setPolicyFile(policyPath && policyPath.trim() ? policyPath.trim() : undefined);
+        // The segments sit on the LEFT, ordered authority → sandbox → traced; policy on
+        // the RIGHT. Lower priority = further right within an alignment. The status-bar
+        // API is additive: if it is unavailable (a minimal host/test stub), we degrade
+        // gracefully — the context-key + halo still work; we just render no items.
+        const align = vscode.StatusBarAlignment;
+        if (typeof vscode.window.createStatusBarItem === 'function' && align) {
+            this.authorityItem = vscode.window.createStatusBarItem(align.Left, 100);
+            this.sandboxItem = vscode.window.createStatusBarItem(align.Left, 99);
+            this.tracedItem = vscode.window.createStatusBarItem(align.Left, 98);
+            this.policyItem = vscode.window.createStatusBarItem(align.Right, 50);
+            // Clicking the authority/traced segments reveals the Trust Panel (evidence).
+            this.authorityItem.command = 'glyphspek.openTrustPanel';
+            this.tracedItem.command = 'glyphspek.openTrustPanel';
+            context.subscriptions.push(this.authorityItem, this.sandboxItem, this.tracedItem, this.policyItem);
+        }
+        // Re-apply/restore the halo + refresh the policy segment when settings change
+        // (reversible toggle). Guarded so a stub host without the config event is safe.
+        if (typeof vscode.workspace.onDidChangeConfiguration === 'function') {
+            context.subscriptions.push(vscode.workspace.onDidChangeConfiguration((e) => {
+                if (e.affectsConfiguration('glyphspek.halo.tintChrome')) {
+                    void this.refreshHalo();
+                }
+                if (e.affectsConfiguration('glyphspek.policyPath')) {
+                    const p = vscode.workspace
+                        .getConfiguration('glyphspek')
+                        .get('policyPath');
+                    this.model.setPolicyFile(p && p.trim() ? p.trim() : undefined);
+                    this.render();
+                }
+            }));
+        }
+        this.render();
+    }
+    /** Feed one raw run/event envelope (called by TrustPanel.postRunEvent). */
+    notify(rawEvent) {
+        if (this.model.ingest(rawEvent))
+            this.render();
+    }
+    /** Focus the segments on a run (Governed Runs tree-row click). View-only. */
+    focus(runId) {
+        if (this.model.focus(runId))
+            this.render();
+    }
+    /**
+     * The webview confirmed (or revoked) a signature-VERIFIED authority for a run —
+     * the ONLY path to a `verified` segment, since the host cannot run the Ed25519
+     * gate. Honest: a later tamper posts verified:false and the run drops off blue.
+     */
+    confirmVerified(runId, verified) {
+        if (this.model.confirmVerified(runId, verified))
+            this.render();
+    }
+    /** Recompute all four segments + push the assurance to the context-key/halo. */
+    render() {
+        const v = this.model.compute();
+        if (this.authorityItem) {
+            this.authorityItem.text = '$(shield) ' + v.authorityText;
+            this.authorityItem.color = authorityThemeColor(v.authority);
+            this.authorityItem.tooltip =
+                'GlyphSpek assurance level for the focused run. Reflects the computed ' +
+                    'assurance only — never more than the verifier proved.';
+            this.authorityItem.show();
+        }
+        if (this.sandboxItem) {
+            this.sandboxItem.text =
+                (v.sandboxed ? '$(lock) ' : '$(unlock) ') + v.sandboxText;
+            this.sandboxItem.tooltip = v.sandboxed
+                ? 'The focused run executes in an approved isolation runtime (sandboxed worktree).'
+                : 'The focused run is NOT in an approved isolation runtime — shown honestly.';
+            this.sandboxItem.show();
+        }
+        if (this.tracedItem) {
+            this.tracedItem.text = '$(list-ordered) ' + v.tracedText;
+            this.tracedItem.tooltip =
+                'Hash-chained trace events observed for the focused run.';
+            this.tracedItem.show();
+        }
+        if (this.policyItem) {
+            this.policyItem.text = '$(law) ' + v.policyText;
+            this.policyItem.tooltip = 'Policy-as-code file governing the run.';
+            this.policyItem.show();
+        }
+        // Push the assurance to the context-key + halo only when it actually changed.
+        if (v.authority !== this.lastAuthority) {
+            this.lastAuthority = v.authority;
+            // The future FORK halo ring (§1.1) reads this SAME key — set it now so no
+            // extension change is needed when the fork lands.
+            void vscode.commands.executeCommand('setContext', 'glyphspek.authority', v.authority);
+            void this.refreshHalo();
+        }
+    }
+    /**
+     * Apply or restore the OPT-IN chrome tint (glyphspek.halo.tintChrome). When ON,
+     * tint the halo-key edges to the current assurance color; when OFF (or on
+     * deactivate), restore the user's prior customizations EXACTLY. Reversible.
+     */
+    async refreshHalo() {
+        // Guarded: the halo tint is additive + opt-in. A minimal host/test stub without
+        // the configuration API simply skips it (the context-key still drives the fork).
+        if (typeof vscode.workspace.getConfiguration !== 'function' ||
+            !vscode.ConfigurationTarget) {
+            return;
+        }
+        const on = vscode.workspace
+            .getConfiguration('glyphspek')
+            .get('halo.tintChrome', false);
+        const cfg = vscode.workspace.getConfiguration('workbench');
+        const current = (cfg.get('colorCustomizations') ?? {});
+        if (on) {
+            // Snapshot the user's halo-key values the FIRST time we tint, so we can put
+            // them back byte-for-byte on disable/deactivate.
+            if (this.haloSnapshot === undefined) {
+                this.haloSnapshot = (0, haloChrome_1.snapshotHaloKeys)(current);
+            }
+            const next = (0, haloChrome_1.applyHaloCustomizations)(current, this.lastAuthority ?? 'read');
+            this.haloApplied = true;
+            await cfg.update('colorCustomizations', next, vscode.ConfigurationTarget.Global);
+        }
+        else if (this.haloApplied && this.haloSnapshot !== undefined) {
+            // Turned OFF after being ON: restore exactly.
+            const restored = (0, haloChrome_1.restoreHaloCustomizations)(current, this.haloSnapshot);
+            this.haloApplied = false;
+            this.haloSnapshot = undefined;
+            await cfg.update('colorCustomizations', restored, vscode.ConfigurationTarget.Global);
+        }
+    }
+    /** Restore any applied halo tint (called on deactivate). Best-effort. */
+    async dispose() {
+        if (this.haloApplied && this.haloSnapshot !== undefined) {
+            try {
+                const cfg = vscode.workspace.getConfiguration('workbench');
+                const current = (cfg.get('colorCustomizations') ??
+                    {});
+                await cfg.update('colorCustomizations', (0, haloChrome_1.restoreHaloCustomizations)(current, this.haloSnapshot), vscode.ConfigurationTarget.Global);
+            }
+            catch {
+                /* best-effort restore on shutdown */
+            }
+            this.haloApplied = false;
+            this.haloSnapshot = undefined;
+        }
+        void vscode.commands.executeCommand('setContext', 'glyphspek.authority', undefined);
+    }
+}
+/**
+ * Map an assurance level to its status-bar ThemeColor. We reuse built-in theme
+ * colors so the `authority:` segment honors the user's theme (and contrast), while
+ * still varying by assurance: a denied run reads error-red, a verified run prominent.
+ */
+function authorityThemeColor(level) {
+    // Guarded so a minimal host/test stub without ThemeColor degrades to default.
+    if (typeof vscode.ThemeColor !== 'function')
+        return undefined;
+    switch (level) {
+        case 'denied':
+            return new vscode.ThemeColor('statusBarItem.errorForeground');
+        case 'soft':
+        case 'claimed':
+            return new vscode.ThemeColor('statusBarItem.warningForeground');
+        case 'verified':
+            return new vscode.ThemeColor('statusBarItem.prominentForeground');
+        case 'read':
+        default:
+            return undefined; // default status-bar foreground (no over-emphasis)
+    }
+}
+/**
+ * The module-private RUN STATUS CONTROLLER. One per extension process; fed the
+ * SAME run/event stream the Trust Panel renders (postRunEvent calls notify()).
+ * Created+attached in activate(); its dispose restores the halo on deactivate.
+ */
+let runStatusController;
+function getRunStatusController() {
+    if (!runStatusController)
+        runStatusController = new RunStatusController();
+    return runStatusController;
 }
 /** Human-readable byte size for size-cap error messages. */
 function formatBytes(bytes) {
@@ -252,6 +483,15 @@ class TrustPanel {
          * ready so the live stream is never dropped during webview boot.
          */
         this.pendingRunEvents = [];
+        /**
+         * The most recent AgenticBuildReview posted per runId (Phase C). The webview's
+         * decision message carries only { runId, decision } — the host scopes the Accept /
+         * Reject outcome (esp. the revert) to EXACTLY this review's changedFiles, so it keeps
+         * the authoritative review here keyed by runId. PREVIEW reviews are recorded too but
+         * carry no real changes (the decision handler treats a preview/non-real review as a
+         * recorded-only outcome). View-only — confers no trust.
+         */
+        this.reviewsByRunId = new Map();
         this.panel = panel;
         this.extensionUri = extensionUri;
         this.gate = gate;
@@ -291,10 +531,45 @@ class TrustPanel {
                     this.pendingSelectRunId = undefined;
                     void this.panel.webview.postMessage({ type: 'selectRun', runId });
                 }
+                // Replay a pending Agentic Build Review (Phase B) so a preview command
+                // that raced the webview boot still renders its review.
+                if (this.pendingAgenticReview) {
+                    const pending = this.pendingAgenticReview;
+                    this.pendingAgenticReview = undefined;
+                    void this.panel.webview.postMessage({
+                        type: 'agenticBuildReview',
+                        review: pending.review,
+                        preview: pending.preview,
+                    });
+                }
             }
             else if (msg.type === 'requestLoadBundle') {
                 // The webview's "Load run bundle…" button delegates to the host command.
                 void vscode.commands.executeCommand('glyphspek.loadRunBundle');
+            }
+            else if (msg.type === 'glyphspekPromote') {
+                // BLENDED FRICTION SURFACE — "Promote to governed run" (Slice 1, §5.8/§6).
+                // The panel's Promote button (shown only at the ask/inline friction tiers)
+                // wires the workbench promotion gesture to the agentic-build command we
+                // already ship. The button itself does NOT grant authority: this command's
+                // OWN modal (confirmBuildAuthority in promoteChatToBuild) is the load-bearing
+                // authority gate, and a third party cannot post this message (it can only
+                // come from our own webview). We pass no intent so the command prompts for it.
+                void vscode.commands.executeCommand('glyphspek.promoteChatToBuild');
+            }
+            else if (msg.type === 'glyphspekAuthority') {
+                // ASSURANCE CONFIRMATION (Slice 2, §1.12). The webview computed the run's
+                // assurance via deriveAuthority — INCLUDING the Ed25519 signature-before-
+                // display gate the host cannot run. We use it for ONE honest purpose: to
+                // let the status-bar `authority:` segment + the future fork halo reach
+                // `verified` ONLY when the panel's own gate verified the signature. Any
+                // other (read/claimed/soft/denied) confirmation just clears the verified
+                // flag, so a later tamper honestly drops the run off blue. This can only
+                // come from our own webview — a third party cannot post into it.
+                if (typeof msg.runId === 'string' &&
+                    typeof msg.authority === 'string') {
+                    getRunStatusController().confirmVerified(msg.runId, msg.authority === 'verified');
+                }
             }
             else if (msg.type === 'startTrustedRun') {
                 // FIRST-PARTY OPERATOR GESTURE (sweep-20 High #3). This message can ONLY
@@ -303,6 +578,18 @@ class TrustPanel {
                 // here do we mint+consume a gesture and reach a trusted-run launcher.
                 if ((0, webviewGestureGate_1.isTrustedRunKind)(msg.kind)) {
                     return this.gate.launchFromWebview(msg.kind);
+                }
+            }
+            else if (msg.type === 'agenticBuildDecision') {
+                // AGENTIC BUILD REVIEW DECISION (Phase C — the SECOND gate). The operator
+                // clicked Accept / Reject / Request changes in the review view. This message
+                // can ONLY come from our own webview. We now implement the REAL outcome:
+                //   accepted          → keep the changes (already in the working tree).
+                //   rejected          → REVERT exactly the run's changedFiles (confirm-gated).
+                //   changes-requested → keep the changes + record the note.
+                // codex edited the REAL cwd (no staging), so the git diff IS the safety net.
+                if (typeof msg.runId === 'string' && (0, agenticBuildReview_1.isAgenticBuildDecision)(msg.decision)) {
+                    return this.handleAgenticBuildDecision(msg.runId, msg.decision);
                 }
             }
         }, null, this.disposables);
@@ -329,11 +616,119 @@ class TrustPanel {
      * click that raced the boot is not lost.
      */
     selectRun(runId) {
+        // Also focus the status-bar segments on this run (Slice 2). View-only — confers
+        // no trust; a no-op if the run hasn't streamed to the status model yet.
+        getRunStatusController().focus(runId);
         if (!this.ready) {
             this.pendingSelectRunId = runId;
             return;
         }
         void this.panel.webview.postMessage({ type: 'selectRun', runId });
+    }
+    /**
+     * Render an AgenticBuildReview (Phase B view layer) in the panel. The host does
+     * NOT judge the review — it posts the pinned evidence object and the webview
+     * renders it (intent + actor + honest posture, verdict + signature state, changed
+     * files, the unified-diff viewer, commands + exit codes, egress, and the
+     * accept/reject/request-changes controls). `preview` flags a fixture so the UI
+     * shows a clear PREVIEW tag. Buffered until the webview is ready, like bundles.
+     *
+     * `cwd` is the REAL repo codex edited (absolute). The host retains it with the review
+     * so a REJECT can scope its git revert to that repo + exactly this review's
+     * changedFiles. A preview/fixture review passes no cwd (its changes are not real).
+     */
+    postAgenticBuildReview(review, preview = false, cwd) {
+        // Retain the authoritative review so the decision handler can scope Accept / Reject
+        // (esp. the revert) to EXACTLY this review's changedFiles. Keyed by runId.
+        if (review && typeof review.runId === 'string' && review.runId.length > 0) {
+            this.reviewsByRunId.set(review.runId, { review, preview, ...(cwd ? { cwd } : {}) });
+        }
+        if (!this.ready) {
+            this.pendingAgenticReview = { review, preview };
+            return;
+        }
+        void this.panel.webview.postMessage({ type: 'agenticBuildReview', review, preview });
+    }
+    /**
+     * Handle the operator's diff-accept DECISION (Phase C — the SECOND gate). The webview
+     * posts only { runId, decision }; the host looks up the authoritative review it
+     * retained (so the outcome — esp. a revert — is scoped to EXACTLY that review's
+     * changedFiles + its real cwd, never a broad checkout).
+     *
+     *   - accepted          → keep the changes (already in the working tree). Records
+     *                         human_accepted. Optionally OFFERS (does not force) to stage.
+     *   - rejected          → REVERT exactly the run's changedFiles, behind a destructive
+     *                         confirm ("Discard the agent's changes to N files?"). Records
+     *                         human_rejected. FAILS SAFE if not a git repo (lists the
+     *                         files; reverts nothing).
+     *   - changes-requested → keep the changes + records human_corrected_output.
+     *
+     * A PREVIEW/fixture review (or one with no retained real cwd) is recorded honestly as
+     * a recorded-only outcome — there is no real working tree to revert.
+     */
+    async handleAgenticBuildDecision(runId, decision) {
+        const entry = this.reviewsByRunId.get(runId);
+        if (!entry) {
+            // No retained review for this runId — record the decision honestly without a
+            // working-tree action (we cannot scope a revert to a review we do not have).
+            void vscode.window.showInformationMessage(`GlyphSpek: review decision "${decision}" recorded for run ${runId} (no retained review to act on).`);
+            return;
+        }
+        const { review, preview, cwd } = entry;
+        const plan = (0, agenticBuildPromotion_1.planDecisionOutcome)(decision, review);
+        // A preview/fixture (or a review with no real cwd) has no real working tree to act
+        // on — record the outcome honestly without touching disk.
+        if (preview || !cwd) {
+            void vscode.window.showInformationMessage(`GlyphSpek: ${plan.traceMarker} recorded for ${preview ? 'PREVIEW ' : ''}run ${runId}. ` +
+                `${plan.summary}${preview ? ' (preview — no real changes to apply or revert.)' : ''}`);
+            return;
+        }
+        if (decision === 'accepted') {
+            // Keep the changes (already in the working tree). OFFER (do not force) to stage.
+            const STAGE = 'Stage Changes';
+            const choice = await vscode.window.showInformationMessage(`GlyphSpek: accepted run ${runId} — the agent's changes are kept (already in your ` +
+                'working tree). human_accepted recorded.', STAGE);
+            if (choice === STAGE) {
+                const staged = (0, agenticBuildPromotion_1.stageChangedFiles)(cwd, review.changedFiles);
+                if (!staged.ok) {
+                    void vscode.window.showWarningMessage(`GlyphSpek: could not stage some files — ${staged.message}`);
+                }
+            }
+            return;
+        }
+        if (decision === 'changes-requested') {
+            // Keep the changes + capture the request. A follow-up build is a later nicety.
+            void vscode.window.showInformationMessage(`GlyphSpek: ${plan.traceMarker} recorded for run ${runId}. ${plan.summary}`);
+            return;
+        }
+        // rejected → REVERT exactly the run's changedFiles, behind a destructive confirm.
+        const n = plan.filesToRevert.length;
+        const DISCARD = 'Discard Changes';
+        const confirm = await vscode.window.showWarningMessage(`Discard the agent's changes to ${n} file(s) in ${cwd}? This reverts EXACTLY the ` +
+            "run's changed files (a scoped git operation) and cannot be undone.", { modal: true }, DISCARD);
+        if (confirm !== DISCARD) {
+            // Operator backed out of the destructive action — change nothing, keep the diff.
+            return;
+        }
+        const result = (0, agenticBuildPromotion_1.revertChangedFiles)(cwd, plan.filesToRevert);
+        if (!result.isGitRepo) {
+            // FAIL SAFE: we cannot auto-revert outside a git repo — tell the user + list the
+            // files so they can revert manually. Nothing was changed.
+            const list = plan.filesToRevert.map((f) => `  - ${f.path}`).join('\n');
+            void vscode.window.showWarningMessage(`GlyphSpek: ${cwd} is not a git repository, so the agent's changes cannot be ` +
+                `auto-reverted. human_rejected recorded. Revert these ${n} file(s) manually:\n${list}`);
+            return;
+        }
+        const failed = result.files.filter((f) => !f.ok);
+        if (failed.length === 0) {
+            void vscode.window.showInformationMessage(`GlyphSpek: rejected run ${runId} — reverted the agent's changes to ${n} file(s). ` +
+                'human_rejected recorded.');
+        }
+        else {
+            const list = failed.map((f) => `  - ${f.path}: ${f.error ?? 'failed'}`).join('\n');
+            void vscode.window.showWarningMessage(`GlyphSpek: reverted ${n - failed.length}/${n} file(s); ${failed.length} could not be ` +
+                `reverted (human_rejected recorded):\n${list}`);
+        }
     }
     /** Read a run-bundle directory and post its files into the webview. */
     loadBundleFromDirectory(dir) {
@@ -477,6 +872,10 @@ class TrustPanel {
         // and silently ignores a malformed/foreign envelope, so this never fabricates a
         // row — it mirrors exactly what reaches the panel below.
         getGovernedRunsModel().ingest(rawEvent);
+        // Feed the STATUS-BAR SEGMENTS model (Slice 2, §1.12) from the SAME stream so
+        // `authority:` / `sandboxed worktree` / `N traced events` reflect the focused
+        // run honestly. It does its own validate-then-fold and ignores malformed input.
+        getRunStatusController().notify(rawEvent);
         const validation = (0, runEventProtocol_1.validateRunEvent)(rawEvent);
         if (!validation.ok) {
             // SCHEMA-VERSION MISMATCH (sweep-19 Medium #6 — FAIL CLOSED). A `rev` problem
@@ -1263,6 +1662,14 @@ function activate(context) {
     const runsModel = getGovernedRunsModel();
     const runsTree = new governedRunsTree_1.GovernedRunsTreeProvider(runsModel, context.extensionUri);
     context.subscriptions.push(runsTree);
+    // STATUS-BAR SEGMENTS + HALO FALLBACK + the glyphspek.authority context-key
+    // (Slice 2, §1.12 / §1.1 / §2.2). The controller creates the four status-bar
+    // items, sets the context-key the future fork ring reads, and (opt-in behind
+    // glyphspek.halo.tintChrome, default OFF) reversibly tints chrome edges. Fed by
+    // the SAME run/event stream via TrustPanel.postRunEvent → controller.notify.
+    const statusController = getRunStatusController();
+    statusController.attach(context);
+    context.subscriptions.push({ dispose: () => void statusController.dispose() });
     context.subscriptions.push(vscode.window.createTreeView('glyphspek.runs', {
         treeDataProvider: runsTree,
         showCollapseAll: false,
@@ -1364,6 +1771,31 @@ function activate(context) {
         };
         tick();
     }));
+    // AGENTIC BUILD REVIEW PREVIEW (Phase B). Opens the Trust Panel and renders a
+    // realistic FIXTURE review so Cory can SEE the review UI now — the compact
+    // evidence object (intent + actor + honest governed-unsandboxed posture, signed
+    // pass verdict, changed files, the unified-diff viewer, commands incl. a passing
+    // `npm test`, observed egress) plus the accept/reject/request-changes controls.
+    // Clearly a PREVIEW (the view shows a fixture tag); the real backend posts the
+    // same shape via TrustPanel.postAgenticBuildReview.
+    context.subscriptions.push(vscode.commands.registerCommand('glyphspek.previewAgenticBuildReview', () => {
+        const panel = TrustPanel.createOrShow(context.extensionUri, gate);
+        panel.reveal();
+        panel.postAgenticBuildReview((0, agenticBuildReview_1.previewAgenticBuildReviewFixture)(), true);
+    }));
+    // GOVERNED AGENTIC BUILD — THE CHAT→ACTOR PROMOTION (Phase C-UI capstone).
+    // "GlyphSpek: Build This (Governed Run)". This is the EXPLICIT authority boundary
+    // (docs/developer-trust-model.md): chat stays Ask (lightweight); promoting a task into
+    // a governed agent run that EDITS FILES and RUNS COMMANDS is where friction belongs. The
+    // command resolves the workspace folder as cwd (honest error if none), takes the build
+    // intent (an arg from the chat surface, or a quick-input prompt), shows an UP-FRONT
+    // authority modal naming the boundary honestly (governed-unsandboxed — traced, NOT
+    // sandboxed), and ONLY on explicit confirm starts the build with approved:true. A decline
+    // does nothing. As build/event arrives, progress shows in an output channel; the terminal
+    // result renders the diff + verdict in the Trust Panel for the second gate (Accept/Reject).
+    const buildOutput = vscode.window.createOutputChannel('GlyphSpek Governed Build');
+    context.subscriptions.push(buildOutput);
+    context.subscriptions.push(vscode.commands.registerCommand('glyphspek.promoteChatToBuild', (intentArg) => promoteChatToBuild(context, gate, buildOutput, intentArg)));
     // Output channel for the supervisor's human-readable progress (stderr). One
     // per session; disposed with the extension.
     const supervisorOutput = vscode.window.createOutputChannel('GlyphSpek Governed Run');
@@ -1400,6 +1832,18 @@ function activate(context) {
         const panel = NativeChatPanel.createOrShow(context.extensionUri, factory);
         panel.reveal();
     }));
+    // THE REAL FIX: make the FORK's STOCK "Build with Agent" chat view answer.
+    // Register this first-party extension AS THE DEFAULT chat agent (+ a minimal,
+    // user-selectable Codex-gateway language model so the fork's agent-invocation path
+    // resolves a model instead of throwing "Language model unavailable"). Both route to
+    // the SAME governed bridge chat/send → Codex gateway used by the native chat panel,
+    // so a message typed into the built-in panel streams a governed Codex reply back into
+    // that panel. The `isDefault`/`modes` manifest flags (gated by the defaultChatParticipant
+    // proposal we enable for this built-in in product.json) make Send route here with no
+    // extra user step. This is a brokered, metadata-TRACED model call on the user's own
+    // ChatGPT subscription (governed, UNSANDBOXED, never product-trusted); no credential
+    // is injected. The separate command-palette webview above is the legacy surface.
+    context.subscriptions.push((0, chatParticipant_1.registerGlyphSpekChatAgent)(buildNativeChatSessionFactory(context, chatOutput), chatOutput));
     // FIRST-PARTY WEBVIEW GESTURE GATE (sweep-20 High #3 — rework of sweep-19).
     //
     // ALL THREE trusted-run paths (governed / bridge / live) are PRODUCT-TRUSTED:
@@ -1511,6 +1955,145 @@ async function assembleBridgeRunRequest(output) {
 /** The first-party extension's product version, reported in the handshake. */
 function resolveExtensionVersion(context) {
     return (context.extension?.packageJSON?.version ?? '0.0.1');
+}
+/**
+ * THE CHAT→ACTOR PROMOTION (Phase C-UI capstone). Promote a task into a GOVERNED AGENTIC
+ * BUILD: codex edits files + runs commands in the workspace folder, GOVERNED (metadata
+ * egress proxy + signed trace) but UNSANDBOXED — the git diff is the safety net. This is
+ * the explicit authority boundary (docs/developer-trust-model.md): chat stays Ask; only
+ * an EXPLICIT up-front approval here grants the authority to edit/run.
+ *
+ * Flow:
+ *   1. Resolve cwd = the open workspace folder (HONEST error if none).
+ *   2. Resolve the intent (the chat prompt passed as the command arg, else a quick-input).
+ *   3. UP-FRONT AUTHORITY MODAL naming the boundary honestly. Decline → do NOTHING.
+ *   4. On confirm ONLY → start the build with approved:true; stream build/event progress
+ *      into the output channel + a status notification; on the terminal result, post the
+ *      AgenticBuildReview into the Trust Panel for the second gate (Accept/Reject); on
+ *      error, surface the honest message.
+ *
+ * `intentArg` is the optional chat-surfaced prompt (a follow-up "Build This" after a chat
+ * turn); when absent the command is standalone and quick-inputs the intent.
+ */
+async function promoteChatToBuild(context, gate, output, intentArg) {
+    // (1) cwd = the open workspace folder. No folder → honest error, do nothing.
+    const folder = vscode.workspace.workspaceFolders?.[0];
+    const candidateCwd = folder?.uri.fsPath;
+    // (2) Intent: the chat prompt arg, else a quick-input. A blank intent aborts.
+    let intent = typeof intentArg === 'string' && intentArg.trim().length > 0 ? intentArg.trim() : undefined;
+    if (!intent && candidateCwd) {
+        // Only prompt for an intent when there IS a workspace folder — otherwise the
+        // preflight below surfaces the no-folder error first (don't ask for a task we
+        // can't run).
+        intent = await vscode.window.showInputBox({
+            prompt: 'GlyphSpek — what should the governed agent build? (it WILL edit files + run commands)',
+            placeHolder: 'e.g. "add input validation to the signup form and a test for it"',
+            ignoreFocusOut: true,
+        });
+        if (intent === undefined)
+            return; // cancelled the quick-input
+    }
+    const preflight = (0, agenticBuildPromotion_1.resolveBuildPreflight)(candidateCwd, intent);
+    if (!preflight.ok) {
+        void vscode.window.showWarningMessage(`GlyphSpek: ${preflight.reason}`);
+        return;
+    }
+    const { cwd, prompt } = preflight;
+    // (3) UP-FRONT AUTHORITY APPROVAL. This is the operator gesture that grants the build
+    // authority — minted via the SAME first-party operator-gesture registry that gates a
+    // product-trusted run, so a third-party `executeCommand('glyphspek.promoteChatToBuild')`
+    // cannot satisfy the MODAL and thus cannot start a build. The modal names the boundary
+    // honestly (governed-unsandboxed). Decline → do NOTHING (no build/start; approved is
+    // never sent as anything but true).
+    const granted = await (0, agenticBuildPromotion_1.confirmBuildAuthority)(cwd, (message, proceedLabel) => Promise.resolve(vscode.window.showWarningMessage(message, { modal: true }, proceedLabel)));
+    if (!granted) {
+        output.appendLine(`[host] governed build DECLINED at the authority gate for ${cwd} — nothing started.`);
+        return;
+    }
+    // Mint+consume a first-party operator gesture so the authority grant is attributable
+    // (defense-in-depth: the modal already gates this command from a third party, and the
+    // gesture records the deliberate operator act). A failure to mint never blocks the
+    // build the operator just approved — the modal is the load-bearing gate.
+    try {
+        gate.gestures.consume(gate.gestures.mint());
+    }
+    catch {
+        /* gesture bookkeeping is best-effort; the modal confirm is the authority gate */
+    }
+    output.show(true);
+    output.appendLine('');
+    output.appendLine(`[host] governed agentic build APPROVED for ${cwd}.`);
+    output.appendLine(`[host] intent: ${prompt}`);
+    // Open + reveal the Trust Panel FIRST so it is ready to receive the review.
+    const panel = TrustPanel.createOrShow(context.extensionUri, gate);
+    panel.reveal();
+    // (4) Start the build (approved:true) and stream progress honestly. Each state/command
+    // becomes an output line + a brief status; the terminal result posts the review.
+    const result = await vscode.window.withProgress({
+        location: vscode.ProgressLocation.Notification,
+        cancellable: false,
+        title: 'GlyphSpek: governed agentic build…',
+    }, (progress) => (0, supervisorBridgeRunner_1.runAgenticBuild)({
+        bridgeServerPath: resolveBundledBridgeServerPath(context),
+        extensionVersion: resolveExtensionVersion(context),
+        runsBase: resolveRunsBase(),
+        prompt,
+        cwd,
+        approved: true,
+        output,
+        onBuildEvent: (event) => reportBuildProgress(event, output, progress),
+    }));
+    if (!result.started) {
+        void vscode.window.showErrorMessage(`GlyphSpek: governed build not started — ${result.message}`);
+        return;
+    }
+    if (result.review) {
+        // Render the diff + commands + verdict in the Trust Panel for the SECOND gate. Pass
+        // the REAL cwd so a Reject scopes its revert to this repo + the review's changedFiles.
+        panel.postAgenticBuildReview(result.review, false, cwd);
+        void vscode.window.showInformationMessage(`GlyphSpek: governed build ${result.runId ?? ''} complete — review the diff + verdict in the ` +
+            'Trust Panel, then Accept or Reject.');
+    }
+    else {
+        void vscode.window.showWarningMessage(`GlyphSpek: governed build ${result.runId ?? ''} ended without a review — ${result.message || 'no result event'}.`);
+    }
+}
+/**
+ * Surface one streamed `build/event` honestly as operator-facing progress (an output line
+ * per state/command/fileChange + a brief progress report). The terminal result/error are
+ * handled by the caller; here we narrate the in-flight evidence (e.g. "running `npm test`…").
+ */
+function reportBuildProgress(event, output, progress) {
+    switch (event.type) {
+        case 'state':
+            output.appendLine(`[build] state: ${event.state}`);
+            progress.report({ message: event.state });
+            break;
+        case 'command':
+            if (event.phase === 'start') {
+                output.appendLine(`[build] running: ${event.cmd}`);
+                progress.report({ message: `running ${event.cmd}…` });
+            }
+            else {
+                output.appendLine(`[build] finished: ${event.cmd}${typeof event.exitCode === 'number' ? ` (exit ${event.exitCode})` : ''}`);
+            }
+            break;
+        case 'fileChange':
+            output.appendLine(`[build] ${event.status}: ${event.path}`);
+            break;
+        case 'summary':
+            // Narration deltas — append without a newline-per-token spam; one line per chunk.
+            if (event.textDelta.trim().length > 0)
+                output.append(event.textDelta);
+            break;
+        case 'result':
+            output.appendLine('');
+            output.appendLine('[build] complete — review the diff + verdict in the Trust Panel.');
+            break;
+        case 'error':
+            output.appendLine(`[build] error: ${event.message}`);
+            break;
+    }
 }
 /**
  * Consume the first-party operator gesture that gates a PRODUCT-TRUSTED run
@@ -1804,10 +2387,22 @@ async function openGovernedTerminalSurface(context, output, surface, detected) {
         proxyUrl: start.proxyUrl,
         baseEnv: process.env,
     });
+    // isTransient: do NOT let VS Code PERSIST/RESTORE this terminal across a window
+    // reload. A governed terminal's HTTPS_PROXY/HTTP_PROXY points at THIS supervisor
+    // process's metadata-only egress proxy (e.g. http://127.0.0.1:<port>), which is bound
+    // to the supervisor's lifetime. A "Developer: Reload Window" RESTARTS the extension
+    // host + supervisor; the old proxy port dies and a new proxy binds a DIFFERENT port.
+    // If the terminal were persisted it would come back with that STALE, dead proxy env,
+    // and the CLI's first egress (e.g. claude's OAuth token check) would hit the dead
+    // port → `OAuth error: ECONNREFUSED`. With isTransient, a reload DROPS the governed
+    // terminal; the user opens a fresh one that is wired to the LIVE proxy from
+    // terminal/start. (Applies to both `surface === 'chat'` and the governed terminal —
+    // both inject the supervisor-bound proxy env.)
     const terminal = vscode.window.createTerminal({
         name: surface === 'chat' ? 'GlyphSpek Chat' : 'GlyphSpek Governed Terminal',
         env: terminalEnv,
         strictEnv,
+        isTransient: true,
     });
     // Tie the supervised session's lifetime to the terminal: when the operator closes
     // it, FINALIZE the run (terminal/stop → signed verdict incl. assurance) and surface
@@ -2356,6 +2951,12 @@ async function createTrustedGovernedRun(context, supervisorOutput, gestures, ges
     }
 }
 function deactivate() {
-    /* no-op: webview panel disposal is handled per-panel. */
+    // Restore any applied halo chrome tint + clear the glyphspek.authority context-
+    // key (Slice 2). The status-bar items are disposed via context.subscriptions.
+    // Webview panel disposal is handled per-panel.
+    if (runStatusController) {
+        void runStatusController.dispose();
+        runStatusController = undefined;
+    }
 }
 //# sourceMappingURL=extension.js.map

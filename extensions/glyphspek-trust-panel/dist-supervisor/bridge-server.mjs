@@ -2,6 +2,7 @@
 import { createHash as createHash3 } from "node:crypto";
 import { readFileSync as readFileSync3, statSync as statSync2 } from "node:fs";
 import { spawnSync } from "node:child_process";
+import { join as join6 } from "node:path";
 
 // ../spikes/p0-supervisor/run.ts
 import { randomUUID } from "node:crypto";
@@ -139,7 +140,25 @@ var BridgeMethod = {
    * supervisor's governed proxy. Mirrors the streaming pattern of run/start
    * (ack-then-notifications), not the synchronous model/call.
    */
-  ChatSend: "chat/send"
+  ChatSend: "chat/send",
+  /**
+   * Start a GOVERNED AGENTIC BUILD (Phase B — the chat→ACTOR promotion). Unlike
+   * {@link ChatSend} (Ask-only, read-only), a build crosses from assistant to ACTOR:
+   * it edits files and runs commands under `cwd`. Per the developer trust doctrine
+   * (docs/developer-trust-model.md) that authority boundary requires friction — an
+   * EXPLICIT up-front authority grant. The request therefore carries
+   * `approved: boolean`; the supervisor REFUSES (terminal `build/event` error, codex
+   * NOT spawned) unless it is `true`. On approval the supervisor records the grant
+   * (approval_requested + approval_approved trace events), runs codex agentically
+   * under a governed run (metadata-only egress proxy, hash-chained trace, signed
+   * verifier verdict; honest `governed-unsandboxed` posture — the diff is the safety
+   * net, NOT a sandbox; no credential injected), and STREAMS the build as
+   * {@link BridgeNotification.AgenticBuildEvent} notifications tagged with the runId.
+   * This request's RESULT is only the ACK ({ runId }); the terminal stream event
+   * carries the {@link AgenticBuildReview} render contract. Mirrors run/start's
+   * ack-then-notifications style.
+   */
+  AgenticBuildStart: "build/start"
 };
 var BridgeNotification = {
   /** A run lifecycle/trace event streamed back to the client for the panel. */
@@ -153,7 +172,20 @@ var BridgeNotification = {
    * `turnId`. Carries assistant TEXT (the answer the UI renders), never a
    * credential.
    */
-  ChatDelta: "chat/delta"
+  ChatDelta: "chat/delta",
+  /**
+   * One agentic-build stream event (Phase B). After a
+   * {@link BridgeMethod.AgenticBuildStart} ack, the supervisor emits a sequence of
+   * these tagged with the same `runId`: `state` lifecycle markers, `summary` text
+   * deltas, `command` start/end pairs (with exit codes), `fileChange` events, then
+   * exactly one terminal `result` (carrying the {@link AgenticBuildReview} render
+   * contract) or `error`. A REFUSED build (missing authority approval) emits ONLY a
+   * terminal `error` and no codex is spawned. The payload is an
+   * {@link AgenticBuildStreamEvent} — the build event discriminated union plus the
+   * `runId`. Carries non-secret build EVIDENCE (summary/commands/diff/verdict),
+   * never a credential.
+   */
+  AgenticBuildEvent: "build/event"
 };
 var BridgeErrorCode = {
   /** Malformed envelope / JSON parse failure on the wire. */
@@ -444,6 +476,10 @@ var SIGNATURE_ALG = "ed25519";
 function keyIdForPublicKey(publicKey) {
   const spki = publicKey.export({ type: "spki", format: "der" });
   return createHash2("sha256").update(spki).digest("hex").slice(0, 16);
+}
+function generateVerifierKeypair() {
+  const { privateKey, publicKey } = generateKeyPairSync("ed25519");
+  return { privateKey, publicKey, keyId: keyIdForPublicKey(publicKey) };
 }
 function verdictMessage(core) {
   const { signature: _ignored, ...verdict } = core;
@@ -2497,6 +2533,557 @@ var CodexChatBackend = class {
   }
 };
 
+// ../spikes/p0-model-gateway/governed-agentic-run.ts
+import { execFile as execFile2 } from "node:child_process";
+import { promisify as promisify2 } from "node:util";
+import { join as join5 } from "node:path";
+
+// ../spikes/p0-model-gateway/agentic-backend.ts
+import { spawn as spawn3 } from "node:child_process";
+import { execFile } from "node:child_process";
+import { isAbsolute as isAbsolute3 } from "node:path";
+import { promisify } from "node:util";
+var execFileAsync = promisify(execFile);
+var DEFAULT_AGENTIC_TIMEOUT_MS = 3e5;
+var AGENTIC_SANDBOX_MODE = "workspace-write";
+var AGENTIC_APPROVAL_POLICY = "never";
+var STDERR_TAIL_LIMIT2 = 1200;
+function buildAgenticArgs(req) {
+  const args = [
+    "exec",
+    "-",
+    // read the prompt from stdin
+    "--json",
+    "--sandbox",
+    AGENTIC_SANDBOX_MODE,
+    // workspace-write: codex MAY edit files + run commands
+    "-c",
+    `approval_policy="${AGENTIC_APPROVAL_POLICY}"`,
+    // NOTE: deliberately NO --skip-git-repo-check (we WANT a git repo to diff) and
+    // NO --ephemeral (a build may legitimately persist a session; harmless here).
+    "-C",
+    req.cwd
+  ];
+  if (req.model && req.model.trim().length > 0) {
+    args.push("-m", req.model);
+  }
+  return args;
+}
+function asNum2(v) {
+  return typeof v === "number" && Number.isFinite(v) ? v : void 0;
+}
+function asStr(v) {
+  return typeof v === "string" ? v : void 0;
+}
+async function git(cwd, env, args) {
+  const { stdout } = await execFileAsync("git", ["-C", cwd, ...args], {
+    env,
+    maxBuffer: 64 * 1024 * 1024
+    // diffs can be large
+  });
+  return stdout;
+}
+function porcelainStatus(xy) {
+  const x = xy[0] ?? " ";
+  const y = xy[1] ?? " ";
+  if (x === "?" || y === "?") return "?";
+  if (y !== " ") return y;
+  if (x !== " ") return x;
+  return "?";
+}
+function parsePorcelain(porcelain) {
+  const out = [];
+  for (const line of porcelain.split("\n")) {
+    if (line.length === 0) continue;
+    const xy = line.slice(0, 2);
+    let pathPart = line.slice(3);
+    const arrow = pathPart.indexOf(" -> ");
+    if (arrow !== -1) pathPart = pathPart.slice(arrow + 4);
+    let p = pathPart.trim();
+    if (p.startsWith('"') && p.endsWith('"')) {
+      try {
+        p = JSON.parse(p);
+      } catch {
+      }
+    }
+    if (p.length > 0) out.push({ path: p, status: porcelainStatus(xy) });
+  }
+  return out;
+}
+async function gitAllowNonZero(cwd, env, args) {
+  try {
+    return await git(cwd, env, args);
+  } catch (err) {
+    const out = err.stdout;
+    return typeof out === "string" ? out : "";
+  }
+}
+async function diffUntrackedFile(cwd, env, relPath) {
+  const out = await gitAllowNonZero(cwd, env, ["diff", "--no-index", "--", "/dev/null", relPath]);
+  return out;
+}
+async function listUntrackedFiles(cwd, env) {
+  const out = await gitAllowNonZero(cwd, env, ["ls-files", "--others", "--exclude-standard"]);
+  return out.split("\n").map((l) => l.trim()).filter((l) => l.length > 0);
+}
+async function captureGitEvidence(cwd, env) {
+  const [porcelain, trackedDiff, trackedStat, untracked] = await Promise.all([
+    git(cwd, env, ["status", "--porcelain"]),
+    git(cwd, env, ["diff"]),
+    git(cwd, env, ["diff", "--stat"]),
+    listUntrackedFiles(cwd, env)
+  ]);
+  const changedFiles = parsePorcelain(porcelain);
+  let diff = trackedDiff;
+  let untrackedStatLines = 0;
+  for (const rel of untracked) {
+    const block = await diffUntrackedFile(cwd, env, rel);
+    if (block.trim().length > 0) {
+      if (diff.length > 0 && !diff.endsWith("\n")) diff += "\n";
+      diff += block;
+      untrackedStatLines += 1;
+    }
+  }
+  let diffStat = trackedStat.trimEnd();
+  for (const rel of untracked) {
+    const existing = changedFiles.find((f) => f.path === rel);
+    if (existing) {
+      if (existing.status === "?") existing.status = "A";
+    } else {
+      changedFiles.push({ path: rel, status: "A" });
+    }
+  }
+  if (untrackedStatLines > 0) {
+    const tail = untracked.map((rel) => ` ${rel} | (new file)`).join("\n");
+    diffStat = diffStat.length > 0 ? `${diffStat}
+${tail}` : tail;
+  }
+  return { changedFiles, diff, diffStat };
+}
+async function* runAgenticBuild(req, opts = {}) {
+  const refusal = refuseUngovernedEnv(req.env);
+  if (refusal) {
+    yield { type: "error", message: refusal };
+    return;
+  }
+  if (typeof req.cwd !== "string" || !isAbsolute3(req.cwd)) {
+    yield {
+      type: "error",
+      message: `agentic build requires an absolute cwd (a git repo); got: ${String(req.cwd)}`
+    };
+    return;
+  }
+  const codexPath = typeof opts.codexPath === "string" && isAbsolute3(opts.codexPath) ? opts.codexPath : void 0;
+  if (codexPath === void 0) {
+    yield {
+      type: "error",
+      message: "codex is not available: no absolute codex binary was resolved for this agentic build (refusing to spawn a bare `codex` from the ambient PATH)."
+    };
+    return;
+  }
+  const timeoutMs = opts.timeoutMs ?? DEFAULT_AGENTIC_TIMEOUT_MS;
+  const args = buildAgenticArgs(req);
+  const env = { ...req.env, CI: "1" };
+  const child = spawn3(codexPath, args, {
+    cwd: req.cwd,
+    env,
+    stdio: ["pipe", "pipe", "pipe"]
+  });
+  const events = [];
+  let resolveNext;
+  let finished = false;
+  const wake = () => {
+    if (resolveNext) {
+      const r = resolveNext;
+      resolveNext = void 0;
+      r();
+    }
+  };
+  const push = (e) => {
+    events.push(e);
+    wake();
+  };
+  const summaries = [];
+  const commands = [];
+  const fileChangeReports = [];
+  let usage;
+  let stdoutBuf = "";
+  let stderrTail = "";
+  const handleLine = (line) => {
+    const trimmed = line.trim();
+    if (trimmed.length === 0) return;
+    let evt;
+    try {
+      evt = JSON.parse(trimmed);
+    } catch {
+      return;
+    }
+    const item = evt.item;
+    if (evt.type === "item.completed" && item?.type === "agent_message") {
+      const text = asStr(item.text) ?? "";
+      if (text.length > 0) {
+        summaries.push(text);
+        push({ type: "summary_delta", text });
+      }
+    } else if (item?.type === "command_execution") {
+      const cmd = asStr(item.command) ?? "";
+      if (evt.type === "item.started") {
+        push({ type: "command", phase: "start", cmd });
+      } else if (evt.type === "item.completed") {
+        const exitCode = asNum2(item.exit_code);
+        commands.push({ cmd, ...exitCode !== void 0 ? { exitCode } : {} });
+        push({ type: "command", phase: "end", cmd, ...exitCode !== void 0 ? { exitCode } : {} });
+      }
+    } else if (evt.type === "item.completed" && item?.type === "file_change") {
+      for (const ch of item.changes ?? []) {
+        const path3 = asStr(ch.path);
+        const kind = asStr(ch.kind) ?? "unknown";
+        if (path3) {
+          fileChangeReports.push({ path: path3, kind });
+          push({ type: "file_change", path: path3, kind });
+        }
+      }
+    } else if (evt.type === "turn.completed" && evt.usage) {
+      const inputTokens = asNum2(evt.usage.input_tokens);
+      const outputTokens = asNum2(evt.usage.output_tokens);
+      const cachedInputTokens = asNum2(evt.usage.cached_input_tokens);
+      if (inputTokens !== void 0 || outputTokens !== void 0 || cachedInputTokens !== void 0) {
+        usage = {
+          ...inputTokens !== void 0 ? { inputTokens } : {},
+          ...outputTokens !== void 0 ? { outputTokens } : {},
+          ...cachedInputTokens !== void 0 ? { cachedInputTokens } : {}
+        };
+      }
+    }
+  };
+  child.stdout.setEncoding("utf8");
+  child.stdout.on("data", (chunk) => {
+    stdoutBuf += chunk;
+    let nl;
+    while ((nl = stdoutBuf.indexOf("\n")) !== -1) {
+      const line = stdoutBuf.slice(0, nl).replace(/\r$/, "");
+      stdoutBuf = stdoutBuf.slice(nl + 1);
+      handleLine(line);
+    }
+  });
+  child.stderr.setEncoding("utf8");
+  child.stderr.on("data", (chunk) => {
+    stderrTail = (stderrTail + chunk).slice(-STDERR_TAIL_LIMIT2);
+  });
+  let timedOut = false;
+  const timer = setTimeout(() => {
+    timedOut = true;
+    child.kill("SIGKILL");
+  }, timeoutMs);
+  if (timer.unref) timer.unref();
+  let aborted = false;
+  const onAbort = () => {
+    aborted = true;
+    child.kill("SIGKILL");
+  };
+  if (opts.signal) {
+    if (opts.signal.aborted) onAbort();
+    else opts.signal.addEventListener("abort", onAbort, { once: true });
+  }
+  const cleanup = () => {
+    clearTimeout(timer);
+    if (opts.signal) opts.signal.removeEventListener("abort", onAbort);
+  };
+  const closed = new Promise((resolve2) => {
+    child.on("error", (err) => {
+      cleanup();
+      push({
+        type: "error",
+        message: `codex spawn failed: ${String(err?.message ?? err)}`
+      });
+      finished = true;
+      wake();
+      resolve2(null);
+    });
+    child.on("close", (code) => {
+      cleanup();
+      if (stdoutBuf.trim().length > 0) {
+        handleLine(stdoutBuf);
+        stdoutBuf = "";
+      }
+      resolve2(code);
+    });
+  });
+  child.stdin.on("error", () => {
+  });
+  child.stdin.end(req.prompt, "utf8");
+  void (async () => {
+    const code = await closed;
+    if (finished) return;
+    if (timedOut) {
+      push({ type: "error", message: `agentic build timed out after ${timeoutMs}ms` });
+      finished = true;
+      wake();
+      return;
+    }
+    if (aborted) {
+      push({ type: "error", message: "agentic build aborted" });
+      finished = true;
+      wake();
+      return;
+    }
+    let evidence;
+    try {
+      evidence = await captureGitEvidence(req.cwd, env);
+    } catch (err) {
+      if (stderrTail.trim() && opts.onOperatorLog) {
+        try {
+          opts.onOperatorLog(`agentic build stderr tail: ${stderrTail.trim()}`);
+        } catch {
+        }
+      }
+      push({
+        type: "error",
+        message: `agentic build could not capture git evidence in ${req.cwd}: ${String(err?.message ?? err)} (is it a git repo?)`
+      });
+      finished = true;
+      wake();
+      return;
+    }
+    if (code !== 0) {
+      if (stderrTail.trim() && opts.onOperatorLog) {
+        try {
+          opts.onOperatorLog(`codex exec exited ${code ?? "null"} (verbatim stderr tail): ${stderrTail.trim()}`);
+        } catch {
+        }
+      }
+    }
+    const result = {
+      summary: summaries.length > 0 ? summaries[summaries.length - 1] : "",
+      commands,
+      changedFiles: evidence.changedFiles,
+      diff: evidence.diff,
+      diffStat: evidence.diffStat,
+      fileChangeReports,
+      ...usage ? { usage } : {},
+      exitCode: code ?? -1
+    };
+    push({ type: "result", result });
+    finished = true;
+    wake();
+  })();
+  let i = 0;
+  for (; ; ) {
+    while (i < events.length) {
+      yield events[i];
+      i += 1;
+    }
+    if (finished && i >= events.length) break;
+    await new Promise((resolve2) => {
+      resolveNext = resolve2;
+    });
+  }
+}
+
+// ../spikes/p0-model-gateway/governed-agentic-run.ts
+var execFileAsync2 = promisify2(execFile2);
+var AGENTIC_RUN_POSTURE = "governed-unsandboxed";
+var AGENTIC_AGENT_BACKEND = "codex-cli";
+function checkStatusForExit(exitCode) {
+  return exitCode === 0 ? "pass" : "fail";
+}
+async function runVerifyCheck(command, cwd, env, timeoutMs) {
+  const name = command.join(" ") || "(empty command)";
+  if (command.length === 0) {
+    return { name, command: [...command], status: "error" };
+  }
+  try {
+    await execFileAsync2(command[0], command.slice(1), {
+      cwd,
+      env,
+      timeout: timeoutMs,
+      maxBuffer: 16 * 1024 * 1024
+    });
+    return { name, command: [...command], status: "pass" };
+  } catch (err) {
+    const code = err.code;
+    if (typeof code === "number") {
+      return { name, command: [...command], status: checkStatusForExit(code) };
+    }
+    return { name, command: [...command], status: "error" };
+  }
+}
+async function runGovernedAgenticBuild(opts) {
+  const now = opts.now ?? Date.now;
+  const emit = opts.emit ?? (() => {
+  });
+  const endpoints = opts.modelEndpoints ?? DEFAULT_MODEL_ENDPOINTS;
+  const verifierKey = opts.verifierPrivateKey ?? generateVerifierKeypair().privateKey;
+  let runId;
+  let runDir;
+  let tracePath;
+  let sink;
+  if (opts.existingRun) {
+    runId = opts.existingRun.runId;
+    tracePath = opts.existingRun.tracePath;
+    sink = opts.sink ?? opts.existingRun.sink;
+    runDir = join5(tracePath, "..", "..");
+  } else {
+    const created = createRun(opts.runsBaseDir);
+    runId = created.runId;
+    runDir = created.dir;
+    tracePath = join5(runSubdirPath(runDir, "trace"), "trace.jsonl");
+    sink = opts.sink ?? createTraceWriter(tracePath);
+  }
+  let lastTraceHash;
+  if (opts.existingRun) {
+    try {
+      const prior = readTrace(tracePath);
+      if (prior.length > 0) lastTraceHash = prior[prior.length - 1].hash;
+    } catch {
+    }
+  }
+  const append = (type, payload, source) => {
+    const written = sink.append({
+      v: TRACE_EVENT_VERSION,
+      runId,
+      seq: 0,
+      // the writer is authoritative for seq
+      ts: now(),
+      type,
+      payload,
+      ...source ? { source } : {}
+    });
+    if (written && typeof written.hash === "string") {
+      lastTraceHash = written.hash;
+    }
+  };
+  let state = "created";
+  const transition = (to, reason) => {
+    const from = state;
+    state = to;
+    emit({ type: "state", from, to, reason });
+    const payload = {
+      from,
+      to,
+      reason
+    };
+    append("run_state_changed", payload, "policy");
+  };
+  const allow = [
+    ...endpoints.map((e) => `${e.host}:${e.port ?? 443}`),
+    ...agentSupportAllowEntries("codex")
+  ];
+  const proxy = await startGovernedTerminalProxy({
+    allow,
+    sink,
+    runId,
+    modelEndpoints: endpoints,
+    bindHost: opts.bindHost ?? "127.0.0.1",
+    observeAll: true,
+    // SOFT governed-unsandboxed boundary: observe + trace, don't block
+    ...opts.denyDirectIp !== void 0 ? { denyDirectIp: opts.denyDirectIp } : {}
+  });
+  const { env: governedEnv, posture: credentialPosture } = buildGovernedEnvResult({
+    proxyUrl: proxy.url
+  });
+  emit({ type: "run_created", runId, runDir, proxyUrl: proxy.url, posture: AGENTIC_RUN_POSTURE });
+  const runCreated = {
+    runId,
+    runDir,
+    intent: opts.prompt.slice(0, 200),
+    workflowType: "bugfix",
+    agentBackend: AGENTIC_AGENT_BACKEND
+  };
+  append("run_created", runCreated, "supervisor");
+  let agentic;
+  let buildError;
+  try {
+    transition("worktree_ready", "run directory + governed proxy ready");
+    transition("sandbox_ready", "governed env built (egress brokered, ambient secrets stripped)");
+    transition("executing", "agentic codex build started");
+    for await (const ev of runAgenticBuild(
+      { prompt: opts.prompt, cwd: opts.cwd, env: governedEnv },
+      {
+        codexPath: opts.codexPath,
+        ...opts.timeoutMs !== void 0 ? { timeoutMs: opts.timeoutMs } : {},
+        ...opts.signal ? { signal: opts.signal } : {},
+        ...opts.onOperatorLog ? { onOperatorLog: opts.onOperatorLog } : {}
+      }
+    )) {
+      emit({ type: "agentic", event: ev });
+      if (ev.type === "command") {
+        if (ev.phase === "start") {
+          const payload = {
+            tool: "command",
+            requestedCapability: "command:exec",
+            provenanceLabel: "tool-output"
+          };
+          append("tool_start", payload);
+        } else {
+          const payload = {
+            tool: "command",
+            ...ev.exitCode !== void 0 ? { exitCode: ev.exitCode } : {},
+            provenanceLabel: "tool-output"
+          };
+          append("tool_end", payload);
+        }
+      } else if (ev.type === "error") {
+        buildError = ev.message;
+      } else if (ev.type === "result") {
+        agentic = ev.result;
+        const call = {
+          model: AGENTIC_AGENT_BACKEND,
+          ...ev.result.usage?.inputTokens !== void 0 ? { inputTokens: ev.result.usage.inputTokens } : {},
+          ...ev.result.usage?.outputTokens !== void 0 ? { outputTokens: ev.result.usage.outputTokens } : {},
+          provenanceLabel: "tool-output"
+        };
+        append("model_call", call);
+      }
+    }
+  } finally {
+    await proxy.close();
+  }
+  const codexOk = agentic !== void 0 && agentic.exitCode === 0 && !buildError;
+  transition(codexOk ? "completed" : "failed", codexOk ? "agentic build completed" : `agentic build failed: ${buildError ?? `codex exit ${agentic?.exitCode ?? "unknown"}`}`);
+  const checks = [];
+  if (opts.verifyCommand && opts.verifyCommand.length > 0) {
+    const check = await runVerifyCheck(
+      opts.verifyCommand,
+      opts.cwd,
+      governedEnv,
+      opts.timeoutMs ?? 12e4
+    );
+    checks.push(check);
+  } else {
+    const changed = agentic?.changedFiles.length ?? 0;
+    checks.push({
+      name: "changed-files",
+      command: [],
+      status: changed > 0 ? "pass" : "fail"
+    });
+  }
+  const anyFail = checks.some((c) => c.status === "fail");
+  const anyError = checks.some((c) => c.status === "error") || buildError !== void 0;
+  const overallVerdict = anyError ? "error" : anyFail ? "fail" : "pass";
+  let traceRootHash = lastTraceHash ?? GENESIS_HASH;
+  try {
+    const events = readTrace(tracePath);
+    if (events.length > 0) traceRootHash = computeTraceRoot(events);
+  } catch {
+  }
+  const core = { checks, overallVerdict, traceRootHash };
+  const signature = signVerdict(core, verifierKey);
+  const verdict = { ...core, signature };
+  append("verifier_verdict", { overallVerdict, traceRootHash, checks }, "verifier");
+  emit({ type: "verdict", verdict });
+  emit({ type: "run_closed", runId, ok: overallVerdict === "pass" });
+  return {
+    runId,
+    runDir,
+    tracePath,
+    posture: AGENTIC_RUN_POSTURE,
+    credentialPosture,
+    ...agentic ? { agentic } : {},
+    verdict
+  };
+}
+
 // ../spikes/p0-supervisor/bridge-server.ts
 var APPROVED_ISOLATION_RUNTIMES = [
   "docker",
@@ -2647,6 +3234,53 @@ function modelEventDetail(e) {
     }
   }
 }
+function mapGitStatusToReviewStatus(status) {
+  const s = (status ?? "").trim().toUpperCase();
+  if (s === "A" || s === "?" || s === "??") return "added";
+  if (s === "D") return "deleted";
+  return "modified";
+}
+function projectAgenticBuildReview(runId, prompt, result) {
+  const agentic = result.agentic;
+  const changedFiles = (agentic?.changedFiles ?? []).map((f) => ({
+    path: f.path,
+    status: mapGitStatusToReviewStatus(f.status)
+  }));
+  const commands = (agentic?.commands ?? []).map((c) => ({
+    cmd: c.cmd,
+    ...c.exitCode !== void 0 ? { exitCode: c.exitCode } : {}
+  }));
+  const egress = readObservedEgress(result);
+  const verdict = result.verdict;
+  return {
+    runId,
+    intent: prompt,
+    actor: "codex",
+    posture: "governed-unsandboxed",
+    summary: agentic?.summary ?? "",
+    changedFiles,
+    diff: agentic?.diff ?? "",
+    commands,
+    egress,
+    verdict: {
+      overall: verdict.overallVerdict,
+      // The in-line check ran over the worktree → full assurance for this path.
+      assurance: "full",
+      checks: verdict.checks.map((c) => ({ name: c.name, status: c.status })),
+      ...verdict.signature ? {
+        signature: {
+          alg: verdict.signature.alg,
+          value: verdict.signature.value,
+          keyId: verdict.signature.keyId
+        }
+      } : {}
+    }
+  };
+}
+function readObservedEgress(result) {
+  const maybe = result.egress;
+  return Array.isArray(maybe) ? maybe.filter((x) => typeof x === "string") : [];
+}
 var DEFAULT_SUPERVISOR_VERSION = "0.0.0-p0";
 var BridgeServer = class {
   supervisorVersion;
@@ -2657,6 +3291,7 @@ var BridgeServer = class {
   pinnedSha;
   model;
   chat;
+  agentic;
   terminalModelEndpoints;
   stdinBuffer = "";
   handshakeDone = false;
@@ -2694,6 +3329,8 @@ var BridgeServer = class {
    * PATH (the production backend then fails the turn closed — no bare `codex`).
    */
   codexLaunch;
+  /** Monotonic counter minting agentic-build run ids (per connection). */
+  buildSeq = 0;
   constructor(opts) {
     this.supervisorVersion = opts.supervisorVersion ?? DEFAULT_SUPERVISOR_VERSION;
     this.runsBaseDir = opts.runsBaseDir;
@@ -2704,6 +3341,7 @@ var BridgeServer = class {
     this.pinnedSha = opts.pinnedSha;
     this.model = opts.model;
     this.chat = opts.chat;
+    this.agentic = opts.agentic;
     this.terminalModelEndpoints = opts.terminalModelEndpoints;
   }
   /**
@@ -2829,6 +3467,9 @@ var BridgeServer = class {
         return;
       case BridgeMethod.ChatSend:
         void this.handleChatSend(req);
+        return;
+      case BridgeMethod.AgenticBuildStart:
+        void this.handleAgenticBuildStart(req);
         return;
       default:
         this.emit(
@@ -3400,42 +4041,232 @@ var BridgeServer = class {
     const turnId = `chat-${++this.chatTurnSeq}`;
     const ack = { turnId };
     this.emit(this.successResponse(req.id, ack));
-    let runId = explicitRunId;
-    let turnEnv = this.chat?.env;
-    if (!runId || !this.runs.has(runId)) {
-      const governed = await this.ensureChatGovernedSession();
-      if (!governed) {
-        this.emitChatDelta({
-          turnId,
-          type: "error",
-          message: "could not open a governed chat session (egress proxy + run/trace) \u2014 refusing to run an ungoverned chat turn."
-        });
-        return;
-      }
-      runId = governed.runId;
-      turnEnv = this.chat?.env ?? governed.env;
-    }
-    const serverRun = runId ? this.runs.get(runId) : void 0;
-    const cwd = serverRun?.created.dir ?? process.cwd();
-    const gateway = this.ensureChatGateway();
-    this.chatActiveRunId = runId;
     try {
-      for await (const event of gateway.chatTurn(
-        backendId,
-        { messages: params.messages, cwd },
-        turnEnv ? { env: turnEnv } : void 0
-      )) {
-        this.emitChatDelta({ turnId, ...event });
+      let runId = explicitRunId;
+      let turnEnv = this.chat?.env;
+      if (!runId || !this.runs.has(runId)) {
+        const governed = await this.ensureChatGovernedSession();
+        if (!governed) {
+          this.emitChatDelta({
+            turnId,
+            type: "error",
+            message: "could not open a governed chat session (egress proxy + run/trace) \u2014 refusing to run an ungoverned chat turn."
+          });
+          return;
+        }
+        runId = governed.runId;
+        turnEnv = this.chat?.env ?? governed.env;
+      }
+      const serverRun = runId ? this.runs.get(runId) : void 0;
+      const cwd = serverRun?.created.dir ?? process.cwd();
+      const gateway = this.ensureChatGateway();
+      this.chatActiveRunId = runId;
+      try {
+        for await (const event of gateway.chatTurn(
+          backendId,
+          { messages: params.messages, cwd },
+          turnEnv ? { env: turnEnv } : void 0
+        )) {
+          this.emitChatDelta({ turnId, ...event });
+        }
+      } finally {
+        this.chatActiveRunId = void 0;
       }
     } catch (err) {
+      this.logLine(
+        `[bridge-server] chat/send turn ${turnId} failed: ${String(err?.message ?? err)}`
+      );
       this.emitChatDelta({
         turnId,
         type: "error",
         message: `chat/send stream failed: ${String(err?.message ?? err)}`
       });
-    } finally {
-      this.chatActiveRunId = void 0;
     }
+  }
+  /* ============================================================== *
+   * AGENTIC BUILD RPC (Phase B — the chat→ACTOR promotion)
+   * ============================================================== */
+  /**
+   * build/start — START a GOVERNED AGENTIC BUILD and STREAM it as `build/event`
+   * notifications. A build crosses the SENSITIVE BOUNDARY (docs/developer-trust-
+   * model.md): it MUTATES files and RUNS commands under `cwd` — the assistant→ACTOR
+   * transition. Friction belongs at that authority boundary, so:
+   *
+   *   1. THE GATE. We REFUSE unless `params.approved === true`. A refused build emits
+   *      ONLY a terminal `build/event {type:'error'}` whose message is honest about
+   *      what the build WOULD have done (edit files + run commands in <cwd>), and NO
+   *      codex is spawned. This single up-front approval IS the sensitive-boundary
+   *      gate (codex runs `approval_policy="never"`, so it never pauses mid-run; the
+   *      diff-accept decision is the SECOND gate, owned by the Phase B UI).
+   *   2. RECORD THE GRANT. On approval we record approval_requested + approval_approved
+   *      into the run's hash-chained trace BEFORE codex runs — the authority grant is
+   *      auditable evidence, ordered ahead of the build.
+   *   3. RUN GOVERNED. We drive {@link runGovernedAgenticBuild} (metadata-only egress
+   *      proxy, hash-chained trace, signed verifier verdict; honest
+   *      `governed-unsandboxed` posture — the diff is the safety net, NOT a sandbox;
+   *      NO credential injected), streaming each {@link GovernedAgenticEvent} as a
+   *      `build/event` tagged with the runId, then the terminal `{type:'result'}`
+   *      carrying the {@link AgenticBuildReview} render contract.
+   *
+   * Mirrors run/start / chat/send: the RESULT is only the ACK ({ runId }); the build
+   * arrives on the notification stream. Post-ack work runs in an outer try/catch so a
+   * failure becomes a terminal `error` event (the UI always finalizes honestly).
+   */
+  async handleAgenticBuildStart(req) {
+    if (!this.handshakeDone) {
+      this.emit(
+        this.errorResponse(
+          req.id,
+          BridgeErrorCode.InvalidRequest,
+          "build/start before a completed handshake"
+        )
+      );
+      return;
+    }
+    const params = req.params ?? {};
+    const prompt = typeof params.prompt === "string" ? params.prompt : "";
+    const cwd = typeof params.cwd === "string" ? params.cwd : "";
+    if (prompt.trim().length === 0 || cwd.trim().length === 0) {
+      this.emit(
+        this.errorResponse(
+          req.id,
+          BridgeErrorCode.InvalidRequest,
+          "build/start requires a non-empty prompt and an absolute cwd"
+        )
+      );
+      return;
+    }
+    const runId = params.runId && typeof params.runId === "string" ? params.runId : `build-${++this.buildSeq}`;
+    const ack = { runId };
+    this.emit(this.successResponse(req.id, ack));
+    if (params.approved !== true) {
+      this.logLine(
+        `[bridge-server] build/start ${runId} REFUSED \u2014 no authority approval (cwd=${cwd}).`
+      );
+      this.emitAgenticBuildEvent({
+        runId,
+        type: "error",
+        message: `agentic build requires explicit authority approval (it may edit files and run commands in ${cwd})`
+      });
+      return;
+    }
+    try {
+      const buildRun = createRun(this.agentic?.runsBaseDir ?? this.runsBaseDir);
+      const tracePath = join6(runSubdirPath(buildRun.dir, "trace"), "trace.jsonl");
+      const sink = createTraceWriter(tracePath);
+      const approvalId = `apr-${runId}`;
+      const requested = {
+        approvalId,
+        tool: "command",
+        requestedCapability: "agentic-build:workspace-write",
+        decision: "force_ask"
+      };
+      sink.append({
+        v: TRACE_EVENT_VERSION,
+        runId,
+        seq: 0,
+        ts: Date.now(),
+        type: "approval_requested",
+        payload: requested,
+        source: "human"
+      });
+      const approved = {
+        approvalId,
+        note: "up-front authority grant for governed agentic build (sensitive boundary)"
+      };
+      sink.append({
+        v: TRACE_EVENT_VERSION,
+        runId,
+        seq: 0,
+        ts: Date.now(),
+        type: "approval_approved",
+        payload: approved,
+        source: "human"
+      });
+      this.emitAgenticBuildEvent({ runId, type: "state", state: "approved" });
+      const codexPath = this.agentic?.codexPath ?? resolveOnPath("codex") ?? "";
+      const runner = this.agentic?.runner ?? runGovernedAgenticBuild;
+      const result = await runner({
+        prompt,
+        cwd,
+        codexPath,
+        // Bind the runner to OUR run (sweep-45 High): one runId end-to-end, ONE trace
+        // chain (the approval grant already appended above + the build's events + the
+        // signed verdict), and a verdict bound to the REAL accumulated trace root —
+        // never a second run id, never GENESIS.
+        existingRun: { runId, tracePath, sink },
+        ...this.agentic?.runsBaseDir ? { runsBaseDir: this.agentic.runsBaseDir } : this.runsBaseDir ? { runsBaseDir: this.runsBaseDir } : {},
+        ...this.agentic?.verifyCommand ? { verifyCommand: this.agentic.verifyCommand } : {},
+        ...this.agentic?.denyDirectIp !== void 0 ? { denyDirectIp: this.agentic.denyDirectIp } : {},
+        // Stream each governed-run event out as a build/event tagged with our runId.
+        emit: (event) => this.streamGovernedAgenticEvent(runId, event),
+        onOperatorLog: (line) => this.logLine(`[bridge-server] [build ${runId}] ${line}`)
+      });
+      const review = projectAgenticBuildReview(runId, prompt, result);
+      this.emitAgenticBuildEvent({ runId, type: "result", review });
+      this.logLine(
+        `[bridge-server] build/start ${runId} \u2192 ${review.verdict.overall} (${review.changedFiles.length} changed file(s), ${review.commands.length} command(s)).`
+      );
+    } catch (err) {
+      this.logLine(
+        `[bridge-server] build/start ${runId} failed: ${String(err?.message ?? err)}`
+      );
+      this.emitAgenticBuildEvent({
+        runId,
+        type: "error",
+        message: `agentic build failed: ${String(err?.message ?? err)}`
+      });
+    }
+  }
+  /**
+   * Map ONE {@link GovernedAgenticEvent} from the runner onto the build/event wire
+   * stream tagged with `runId`. Lifecycle markers → `state`; the wrapped agentic
+   * progress events → `summary`/`command`/`fileChange`. The terminal `result` is NOT
+   * emitted here — it is built from the runner's authoritative return value (so it
+   * carries git's ground-truth diff + the signed verdict), in the handler above.
+   */
+  streamGovernedAgenticEvent(runId, event) {
+    switch (event.type) {
+      case "run_created":
+        this.emitAgenticBuildEvent({ runId, type: "state", state: `run_created:${event.posture}` });
+        return;
+      case "state":
+        this.emitAgenticBuildEvent({ runId, type: "state", state: event.to });
+        return;
+      case "agentic": {
+        const inner = event.event;
+        if (inner.type === "summary_delta") {
+          this.emitAgenticBuildEvent({ runId, type: "summary", textDelta: inner.text });
+        } else if (inner.type === "command") {
+          this.emitAgenticBuildEvent({
+            runId,
+            type: "command",
+            cmd: inner.cmd,
+            phase: inner.phase,
+            ...inner.exitCode !== void 0 ? { exitCode: inner.exitCode } : {}
+          });
+        } else if (inner.type === "file_change") {
+          this.emitAgenticBuildEvent({ runId, type: "fileChange", path: inner.path, status: inner.kind });
+        }
+        return;
+      }
+      case "run_closed":
+        this.emitAgenticBuildEvent({ runId, type: "state", state: event.ok ? "closed:ok" : "closed:failed" });
+        return;
+      // 'verdict' is carried by the terminal result.review.verdict — not streamed
+      // separately to avoid a second verdict surface on the wire.
+      default:
+        return;
+    }
+  }
+  /** Emit one build/event notification (no id) carrying an {@link AgenticBuildStreamEvent}. */
+  emitAgenticBuildEvent(event) {
+    const note = {
+      glyphspek: BRIDGE_JSONRPC,
+      method: BridgeNotification.AgenticBuildEvent,
+      params: event
+    };
+    this.emit(note);
   }
   /**
    * Lazily create (and reuse) the GOVERNED CHAT SESSION (Finding 1): a real

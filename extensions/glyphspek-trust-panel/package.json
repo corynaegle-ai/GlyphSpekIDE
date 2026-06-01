@@ -13,7 +13,12 @@
     "Other"
   ],
   "main": "./dist/extension.js",
+  "enabledApiProposals": [
+    "defaultChatParticipant",
+    "chatProvider"
+  ],
   "activationEvents": [
+    "onStartupFinished",
     "onView:glyphspek.chat",
     "onView:glyphspek.runs",
     "onCommand:glyphspek.openTrustPanel",
@@ -22,12 +27,36 @@
     "onCommand:glyphspek.bridgeSupervisedRun",
     "onCommand:glyphspek.startLiveRun",
     "onCommand:glyphspek.demoLiveRun",
+    "onCommand:glyphspek.previewAgenticBuildReview",
+    "onCommand:glyphspek.promoteChatToBuild",
     "onCommand:glyphspek.openGovernedTerminal",
     "onCommand:glyphspek.openChat",
     "onCommand:glyphspek.openNativeChat",
-    "onCommand:glyphspek.inlineEdit"
+    "onCommand:glyphspek.inlineEdit",
+    "onChatParticipant:glyphspek.codex",
+    "onLanguageModelChatProvider:glyphspek"
   ],
   "contributes": {
+    "chatParticipants": [
+      {
+        "id": "glyphspek.codex",
+        "name": "glyphspek",
+        "fullName": "GlyphSpek",
+        "description": "Build with the governed Codex gateway (metadata-traced, unsandboxed, on your ChatGPT subscription).",
+        "isDefault": true,
+        "modes": [
+          "agent",
+          "ask",
+          "edit"
+        ]
+      }
+    ],
+    "languageModelChatProviders": [
+      {
+        "vendor": "glyphspek",
+        "displayName": "GlyphSpek (Codex Gateway)"
+      }
+    ],
     "commands": [
       {
         "command": "glyphspek.openTrustPanel",
@@ -52,6 +81,14 @@
       {
         "command": "glyphspek.demoLiveRun",
         "title": "GlyphSpek: Demo Live Run (Trust Panel)"
+      },
+      {
+        "command": "glyphspek.previewAgenticBuildReview",
+        "title": "GlyphSpek: Preview Agentic Build Review (Fixture)"
+      },
+      {
+        "command": "glyphspek.promoteChatToBuild",
+        "title": "GlyphSpek: Build This (Governed Run)"
       },
       {
         "command": "glyphspek.openGovernedTerminal",
@@ -189,6 +226,11 @@
           "default": "docker",
           "scope": "machine",
           "description": "Sandbox runtime backing governed runs. P0 ships the Docker runtime; the remote (Firecracker) plane is future work. Machine-scoped so a workspace cannot redirect execution."
+        },
+        "glyphspek.halo.tintChrome": {
+          "type": "boolean",
+          "default": false,
+          "description": "Authority Halo fallback (opt-in). When ON, GlyphSpek tints real workbench chrome EDGES (title bar, activity-bar / status-bar borders) to the current run's assurance color (slate=read · amber=claimed · violet=SOFT · blue=verified · red=denied) via workbench.colorCustomizations — an honest pre-fork stand-in for the whole-frame halo ring. OFF by default because it persistently recolors your chrome; when off, the status-bar 'authority:' segment + the Trust Panel header accent are the honest backstop. Fully reversible: turning it off (or deactivating the extension) restores your prior color customizations exactly. The same `glyphspek.authority` context-key is set regardless, so the future fork halo ring needs no extension change."
         }
       }
     }
@@ -197,7 +239,7 @@
     "bundle:supervisor": "node scripts/build-supervisor.mjs",
     "compile": "npm run bundle:supervisor && tsc -p .",
     "//test": "Explicit curated list (NOT a glob — a broad glob has caused env inspector-port hangs here). When you add a new test/*.test.mjs, ADD IT TO THIS LIST or CI stays green without it.",
-    "test": "npm run bundle:supervisor && tsc -p . && node --test test/inlineScript.test.mjs test/configScope.test.mjs test/supervisorRunner.test.mjs test/policyHash.test.mjs test/bridgeProtocol.test.mjs test/bridgeContractConformance.test.mjs test/bridge.test.mjs test/bridgeServerSpawn.test.mjs test/liveRunStream.test.mjs test/runEventProtocol.test.mjs test/liveRunModel.test.mjs test/mockRunStream.test.mjs test/liveReducerGolden.test.mjs test/chatViewModel.test.mjs test/chatDemoState.test.mjs test/chatModelSelection.test.mjs test/operatorGesture.test.mjs test/runGovernedTaskGate.test.mjs test/webviewGestureGate.test.mjs test/liveSchemaGate.test.mjs test/governedTerminalEnv.test.mjs test/governedTerminalSession.test.mjs test/openGovernedTerminalCommand.test.mjs test/openChatCommand.test.mjs test/governedTerminalResolution.test.mjs test/agentCliCodex.test.mjs test/iconSpriteInjection.test.mjs test/livePanelLabels.test.mjs test/liveRunTrustIngestion.test.mjs test/runTrustBadge.test.mjs test/governedRunsModel.test.mjs test/governedRunsView.test.mjs test/agentLaunch.test.mjs test/openChatBinaryPin.test.mjs test/agentBinaryIdentity.test.mjs test/ptyHost.test.mjs test/chatTerminalView.test.mjs test/loginShellResolve.test.mjs test/nodePtyBaseDirs.test.mjs test/chatSendBridge.test.mjs test/nativeChatCommand.test.mjs",
+    "test": "npm run bundle:supervisor && tsc -p . && node --test test/inlineScript.test.mjs test/configScope.test.mjs test/supervisorRunner.test.mjs test/policyHash.test.mjs test/bridgeProtocol.test.mjs test/bridgeContractConformance.test.mjs test/bridge.test.mjs test/bridgeServerSpawn.test.mjs test/liveRunStream.test.mjs test/runEventProtocol.test.mjs test/liveRunModel.test.mjs test/mockRunStream.test.mjs test/liveReducerGolden.test.mjs test/chatViewModel.test.mjs test/chatDemoState.test.mjs test/chatModelSelection.test.mjs test/operatorGesture.test.mjs test/runGovernedTaskGate.test.mjs test/webviewGestureGate.test.mjs test/liveSchemaGate.test.mjs test/governedTerminalEnv.test.mjs test/governedTerminalSession.test.mjs test/openGovernedTerminalCommand.test.mjs test/openChatCommand.test.mjs test/governedTerminalResolution.test.mjs test/agentCliCodex.test.mjs test/iconSpriteInjection.test.mjs test/livePanelLabels.test.mjs test/liveRunTrustIngestion.test.mjs test/runTrustBadge.test.mjs test/governedRunsModel.test.mjs test/governedRunsView.test.mjs test/agentLaunch.test.mjs test/openChatBinaryPin.test.mjs test/agentBinaryIdentity.test.mjs test/ptyHost.test.mjs test/chatTerminalView.test.mjs test/loginShellResolve.test.mjs test/nodePtyBaseDirs.test.mjs test/chatSendBridge.test.mjs test/nativeChatCommand.test.mjs test/chatParticipantAgent.test.mjs test/chatProviderFailClosed.test.mjs test/chatTurnSerialization.test.mjs test/agenticBuildReview.test.mjs test/agenticBuildBridge.test.mjs test/agenticBuildPromotion.test.mjs test/promoteChatToBuildCommand.test.mjs test/frictionSurface.test.mjs test/statusBarSegments.test.mjs test/haloChrome.test.mjs test/authorityLadder.test.mjs",
     "package": "npm run bundle:supervisor && tsc -p . && vsce package --no-dependencies"
   },
   "devDependencies": {

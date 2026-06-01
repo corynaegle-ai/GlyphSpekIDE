@@ -141,6 +141,24 @@ exports.BridgeMethod = {
      * (ack-then-notifications), not the synchronous model/call.
      */
     ChatSend: 'chat/send',
+    /**
+     * Start a GOVERNED AGENTIC BUILD (Phase C — the chat→ACTOR promotion). Unlike
+     * {@link ChatSend} (Ask-only, read-only), a build crosses from assistant to ACTOR:
+     * it edits files and runs commands under `cwd`. Per the developer trust doctrine
+     * (docs/developer-trust-model.md) that authority boundary requires friction — an
+     * EXPLICIT up-front authority grant. The request therefore carries
+     * `approved: boolean`; the supervisor REFUSES (terminal `build/event` error, codex
+     * NOT spawned) unless it is `true`. On approval the supervisor records the grant
+     * (approval_requested + approval_approved trace events), runs codex agentically
+     * under a governed run (metadata-only egress proxy, hash-chained trace, signed
+     * verifier verdict; honest `governed-unsandboxed` posture — the diff is the safety
+     * net, NOT a sandbox; no credential injected), and STREAMS the build as
+     * {@link BridgeNotification.AgenticBuildEvent} notifications tagged with the runId.
+     * This request's RESULT is only the ACK ({ runId }); the terminal stream event
+     * carries the {@link AgenticBuildReview} render contract. Mirrors run/start's
+     * ack-then-notifications style. MIRRORS the canonical spikes/p0-contracts/bridge.ts.
+     */
+    AgenticBuildStart: 'build/start',
 };
 /** Server→client notification methods (no response expected). */
 exports.BridgeNotification = {
@@ -156,6 +174,19 @@ exports.BridgeNotification = {
      * credential.
      */
     ChatDelta: 'chat/delta',
+    /**
+     * One agentic-build stream event (Phase C). After a
+     * {@link BridgeMethod.AgenticBuildStart} ack, the supervisor emits a sequence of
+     * these tagged with the same `runId`: `state` lifecycle markers, `summary` text
+     * deltas, `command` start/end pairs (with exit codes), `fileChange` events, then
+     * exactly one terminal `result` (carrying the {@link AgenticBuildReview} render
+     * contract) or `error`. A REFUSED build (missing authority approval) emits ONLY a
+     * terminal `error` and no codex is spawned. The payload is an
+     * {@link AgenticBuildStreamEvent} — the build event discriminated union plus the
+     * `runId`. Carries non-secret build EVIDENCE (summary/commands/diff/verdict),
+     * never a credential.
+     */
+    AgenticBuildEvent: 'build/event',
 };
 /* ============================================================== *
  * ERROR CODES

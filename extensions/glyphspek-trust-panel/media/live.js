@@ -475,6 +475,277 @@
     return { productTrustEligible: view.productTrustEligible, headlineFailure: headline, failureStates: states };
   }
 
+  /* ============================================================ *
+   * SLICE 1 — BLENDED FRICTION SURFACE (BLENDED-WORKBENCH-SPEC.md §5.8, §6, §7).
+   *
+   * Two ORTHOGONAL axes, both DERIVED from already-computed honest state — neither
+   * re-decides trust:
+   *   - data-authority (ASSURANCE, §7): read | claimed | soft | verified | denied,
+   *     from run lifecycle + the SOFT posture + productTrustEligible + the signature
+   *     gate. SOFT (governed-unsandboxed / boundary-only / sandboxed-soft-egress) is
+   *     CAPPED at violet here exactly because CREATION_TRUST_BADGE marks it
+   *     productTrusted:false — verified-blue is reachable ONLY for a product-trust-
+   *     eligible run whose signature verified against a PRODUCT key (the same gate the
+   *     verdict pane uses). We never paint blue from a claim.
+   *   - data-tier (FRICTION, §6): ask | inline | governed | sensitive | sovereign,
+   *     derived from the run's posture + whether it crossed the canonical sensitive
+   *     boundary. The live panel is a GOVERNED-run surface, so it defaults to
+   *     'governed'; 'sovereign' is reflected from the Sovereign extension posture.
+   * ============================================================ */
+
+  // The SOFT (capped-at-violet) creation-trust postures. A run in any of these can
+  // reach data-authority='soft' but NEVER 'verified' — read straight from the shared
+  // CREATION_TRUST_BADGE.productTrusted gate so this can't drift from the state cap.
+  function isSoftPosture(creationTrust) {
+    var badge = CREATION_TRUST_BADGE[creationTrust];
+    // productTrusted:false AND not an outright failure posture = the SOFT band.
+    return !!badge && badge.productTrusted === false &&
+      creationTrust !== 'untrusted' && creationTrust !== 'refused';
+  }
+
+  /**
+   * DERIVE the assurance axis (data-authority) from a run view. Pure; mirrors the
+   * verdict pane's own gate so the halo can never imply more than the verdict shows.
+   * Returns 'read' | 'claimed' | 'soft' | 'verified' | 'denied'.
+   */
+  function deriveAuthority(view) {
+    if (!view) return 'read';
+    var summary = deriveTrustSummary(view);
+    // DENIED: any de-authoritative failure (tamper / non-isolated runtime / stale /
+    // bridge mismatch) flips the halo red — the panel's strongest signal.
+    var denied = ['tampered_trace', 'non_isolated_runtime', 'stale_verifier', 'bridge_mismatch'];
+    for (var i = 0; i < view.failures.length; i++) {
+      if (denied.indexOf(view.failures[i].state) !== -1) return 'denied';
+    }
+    // VERIFIED: only when the run is product-trust ELIGIBLE and a PRODUCT-tier
+    // signature verified (the exact gate renderVerdict uses for green). A demo-tier
+    // or untrusted-key signature is NOT verified-blue here.
+    var res = view.sigResult;
+    var sigByProduct = !!res && res.status === 'verified' && res.tier === 'product';
+    var chain = view.chainResult;
+    var bundleConsistent = !!chain && chain.chainOk === true && chain.rootMatches === true;
+    if (view.productTrustEligible && sigByProduct && bundleConsistent) return 'verified';
+    // SOFT: a governed-unsandboxed / boundary / soft-egress run is capped at violet.
+    if (isSoftPosture(view.badges.creationTrust)) return 'soft';
+    // CLAIMED: the agent has acted (we have a verdict or claims), but it is unverified.
+    if (view.verdict || view.claims) return 'claimed';
+    // READ: no execution authority exercised yet.
+    return 'read';
+  }
+
+  /**
+   * DERIVE the friction tier (data-tier) from a run view. The live panel is a
+   * governed-run surface, so the baseline is 'governed'; Sovereign extension posture
+   * reflects to 'sovereign'; a run that crossed the canonical sensitive boundary
+   * reflects to 'sensitive'. (ask/inline are pre-run authority tiers driven by the
+   * Ask overlay / inline-edit surfaces — Slice 2 — not by a live governed run.)
+   * Pure; returns one of ask|inline|governed|sensitive|sovereign.
+   */
+  // The CANONICAL sensitive-boundary surfaces (§6) — kept in ONE place so the strip
+  // copy and the tier derivation can't drift.
+  var SENSITIVE_BOUNDARY = ['secrets', 'network', 'infra', 'migrations', 'auth', 'ci/cd', 'deploy'];
+  function crossedSensitiveBoundary(view) {
+    // A network policy decision that was actually enforced (not soft observe-only) is
+    // the one sensitive surface we can read honestly from the live trace today.
+    for (var i = 0; i < view.policyDecisions.length; i++) {
+      var d = view.policyDecisions[i];
+      if (d.tool === 'network' && d.enforcement !== 'observe-only' && d.blocked) return true;
+    }
+    return false;
+  }
+  function deriveTier(view) {
+    if (!view) return 'governed';
+    if (view.badges.extensionPosture === 'sovereign') return 'sovereign';
+    if (crossedSensitiveBoundary(view)) return 'sensitive';
+    return 'governed';
+  }
+
+  /** Per-tier friction copy (§6) + the level-chip glyph/label per authority (§3.4). */
+  var FRICTION_COPY = {
+    ask: 'Ask: no execution authority — Q&A and explanation only. Answers are useful context, <b>not independently verified</b>; acting requires promotion.',
+    inline: 'Inline edit: a proposed <b>diff</b> in context — the claims/verdict split stays legible. No terminal or network authority until you promote.',
+    governed: 'Governed run: the full trust stack is on — sandbox, policy, trace, and the independent <b>verifier</b>.',
+    sensitive: 'Sensitive governed run: this run touches a dangerous surface — <b>fresh approval</b> is required and named in the boundary strip below.',
+    sovereign: 'Sovereign / high-security: maximum evidence and the curated posture below — offline verification, no call-home, hard runtime.',
+  };
+  // Non-color redundancy for the level chip (§3.4): a glyph + a short label per
+  // assurance state, so the halo's meaning survives grayscale / color-blindness.
+  var AUTHORITY_CHIP = {
+    read: { glyph: '•', label: 'read · no authority yet' },
+    claimed: { glyph: '◇', label: 'claimed · self-reported, unverified' },
+    soft: { glyph: '◈', label: 'SOFT · governed-unsandboxed' },
+    verified: { glyph: '✓', label: 'verified · signed' },
+    denied: { glyph: '✕', label: 'UNTRUSTED · denied' },
+  };
+
+  /* ============================================================ *
+   * SLICE 2 — AUTHORITY LADDER (the VIEW axis) — manual override state.
+   *
+   * The ladder is a five-rung radiogroup that DRIVES data-tier (which Slice 1's
+   * friction surface + dimming already read). CRITICAL HONESTY (§2.4 / §6 "tier is
+   * enforced authority, not a UI hint"): a rung selection is a VIEW control — it
+   * chooses WHICH evidence to show, it does NOT grant authority. So:
+   *   - data-tier  ← the manual ladder override when the user has slid the ladder,
+   *                  ELSE the run's reflected deriveTier(view).
+   *   - data-authority ← ALWAYS deriveAuthority(view) (the real run state). The
+   *                  rung never touches the assurance axis; sliding the ladder to
+   *                  "Ask" does NOT make a verified run unverified, and sliding to
+   *                  "Governed" does NOT confer trust. The halo/level-chip keep
+   *                  showing the run's true assurance regardless of the view rung.
+   * The Governed→Sensitive enforcement (§6) lives in the supervisor (Promote's
+   * modal / the build's `approved` grant), not in the rung — the rung only changes
+   * which evidence you are looking at.
+   * ============================================================ */
+  var LADDER_TIERS = ['ask', 'inline', 'governed', 'sensitive', 'sovereign'];
+  // The user's manual view-tier selection (null = follow the run's reflected tier).
+  var viewTierOverride = null;
+  // The authority last posted to the host (so the status-bar `verified` segment is
+  // driven by the SAME gate the verdict pane uses). Avoids redundant posts.
+  var lastPostedAuthority = null;
+
+  /**
+   * Apply the derived axes to the live-view root + populate the friction surface.
+   * DOM-only; safe to call with no DOM (early-returns), so node:vm render tests stay
+   * silent. Reads ONLY derived state — it never decides trust.
+   *
+   * data-authority is ALWAYS the run's real assurance (deriveAuthority); data-tier
+   * is the manual ladder override when set, else the run's reflected tier. The
+   * computed authority is posted to the host so the status-bar `authority:` segment
+   * + the future fork halo can reach `verified` ONLY on this signature-gated state.
+   */
+  function setFrictionSurface(view) {
+    var root = document.getElementById('live-view');
+    if (!root) return;
+    var authority = deriveAuthority(view);
+    var reflectedTier = deriveTier(view);
+    // The ladder is a VIEW control: honor a manual override, else reflect the run.
+    var tier = viewTierOverride || reflectedTier;
+    root.setAttribute('data-authority', authority);
+    root.setAttribute('data-tier', tier);
+
+    var chip = document.getElementById('authority-level');
+    if (chip) {
+      var a = AUTHORITY_CHIP[authority] || AUTHORITY_CHIP.read;
+      chip.setAttribute('data-glyph', a.glyph);
+      chip.textContent = a.label;
+    }
+    var note = document.getElementById('friction-note');
+    if (note) note.innerHTML = FRICTION_COPY[tier] || FRICTION_COPY.governed;
+
+    // SOFT side-chat card: present only when the selected run is a SOFT posture.
+    var softCard = document.getElementById('soft-chat-card');
+    if (softCard) softCard.hidden = !isSoftPosture(view.badges.creationTrust);
+
+    // Reflect the effective tier on the ladder rungs (ARIA) + toggle the Ask
+    // surface, and surface the reflect-not-grant note when the view is MANUAL.
+    syncLadder(tier, viewTierOverride !== null && viewTierOverride !== reflectedTier);
+
+    // Post the run's REAL assurance to the host (Slice 2 §1.12). This is the ONLY
+    // signal that lets the status bar `verified` segment light up, because it
+    // carries the result of the webview's signature-before-display gate the host
+    // cannot run. View-only on the panel; honest by construction.
+    postAuthority(view.runId, authority);
+  }
+
+  /**
+   * Reflect the effective FRICTION tier onto the ladder's ARIA radio state + the
+   * tabindex roving (a radiogroup has ONE tab stop on the checked rung), toggle the
+   * Ask surface, and show/hide the reflect-not-grant note. Pure DOM; safe with no DOM.
+   * `manual` = the user has slid the ladder away from the run's reflected tier.
+   */
+  function syncLadder(tier, manual) {
+    var ladder = document.getElementById('authority-ladder');
+    if (ladder && typeof ladder.querySelectorAll === 'function') {
+      var rungs = ladder.querySelectorAll('.rung');
+      for (var i = 0; i < rungs.length; i++) {
+        var r = rungs[i];
+        var checked = r.getAttribute('data-tier') === tier;
+        r.setAttribute('aria-checked', checked ? 'true' : 'false');
+        // Roving tabindex: only the checked rung is in the tab order.
+        r.setAttribute('tabindex', checked ? '0' : '-1');
+      }
+    }
+    // Ask surface: visible only at the ask tier (also gated in CSS; hidden attr
+    // keeps it out of the a11y tree when not Ask).
+    var ask = document.getElementById('ask-surface');
+    if (ask) ask.hidden = tier !== 'ask';
+    // The ladder-note is always present, but emphasize it when the view is manual
+    // (the user is inspecting a tier the run is not actually at).
+    var lnote = document.getElementById('ladder-note');
+    if (lnote) lnote.setAttribute('data-manual', manual ? 'true' : 'false');
+  }
+
+  /**
+   * The user selected a rung (or pressed a key on the ladder). Set the VIEW tier
+   * override and re-render the selected run so Slice 1's friction surface + dimming
+   * + the Ask surface reflect the chosen tier. This NEVER grants authority — it is
+   * the "which evidence to show" control (§2.4). Selecting the run's own reflected
+   * tier clears the override (back to following the run).
+   */
+  function setViewTier(tier) {
+    if (LADDER_TIERS.indexOf(tier) === -1) return;
+    viewTierOverride = tier;
+    if (selectedRunId && runs[selectedRunId]) {
+      // Clear the override if the chosen tier IS the run's reflected tier (follow).
+      if (deriveTier(runs[selectedRunId]) === tier) viewTierOverride = null;
+      setFrictionSurface(runs[selectedRunId]);
+    } else {
+      // No run yet (pre-run Ask exploration): apply the tier to the bare root so the
+      // Ask surface can show. data-authority stays whatever it was (no run = read).
+      var root = document.getElementById('live-view');
+      if (root) {
+        root.setAttribute('data-tier', tier);
+        if (!root.getAttribute('data-authority')) root.setAttribute('data-authority', 'read');
+        var note = document.getElementById('friction-note');
+        if (note) note.innerHTML = FRICTION_COPY[tier] || FRICTION_COPY.governed;
+        syncLadder(tier, true);
+      }
+    }
+    // Move keyboard focus to the now-checked rung (radiogroup focus management).
+    focusCheckedRung();
+  }
+
+  /** Focus the currently-checked rung (after a keyboard/selection change). */
+  function focusCheckedRung() {
+    var ladder = document.getElementById('authority-ladder');
+    if (!ladder || typeof ladder.querySelector !== 'function') return;
+    var checked = ladder.querySelector('.rung[aria-checked="true"]');
+    if (checked && typeof checked.focus === 'function') checked.focus();
+  }
+
+  /**
+   * The ladder's current effective tier — read from the checked rung's data-tier
+   * (the single source of truth the keyboard handler steps from), falling back to
+   * the override / governed. Pure-ish (DOM read only).
+   */
+  function currentLadderTier() {
+    var ladder = document.getElementById('authority-ladder');
+    if (ladder && typeof ladder.querySelector === 'function') {
+      var checked = ladder.querySelector('.rung[aria-checked="true"]');
+      if (checked && checked.getAttribute) {
+        var t = checked.getAttribute('data-tier');
+        if (t) return t;
+      }
+    }
+    return viewTierOverride || 'governed';
+  }
+
+  /**
+   * Post the run's REAL assurance to the host (Slice 2 §1.12). De-duplicated by
+   * (runId, authority) so we don't spam the host. The host uses ONLY 'verified' to
+   * light the status-bar `verified` segment; every other value clears that flag, so
+   * a tamper honestly drops the run off blue. View-only — confers no trust.
+   */
+  function postAuthority(runId, authority) {
+    if (!runId) return;
+    var key = runId + ' ' + authority;
+    if (key === lastPostedAuthority) return;
+    lastPostedAuthority = key;
+    if (typeof window !== 'undefined' && typeof window.GLYPHSPEK_POST === 'function') {
+      window.GLYPHSPEK_POST({ type: 'glyphspekAuthority', runId: runId, authority: authority });
+    }
+  }
+
   function renderRunList() {
     var root = document.getElementById('live-runlist');
     if (!root) return;
@@ -1046,6 +1317,7 @@
   function renderSelectedRun() {
     if (!selectedRunId || !runs[selectedRunId]) return;
     var view = runs[selectedRunId];
+    setFrictionSurface(view);
     renderBadges(view);
     renderFailures(view);
     renderClaims(view);
@@ -1055,6 +1327,401 @@
     renderCommands(view);
     renderNetwork(view);
     renderPolicy(view);
+  }
+
+  /* ================================================================== *
+   * AGENTIC BUILD REVIEW (Phase B — view layer).
+   *
+   * Renders an AgenticBuildReview evidence object so a developer can review a
+   * governed agent run from EVIDENCE rather than the transcript:
+   *   intent + actor + honest posture, verdict + signature state, changed files,
+   *   a unified-diff viewer, commands + exit codes, observed egress, and an
+   *   accept / reject / request-changes decision.
+   *
+   * HONESTY: the posture is `governed-unsandboxed` — this surface governs and
+   * traces a run, it does NOT contain it, so it is NEVER product-trusted. The
+   * verdict badge shows assurance (full/degraded) and the signature state; a
+   * pass is shown as a pass, never as a product-trusted success.
+   *
+   * The diff is rendered via textContent/DOM (el() sets textContent, never
+   * innerHTML), so the diff string — untrusted run content — cannot inject markup
+   * under the webview's strict CSP.
+   * ================================================================== */
+
+  // The runId of the review currently shown (so a decision posts the right id).
+  var abrCurrentRunId = null;
+
+  /**
+   * Parse a unified diff (`git diff`) string into per-file sections with
+   * classified lines. Pure: no DOM, no deps. Returns
+   *   { files: [{ header, oldPath, newPath, status, lines: [{ kind, text }] }] }
+   * where line.kind is one of 'meta' | 'hunk' | 'add' | 'del' | 'context'.
+   * A leading preamble (before the first `diff --git`/`---`) is tolerated and
+   * dropped. Tested directly in test/agenticBuildReview.test.mjs.
+   */
+  function parseUnifiedDiff(diffText) {
+    var files = [];
+    if (typeof diffText !== 'string' || diffText.length === 0) {
+      return { files: files };
+    }
+    var rawLines = diffText.split('\n');
+    var current = null;
+    function startFile(header) {
+      current = { header: header || '', oldPath: null, newPath: null, status: 'modified', lines: [] };
+      files.push(current);
+    }
+    for (var i = 0; i < rawLines.length; i++) {
+      var line = rawLines[i];
+      if (line.indexOf('diff --git ') === 0) {
+        // New file section. Derive paths from "a/<old> b/<new>".
+        startFile(line);
+        var m = /^diff --git a\/(.+) b\/(.+)$/.exec(line);
+        if (m) { current.oldPath = m[1]; current.newPath = m[2]; }
+        current.lines.push({ kind: 'meta', text: line });
+        continue;
+      }
+      if (line.indexOf('--- ') === 0) {
+        // A `---` with no preceding `diff --git` still begins a file section.
+        if (!current) startFile('');
+        var oldP = line.slice(4);
+        current.oldPath = oldP === '/dev/null' ? null : oldP.replace(/^a\//, '');
+        if (oldP === '/dev/null') current.status = 'added';
+        current.lines.push({ kind: 'meta', text: line });
+        continue;
+      }
+      if (line.indexOf('+++ ') === 0) {
+        if (!current) startFile('');
+        var newP = line.slice(4);
+        current.newPath = newP === '/dev/null' ? null : newP.replace(/^b\//, '');
+        if (newP === '/dev/null') current.status = 'deleted';
+        current.lines.push({ kind: 'meta', text: line });
+        continue;
+      }
+      if (line.indexOf('@@') === 0) {
+        if (!current) startFile('');
+        current.lines.push({ kind: 'hunk', text: line });
+        continue;
+      }
+      // File-level metadata lines (mode/index/new file/etc.) before any hunk.
+      if (current && current.lines.length && !hasHunk(current) &&
+          (line.indexOf('new file') === 0 || line.indexOf('deleted file') === 0 ||
+           line.indexOf('index ') === 0 || line.indexOf('old mode') === 0 ||
+           line.indexOf('new mode') === 0 || line.indexOf('rename ') === 0 ||
+           line.indexOf('similarity ') === 0 || line.indexOf('Binary files') === 0)) {
+        if (line.indexOf('new file') === 0) current.status = 'added';
+        if (line.indexOf('deleted file') === 0) current.status = 'deleted';
+        current.lines.push({ kind: 'meta', text: line });
+        continue;
+      }
+      if (!current) {
+        // Preamble before any file header — ignore (e.g. a commit message blob).
+        continue;
+      }
+      var first = line.charAt(0);
+      if (first === '+') current.lines.push({ kind: 'add', text: line });
+      else if (first === '-') current.lines.push({ kind: 'del', text: line });
+      else if (first === '\\') current.lines.push({ kind: 'meta', text: line }); // "\ No newline at end of file"
+      else current.lines.push({ kind: 'context', text: line });
+    }
+    return { files: files };
+  }
+  function hasHunk(file) {
+    for (var i = 0; i < file.lines.length; i++) {
+      if (file.lines[i].kind === 'hunk') return true;
+    }
+    return false;
+  }
+
+  /**
+   * Build the unified-diff DOM for a parsed diff. Each file is a section with a
+   * path header; each line is a row with a class per kind so +/- coloring is CSS.
+   * Returns a DocumentFragment so callers control mounting. Pure-ish (DOM only).
+   */
+  function buildDiffView(parsed) {
+    var frag = document.createDocumentFragment();
+    if (!parsed.files.length) {
+      frag.appendChild(el('p', { className: 'empty', text: 'No diff in this review.' }));
+      return frag;
+    }
+    for (var f = 0; f < parsed.files.length; f++) {
+      var file = parsed.files[f];
+      var section = el('div', { className: 'abr-diff-file' });
+      var head = el('div', { className: 'abr-diff-file-head' });
+      var path = file.newPath || file.oldPath || '(unknown file)';
+      head.appendChild(el('span', { className: 'abr-diff-status abr-diff-status-' + file.status, text: file.status }));
+      head.appendChild(el('code', { className: 'abr-diff-path', text: path }));
+      section.appendChild(head);
+      var body = el('div', { className: 'abr-diff-lines mono' });
+      for (var i = 0; i < file.lines.length; i++) {
+        var ln = file.lines[i];
+        var row = el('div', { className: 'abr-diff-line abr-line-' + ln.kind });
+        // textContent only (el sets textContent for `text`) — the diff string is
+        // untrusted run content and must never be parsed as HTML.
+        row.appendChild(el('span', { className: 'abr-diff-line-text', text: ln.text }));
+        body.appendChild(row);
+      }
+      section.appendChild(body);
+      frag.appendChild(section);
+    }
+    return frag;
+  }
+
+  /**
+   * Resolve the honest verdict badge for an AgenticBuildReview verdict. Returns
+   * { overall, overallClass, assurance, assuranceDegraded, sig } where `sig` is the
+   * honest signature-state descriptor. NEVER returns a "product-trusted" label —
+   * a pass is a pass, gated by assurance + signature state, not product trust.
+   */
+  function abrVerdictBadge(verdict) {
+    var overall = (verdict && verdict.overall) || 'error';
+    var assurance = (verdict && verdict.assurance) || 'degraded';
+    var sig = verdict && verdict.signature;
+    var sigState;
+    if (!sig) {
+      sigState = { className: 'abr-sig-none', text: 'unsigned — verdict cannot be authoritative' };
+    } else {
+      // The view layer reports the signature is PRESENT; it does NOT assert the
+      // signature verifies (that crypto gate is the live-bundle path). Honest:
+      // "signature present" is not "signature trusted".
+      sigState = {
+        className: 'abr-sig-present',
+        text: 'signed (' + (sig.alg || 'unknown') + ', key ' + shortHash(sig.keyId || sig.value || '') + ') — present, not independently verified here',
+      };
+    }
+    return {
+      overall: overall,
+      overallClass: 'verdict-' + overall,
+      assurance: assurance,
+      assuranceDegraded: assurance !== 'full',
+      sig: sigState,
+    };
+  }
+
+  function renderAbrHeader(review) {
+    var root = document.getElementById('abr-header-body');
+    if (!root) return;
+    clear(root);
+
+    // Intent.
+    var intent = el('div', { className: 'abr-field' });
+    intent.appendChild(el('div', { className: 'field-label', text: 'Task intent' }));
+    intent.appendChild(el('div', { className: 'abr-intent', text: review.intent || '(no intent recorded)' }));
+    root.appendChild(intent);
+
+    // Actor + posture badge row.
+    var badges = el('div', { className: 'badge-row abr-badge-row' });
+    badges.appendChild(el('span', { className: 'trust-badge actor-badge', text: 'actor: ' + (review.actor || 'unknown') }));
+    // HONEST POSTURE — governed-unsandboxed is governed-but-not-contained and is
+    // NEVER product-trusted. Reuse the live panel's amber creation badge styling.
+    badges.appendChild(el('span', {
+      className: 'trust-badge creation-governed-unsandboxed',
+      text: 'posture: governed-unsandboxed — traced, NOT sandboxed, NOT product-trusted',
+      title: 'GlyphSpek governs and traces this run (egress observed, trace signed) but does not contain it. The verdict is honest evidence, never a product-trusted guarantee.',
+    }));
+    root.appendChild(badges);
+
+    // Verdict banner + assurance + signature state.
+    var v = abrVerdictBadge(review.verdict);
+    var banner = el('div', { className: 'verdict-banner ' + v.overallClass + ' abr-verdict-banner' });
+    banner.appendChild(el('span', { className: 'verdict-label', text: 'VERIFIER VERDICT' }));
+    banner.appendChild(el('span', { className: 'verdict-value', text: v.overall }));
+    root.appendChild(banner);
+
+    var meta = el('div', { className: 'abr-verdict-meta' });
+    // Assurance pill — degraded is shown honestly, never hidden.
+    meta.appendChild(el('span', {
+      className: 'verdict-pill ' + (v.assuranceDegraded ? 'check-error' : 'check-pass'),
+      text: 'assurance: ' + v.assurance,
+    }));
+    // Signature state.
+    meta.appendChild(el('span', { className: 'abr-sig-chip ' + v.sig.className, text: v.sig.text }));
+    root.appendChild(meta);
+
+    // Per-check breakdown (reuse verdict-pill check-<status> styling).
+    var checks = (review.verdict && review.verdict.checks) || [];
+    if (checks.length) {
+      var tbl = el('table', { className: 'mini-table check-table abr-check-table' });
+      for (var i = 0; i < checks.length; i++) {
+        var ck = checks[i];
+        var tr = el('tr');
+        tr.appendChild(el('td', { text: ck.name }));
+        var st = el('td');
+        st.appendChild(el('span', { className: 'verdict-pill check-' + ck.status, text: ck.status }));
+        tr.appendChild(st);
+        tbl.appendChild(tr);
+      }
+      root.appendChild(tbl);
+    }
+  }
+
+  function renderAbrSummary(review) {
+    var root = document.getElementById('abr-summary-body');
+    if (!root) return;
+    clear(root);
+    root.appendChild(el('p', { className: 'abr-summary', text: review.summary || '(the agent provided no summary)' }));
+  }
+
+  function renderAbrFiles(review) {
+    var root = document.getElementById('abr-files-body');
+    if (!root) return;
+    clear(root);
+    var files = review.changedFiles || [];
+    if (!files.length) { root.appendChild(el('p', { className: 'empty', text: 'No changed files.' })); return; }
+    var tbl = el('table', { className: 'mini-table' });
+    for (var i = 0; i < files.length; i++) {
+      var f = files[i];
+      var tr = el('tr');
+      var st = el('td');
+      st.appendChild(el('span', { className: 'abr-file-status abr-diff-status-' + f.status, text: f.status }));
+      tr.appendChild(st);
+      var pth = el('td');
+      pth.appendChild(el('code', { text: f.path }));
+      tr.appendChild(pth);
+      var counts = el('td', { className: 'abr-file-counts' });
+      if (typeof f.additions === 'number') counts.appendChild(el('span', { className: 'abr-adds', text: '+' + f.additions }));
+      if (typeof f.deletions === 'number') counts.appendChild(el('span', { className: 'abr-dels', text: '-' + f.deletions }));
+      tr.appendChild(counts);
+      tbl.appendChild(tr);
+    }
+    root.appendChild(tbl);
+  }
+
+  function renderAbrDiff(review) {
+    var root = document.getElementById('abr-diff-body');
+    if (!root) return;
+    clear(root);
+    var parsed = parseUnifiedDiff(review.diff);
+    root.appendChild(buildDiffView(parsed));
+  }
+
+  function renderAbrCommands(review) {
+    var root = document.getElementById('abr-commands-body');
+    if (!root) return;
+    clear(root);
+    var cmds = review.commands || [];
+    if (!cmds.length) { root.appendChild(el('p', { className: 'empty', text: 'No commands run.' })); return; }
+    var tbl = el('table', { className: 'mini-table' });
+    for (var i = 0; i < cmds.length; i++) {
+      var c = cmds[i];
+      var tr = el('tr');
+      var td = el('td');
+      td.appendChild(el('code', { text: '$ ' + (c.cmd || '') }));
+      tr.appendChild(td);
+      var code = el('td');
+      var ok = c.exitCode === 0;
+      code.appendChild(el('span', {
+        className: 'chip chip-exit ' + (ok ? 'exit-ok' : 'exit-bad'),
+        text: 'exit ' + (c.exitCode == null ? '?' : c.exitCode),
+      }));
+      tr.appendChild(code);
+      tbl.appendChild(tr);
+    }
+    root.appendChild(tbl);
+  }
+
+  function renderAbrEgress(review) {
+    var root = document.getElementById('abr-egress-body');
+    if (!root) return;
+    clear(root);
+    var egress = review.egress || [];
+    if (!egress.length) { root.appendChild(el('p', { className: 'empty', text: 'No network destinations observed.' })); return; }
+    var tbl = el('table', { className: 'mini-table' });
+    for (var i = 0; i < egress.length; i++) {
+      var tr = el('tr');
+      var td = el('td');
+      td.appendChild(el('code', { text: String(egress[i]) }));
+      tr.appendChild(td);
+      var dec = el('td');
+      // Egress here is metadata-only observation on the soft (bypassable) plane —
+      // label it as observed, never as a policy "allow".
+      dec.appendChild(el('span', { className: 'chip chip-decision decision-observe', text: 'observed (metadata-only)' }));
+      tr.appendChild(dec);
+      tbl.appendChild(tr);
+    }
+    root.appendChild(tbl);
+  }
+
+  function renderAbrDecision(review) {
+    var root = document.getElementById('abr-decision-body');
+    if (!root) return;
+    clear(root);
+
+    // If a decision is already recorded, reflect it (read-only).
+    if (review.decision) {
+      root.appendChild(buildAbrDecisionResult(review.decision));
+      return;
+    }
+
+    var controls = el('div', { className: 'abr-decision-controls' });
+    var accept = el('button', { className: 'btn abr-btn abr-accept', text: 'Accept' });
+    accept.setAttribute('type', 'button');
+    var changes = el('button', { className: 'btn abr-btn abr-changes', text: 'Request changes' });
+    changes.setAttribute('type', 'button');
+    var reject = el('button', { className: 'btn abr-btn abr-reject', text: 'Reject' });
+    reject.setAttribute('type', 'button');
+    accept.addEventListener('click', function () { submitAbrDecision('accepted'); });
+    changes.addEventListener('click', function () { submitAbrDecision('changes-requested'); });
+    reject.addEventListener('click', function () { submitAbrDecision('rejected'); });
+    controls.appendChild(accept);
+    controls.appendChild(changes);
+    controls.appendChild(reject);
+    root.appendChild(controls);
+  }
+
+  function buildAbrDecisionResult(decision) {
+    var labels = {
+      'accepted': { cls: 'abr-decided-accepted', text: '✓ Accepted' },
+      'rejected': { cls: 'abr-decided-rejected', text: '✕ Rejected' },
+      'changes-requested': { cls: 'abr-decided-changes', text: '↺ Changes requested' },
+    };
+    var d = labels[decision] || { cls: 'abr-decided-changes', text: decision };
+    var wrap = el('div', { className: 'abr-decision-result ' + d.cls });
+    wrap.appendChild(el('strong', { text: d.text }));
+    wrap.appendChild(el('span', {
+      className: 'abr-decision-note',
+      text: ' — recorded. Applying / reverting the work happens in Phase C.',
+    }));
+    return wrap;
+  }
+
+  /** Post the decision to the host and reflect it in the UI immediately. */
+  function submitAbrDecision(decision) {
+    if (!abrCurrentRunId) return;
+    if (typeof window !== 'undefined' && typeof window.GLYPHSPEK_POST === 'function') {
+      window.GLYPHSPEK_POST({ type: 'agenticBuildDecision', runId: abrCurrentRunId, decision: decision });
+    }
+    var root = document.getElementById('abr-decision-body');
+    if (root) {
+      clear(root);
+      root.appendChild(buildAbrDecisionResult(decision));
+    }
+  }
+
+  /** Show the Agentic Build Review view (hide the other panels' main regions). */
+  function showAbrView() {
+    var view = document.getElementById('agentic-review-view');
+    if (view) view.hidden = false;
+    var live = document.getElementById('live-view');
+    if (live) live.hidden = true;
+  }
+
+  /**
+   * Render a full AgenticBuildReview. The single entry point the host message
+   * handler (and the preview command) calls.
+   */
+  function renderAgenticBuildReview(review, opts) {
+    if (!review || typeof review !== 'object') return;
+    abrCurrentRunId = typeof review.runId === 'string' ? review.runId : null;
+    var tag = document.getElementById('abr-preview-tag');
+    if (tag) tag.hidden = !(opts && opts.preview);
+    renderAbrHeader(review);
+    renderAbrSummary(review);
+    renderAbrFiles(review);
+    renderAbrDiff(review);
+    renderAbrCommands(review);
+    renderAbrEgress(review);
+    renderAbrDecision(review);
+    showAbrView();
   }
 
   /* --------------------------- mock event-stream driver --------------------------- */
@@ -1155,12 +1822,80 @@
         // re-render; if it has not streamed yet, remember it so the next event for
         // that run auto-selects it (ingestRunEvent already selects the first run).
         selectRunFromHost(msg.runId);
+      } else if (msg.type === 'agenticBuildReview' && msg.review) {
+        // AGENTIC BUILD REVIEW (Phase B). The host posts a pinned AgenticBuildReview
+        // evidence object (real backend or the preview fixture). View-only: render
+        // the compact evidence + the accept/reject/request-changes controls.
+        renderAgenticBuildReview(msg.review, { preview: !!msg.preview });
       }
     });
 
     var demoBtn = document.getElementById('demo-live-btn');
     if (demoBtn) {
       demoBtn.addEventListener('click', function () { driveMockRun('isolated-native'); });
+    }
+
+    // PROMOTE TO GOVERNED RUN (§5.8, §6). The button posts `glyphspekPromote` to the
+    // host, which runs glyphspek.promoteChatToBuild — the first-party agentic-build
+    // gesture. The button does NOT grant authority: the command's own modal is the
+    // authority gate (a third party cannot post into this webview, and even our own
+    // click only OPENS the gated command). View-only here.
+    var promoteBtn = document.getElementById('promote-btn');
+    if (promoteBtn) {
+      promoteBtn.addEventListener('click', function () {
+        if (typeof window !== 'undefined' && typeof window.GLYPHSPEK_POST === 'function') {
+          window.GLYPHSPEK_POST({ type: 'glyphspekPromote' });
+        }
+      });
+    }
+
+    // SLICE 2 — AUTHORITY LADDER wiring (§1.3, §14.4). Click selects a rung (a VIEW
+    // control, not an authority grant); keyboard follows the ARIA radiogroup
+    // pattern: ←/↑ previous, →/↓ next (wrapping), Home/End first/last, Space/Enter
+    // select the focused rung. Selecting a rung calls setViewTier — it changes which
+    // evidence is shown, never the run's assurance.
+    var ladder = document.getElementById('authority-ladder');
+    if (ladder) {
+      ladder.addEventListener('click', function (e) {
+        var rung = e.target && e.target.closest ? e.target.closest('.rung') : null;
+        if (rung && rung.getAttribute) {
+          var t = rung.getAttribute('data-tier');
+          if (t) setViewTier(t);
+        }
+      });
+      ladder.addEventListener('keydown', function (e) {
+        var key = e.key;
+        var idx = LADDER_TIERS.indexOf(currentLadderTier());
+        if (idx === -1) idx = LADDER_TIERS.indexOf('governed');
+        var next = null;
+        if (key === 'ArrowRight' || key === 'ArrowDown') next = (idx + 1) % LADDER_TIERS.length;
+        else if (key === 'ArrowLeft' || key === 'ArrowUp') next = (idx - 1 + LADDER_TIERS.length) % LADDER_TIERS.length;
+        else if (key === 'Home') next = 0;
+        else if (key === 'End') next = LADDER_TIERS.length - 1;
+        else if (key === ' ' || key === 'Enter' || key === 'Spacebar') next = idx;
+        if (next !== null) {
+          e.preventDefault();
+          setViewTier(LADDER_TIERS[next]);
+        }
+      });
+    }
+
+    // ASK-TIER SURFACE actions (§1.7, §5.5.1). "Propose edit ▸" promotes the VIEW to
+    // the inline tier (still pre-run — a proposed diff, no execution). "Start a
+    // governed run ▸" is the EXPLICIT promotion entry point: it posts glyphspekPromote
+    // → glyphspek.promoteChatToBuild, whose OWN modal is the authority gate. Neither
+    // grants authority here.
+    var askProposeBtn = document.getElementById('ask-propose-btn');
+    if (askProposeBtn) {
+      askProposeBtn.addEventListener('click', function () { setViewTier('inline'); });
+    }
+    var askRunBtn = document.getElementById('ask-run-btn');
+    if (askRunBtn) {
+      askRunBtn.addEventListener('click', function () {
+        if (typeof window !== 'undefined' && typeof window.GLYPHSPEK_POST === 'function') {
+          window.GLYPHSPEK_POST({ type: 'glyphspekPromote' });
+        }
+      });
     }
 
     // Expose a tiny hook so the host (or a test page) can request a specific
@@ -1193,6 +1928,32 @@
       CREATION_TRUST_BADGE: CREATION_TRUST_BADGE,
       creationTrustBadge: creationTrustBadge,
       summarizeLive: summarizeLive,
+      // SLICE 1 — friction surface derivation (BLENDED-WORKBENCH-SPEC §5.8/§6/§7).
+      // Exposed PURE so test/frictionSurface.test.mjs asserts the data-tier /
+      // data-authority derivation + the SOFT cap on the REAL panel code (the same
+      // honesty gates renderVerdict uses), not a re-implementation.
+      deriveAuthority: deriveAuthority,
+      deriveTier: deriveTier,
+      isSoftPosture: isSoftPosture,
+      FRICTION_COPY: FRICTION_COPY,
+      AUTHORITY_CHIP: AUTHORITY_CHIP,
+      SENSITIVE_BOUNDARY: SENSITIVE_BOUNDARY,
+      // SLICE 2 — Authority Ladder (view axis) + Ask surface. Exposed PURE so
+      // test/authorityLadder.test.mjs asserts the ladder sets data-tier + the ARIA
+      // radiogroup state on the REAL panel code, the Ask surface hides the verdict +
+      // shows the two promotion actions, and the ladder never touches data-authority.
+      setViewTier: setViewTier,
+      syncLadder: syncLadder,
+      currentLadderTier: currentLadderTier,
+      setFrictionSurface: setFrictionSurface,
+      LADDER_TIERS: LADDER_TIERS,
+      // AGENTIC BUILD REVIEW (Phase B) — exposed for the renderer/parser tests
+      // (test/agenticBuildReview.test.mjs) so the diff parser, the honest verdict
+      // badge, and the full render are asserted on the REAL panel code.
+      parseUnifiedDiff: parseUnifiedDiff,
+      buildDiffView: buildDiffView,
+      abrVerdictBadge: abrVerdictBadge,
+      renderAgenticBuildReview: renderAgenticBuildReview,
     };
   }
 
