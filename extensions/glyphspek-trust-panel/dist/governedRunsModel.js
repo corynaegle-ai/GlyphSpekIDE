@@ -22,6 +22,13 @@
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.GovernedRunsModel = void 0;
 const runEventProtocol_1 = require("./runEventProtocol");
+const bridgeProtocol_1 = require("./bridgeProtocol");
+/**
+ * Defensive cap mirroring the upstream slice (governed-agentic-run.ts
+ * `opts.prompt.slice(0, 200)`): the intent should already be ≤200 chars, but we
+ * re-cap so a non-conforming producer can never inflate the retained text.
+ */
+const INTENT_MAX_CHARS = 200;
 /**
  * In-memory registry of the governed runs the extension has observed this session.
  * Fed the raw `run/event` envelopes (validate-then-fold), it exposes a stable,
@@ -44,6 +51,73 @@ class GovernedRunsModel {
         if (!validation.ok)
             return; // not a current/known event — don't fabricate a row
         const changed = this.apply(validation.event);
+        if (changed)
+            this.emitChange();
+    }
+    /**
+     * Fold the TERMINAL agentic-build review into the run set (sweep-50 Medium).
+     *
+     * WHY a second door: the agentic-build path (promoteChatToBuild → runAgenticBuild)
+     * streams ONLY `build/event` notifications — it never emits a `run/event` envelope —
+     * so a build started from native Home never reaches {@link ingest}. The Trust Panel
+     * retains the terminal review (reviewsByRunId) for the Evidence pane, but without this
+     * the run was INVISIBLE to GovernedRunsModel.list() → absent from the Governed Runs
+     * tree, the Agent View snapshot, and (because list() returns nothing for it) the
+     * detail transport returned `undefined`. So a Home-started build could run AND finish
+     * while the left Runs pane stayed empty/stale.
+     *
+     * HONESTY (mirrors {@link ingest}'s validate-then-fold, never-fabricate discipline):
+     *   - We fold ONLY the REAL fields the terminal review produced: its runId, its honest
+     *     creation posture (a known RunTrust only — an unrecognized posture is dropped, not
+     *     coerced), the codex actor, its intent, and a closed status derived from the REAL
+     *     verifier verdict (`overall:'pass'` → 'completed', otherwise 'failed' — the SAME
+     *     terminal transition the supervisor records). We NEVER synthesize a posture, a
+     *     verdict, or a PASS the build did not produce.
+     *   - A malformed review (no runId, or a posture outside RUN_TRUSTS) is IGNORED — it
+     *     never invents a row, exactly as a foreign/malformed run-event is ignored.
+     *   - The CALLER must NOT pass a preview/fixture review (the Trust Panel already
+     *     excludes previews via getRetainedReview); this folds only authoritative builds.
+     *
+     * A build is terminal, so the folded row is always `closed`. If a real `run/event`
+     * stream later carries the same runId (it does not today), `apply`/`set` keeps the
+     * latest fact per field — this never clobbers richer data with a stale value.
+     */
+    ingestBuildReview(review) {
+        if (!review || typeof review.runId !== 'string' || review.runId.length === 0)
+            return;
+        // Only a KNOWN creation posture is folded — never coerce an unrecognized value.
+        const posture = typeof review.posture === 'string' &&
+            bridgeProtocol_1.RUN_TRUSTS.includes(review.posture)
+            ? review.posture
+            : undefined;
+        if (!posture)
+            return; // no honest posture → don't invent a row
+        // Honest terminal status from the REAL verdict (mirrors the supervisor's own
+        // codexOk ? 'completed' : 'failed' transition + run_closed ok===pass).
+        const status = review.verdict?.overall === 'pass' ? 'completed' : 'failed';
+        // The wire review's actor is always 'codex'; map to the model's actorType convention.
+        const actorType = review.actor === 'codex' ? 'codex-cli' : 'unknown';
+        const runId = review.runId;
+        const existing = this.runs.get(runId);
+        const summary = existing ?? {
+            runId,
+            actorType: 'unknown',
+            creationTrust: 'unknown',
+            status: 'created',
+            closed: false,
+            order: this.nextOrder++,
+        };
+        let changed = !existing;
+        changed = this.set(summary, 'actorType', actorType) || changed;
+        changed = this.set(summary, 'creationTrust', posture) || changed;
+        changed = this.set(summary, 'status', status) || changed;
+        changed = this.set(summary, 'closed', true) || changed;
+        if (typeof review.intent === 'string' && review.intent.trim().length > 0) {
+            changed =
+                this.set(summary, 'intent', review.intent.trim().slice(0, INTENT_MAX_CHARS)) ||
+                    changed;
+        }
+        this.runs.set(runId, summary);
         if (changed)
             this.emitChange();
     }
@@ -79,6 +153,18 @@ class GovernedRunsModel {
                     const p = event.event.payload;
                     if (p && typeof p.to === 'string') {
                         changed = this.set(summary, 'status', p.to) || changed;
+                    }
+                }
+                // Capture the run INTENT from the run_created genesis (RunCreatedPayload.intent,
+                // the design §1 crosswalk source). It is non-secret + already ~200-char-sliced
+                // upstream; we re-cap defensively and retain it only when present (never invent
+                // an intent), mirroring how actorType/creationTrust are captured from run_opened.
+                if (event.event.type === 'run_created') {
+                    const p = event.event.payload;
+                    if (p && typeof p.intent === 'string' && p.intent.trim().length > 0) {
+                        changed =
+                            this.set(summary, 'intent', p.intent.trim().slice(0, INTENT_MAX_CHARS)) ||
+                                changed;
                     }
                 }
                 break;

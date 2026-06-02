@@ -10,7 +10,7 @@
  * blended-workbench mockup uses). Injected once into the Home pane DOM so `<use href="#gs-…">`
  * references resolve. Kept here as a string constant so the pane has no network/file dependency.
  */
-export const GLYPHSPEK_HOME_ICON_SPRITE = `
+const GLYPHSPEK_HOME_ICON_SPRITE = `
 <svg xmlns="http://www.w3.org/2000/svg" aria-hidden="true" focusable="false" style="position:absolute;width:0;height:0;overflow:hidden" color="#e9ecff"><defs>
 <symbol id="gs-run" viewBox="0 0 24 24"><path d="M4 6.5A2.5 2.5 0 0 1 6.5 4h11A2.5 2.5 0 0 1 20 6.5v11a2.5 2.5 0 0 1-2.5 2.5h-11A2.5 2.5 0 0 1 4 17.5Z" fill="none" stroke="currentColor" stroke-width="1.8"/><path d="m10 8 5 4-5 4Z" fill="currentColor"/><path d="M7 6.8h10M7 17.2h10" fill="none" stroke="currentColor" stroke-width="1.2" stroke-linecap="round" opacity=".55"/></symbol>
 <symbol id="gs-verifier" viewBox="0 0 24 24"><path d="M12 3.5 19 6v5.7c0 4.6-2.9 7.2-7 8.8-4.1-1.6-7-4.2-7-8.8V6Z" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"/><path d="m8.7 12 2.2 2.2 4.7-5" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"/><path d="M12 3.5v17" fill="none" stroke="currentColor" stroke-width="1.1" opacity=".42"/></symbol>
@@ -22,3 +22,22 @@ export const GLYPHSPEK_HOME_ICON_SPRITE = `
 <symbol id="gs-sandbox" viewBox="0 0 24 24"><path d="m12 3 8 4.5v9L12 21l-8-4.5v-9Z" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"/><path d="M4 7.5 12 12l8-4.5M12 12v9" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round" opacity=".7"/><path d="M9 8.8 12 7l3 1.8" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/></symbol>
 <symbol id="gs-claude-actor" viewBox="0 0 24 24"><path d="M12 4.5v15M4.5 12h15M6.7 6.7l10.6 10.6M17.3 6.7 6.7 17.3" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/><circle cx="12" cy="12" r="3.2" fill="none" stroke="currentColor" stroke-width="1.8"/><circle cx="12" cy="12" r="1.1" fill="currentColor"/></symbol>
 </defs></svg>`;
+
+/**
+ * Build the vendored sprite as a real `<svg>` DOM node.
+ *
+ * IMPORTANT (Trusted Types): the Code-OSS renderer enforces a `require-trusted-types-for 'script'`
+ * CSP, so assigning a raw HTML/SVG STRING to a DOM HTML sink (`insertAdjacentHTML` / `innerHTML`)
+ * throws `This document requires 'TrustedHTML' assignment.` synchronously — which, in an EditorPane
+ * `createEditor`, aborts the whole render and leaves the pane blank. `DOMParser.parseFromString`
+ * with the `image/svg+xml` mime type is NOT a Trusted Types HTML sink (it returns a parsed
+ * `Document`, it does not assign a string to `innerHTML`), so it is the safe way to materialize a
+ * static, code-vendored sprite into nodes. The parsed `<svg>` is imported into the pane's document
+ * before being appended by the caller.
+ */
+export function createGlyphspekHomeIconSprite(targetDocument: Document): SVGElement {
+	const parsed = new DOMParser().parseFromString(GLYPHSPEK_HOME_ICON_SPRITE, 'image/svg+xml');
+	// importNode adopts the parsed (foreign-document) node into the pane's document so it lives in
+	// the same tree as the `<use href="#gs-…">` references that resolve against it.
+	return targetDocument.importNode(parsed.documentElement, true) as unknown as SVGElement;
+}

@@ -77,6 +77,8 @@ const mockRunStream_1 = require("./mockRunStream");
 const webviewGestureGate_1 = require("./webviewGestureGate");
 const configScope_1 = require("./configScope");
 const governedRunsModel_1 = require("./governedRunsModel");
+const agentRunSnapshot_1 = require("./agentRunSnapshot");
+const agentRunDetail_1 = require("./agentRunDetail");
 const governedRunsTree_1 = require("./governedRunsTree");
 const agenticBuildReview_1 = require("./agenticBuildReview");
 const agenticBuildPromotion_1 = require("./agenticBuildPromotion");
@@ -231,10 +233,32 @@ class RunStatusController {
      * The webview confirmed (or revoked) a signature-VERIFIED authority for a run —
      * the ONLY path to a `verified` segment, since the host cannot run the Ed25519
      * gate. Honest: a later tamper posts verified:false and the run drops off blue.
+     * Returns whether the canonical verified set actually CHANGED, so the caller can
+     * advance the Agent View snapshot revision only on a real amber→blue flip / revert.
      */
     confirmVerified(runId, verified) {
-        if (this.model.confirmVerified(runId, verified))
+        const changed = this.model.confirmVerified(runId, verified);
+        if (changed)
             this.render();
+        return changed;
+    }
+    /**
+     * Whether the webview signature gate confirmed a verified authority for a run.
+     * The Agent View snapshot (glyphspek.runs.snapshot) reads this canonical verified
+     * set so its 'verified' row uses the SAME fact the status bar + gutter + cards do.
+     */
+    isVerified(runId) {
+        return this.model.isVerified(runId);
+    }
+    /**
+     * The CANONICAL per-run assurance level — the SAME computation the status bar
+     * renders for the focused run, evaluated for any runId. The Agent View per-run
+     * detail (glyphspek.runs.detail) reads this so the Slice-4 halo reflects the EXACT
+     * authority the run earned — never an inflated or independently derived one. An
+     * unknown/just-opened run is 'read'.
+     */
+    authorityFor(runId) {
+        return this.model.authorityFor(runId);
     }
     /** Recompute all four segments + push the assurance to the context-key/halo. */
     render() {
@@ -389,6 +413,20 @@ let governedRunsCardView;
 function getGovernedRunsCardView() {
     return governedRunsCardView;
 }
+/**
+ * The AGENT VIEW snapshot REVISION (Slice 1, design §2). A monotonic counter bumped
+ * on every run-set change AND on every webview signature confirmation — the two
+ * facts the workbench Agent View renders (a row appearing/updating, and an
+ * acting→verified flip). The native workbench polls `glyphspek.runs.revision` and
+ * re-fetches `glyphspek.runs.snapshot` only when this advances; a command cannot
+ * PUSH to the workbench, so this cheap counter is the change signal for the pull
+ * transport. Module-scoped so both the model subscription (in activate) and the
+ * glyphspekAuthority handler (in TrustPanel) can advance it.
+ */
+let agentRunsRevision = 0;
+function bumpAgentRunsRevision() {
+    agentRunsRevision++;
+}
 /** Human-readable byte size for size-cap error messages. */
 function formatBytes(bytes) {
     if (bytes < 1024)
@@ -490,6 +528,16 @@ function readIconsSprite(mediaUri) {
  * its CSP-locked HTML, and bridges host<->webview messages.
  */
 class TrustPanel {
+    /**
+     * Read-only peek at the live panel WITHOUT creating one (createOrShow would spawn a
+     * webview). The Agent View evidence transport (glyphspek.runs.detail) uses this to
+     * read a run's retained review when a panel happens to be open, and falls back to
+     * the honest "no evidence yet" projection when it is not — a read-only command must
+     * never have the side effect of opening a panel.
+     */
+    static peekCurrent() {
+        return TrustPanel.current;
+    }
     static createOrShow(extensionUri, gate) {
         const column = vscode.window.activeTextEditor?.viewColumn ?? vscode.ViewColumn.One;
         if (TrustPanel.current) {
@@ -598,7 +646,16 @@ class TrustPanel {
                 // come from our own webview — a third party cannot post into it.
                 if (typeof msg.runId === 'string' &&
                     typeof msg.authority === 'string') {
-                    getRunStatusController().confirmVerified(msg.runId, msg.authority === 'verified');
+                    const verifiedChanged = getRunStatusController().confirmVerified(msg.runId, msg.authority === 'verified');
+                    // AGENT VIEW snapshot (Slice 1, design §2): a verified flip (amber→blue)
+                    // or a tamper-revert changes a run's 'verified' ELIGIBILITY but is NOT a
+                    // run-set change, so GovernedRunsModel.onDidChange does not fire. Advance
+                    // the snapshot revision here — only when the canonical verified set really
+                    // changed — so the native workbench poll re-fetches and the Agent View row
+                    // flips in step with the status bar / gutter / cards (never ahead of the
+                    // signature gate). The bump is the only extra signal this path needs.
+                    if (verifiedChanged)
+                        bumpAgentRunsRevision();
                     // PROVENANCE GUTTER (Slice 3): the SAME webview gate drives the editor's
                     // amber→blue flip / tamper revert. 'verified' moves the run's covered
                     // hunks to blue; any other value clears the flag so a later tamper drops
@@ -690,6 +747,26 @@ class TrustPanel {
         // (esp. the revert) to EXACTLY this review's changedFiles. Keyed by runId.
         if (review && typeof review.runId === 'string' && review.runId.length > 0) {
             this.reviewsByRunId.set(review.runId, { review, preview, ...(cwd ? { cwd } : {}) });
+            // AGENT VIEW BRIDGE (sweep-50 Medium): the agentic-build path streams ONLY
+            // `build/event` (never `run/event`), so a build started from native Home never
+            // reached postRunEvent → GovernedRunsModel.ingest. The terminal review was
+            // retained for the Evidence pane, but the run stayed INVISIBLE to the run set —
+            // absent from the Governed Runs tree AND the Agent View snapshot (and so the
+            // detail transport returned undefined for it). Fold the REAL terminal review into
+            // the SAME GovernedRunsModel the tree/snapshot read so the run LISTS honestly. We
+            // do this ONLY for an AUTHORITATIVE (non-preview) review — a preview/fixture's
+            // changes are not real, exactly as getRetainedReview excludes it from evidence.
+            // The model's ingestBuildReview folds only the real fields (runId/posture/actor/
+            // intent + a status derived from the real verdict) and never fabricates a row.
+            if (!preview) {
+                getGovernedRunsModel().ingestBuildReview(review);
+                // The Agent View polls glyphspek.runs.revision and only re-fetches snapshot +
+                // detail when it advances. ingestBuildReview emits the model's onDidChange (→
+                // bumpAgentRunsRevision) when the row changes; bump here too so the EVIDENCE
+                // pane refreshes even when the row summary was already up to date (e.g. a second
+                // review for a run whose summary fields did not change but whose evidence did).
+                bumpAgentRunsRevision();
+            }
             // PROVENANCE GUTTER (Slice 3): the agentic build's git diff is the ONE honest
             // source of real hunk ranges. Attach it so the run's changed files promote from
             // whole-file amber to HUNK granularity. The blue gate is unchanged — hunks paint
@@ -704,6 +781,22 @@ class TrustPanel {
             return;
         }
         void this.panel.webview.postMessage({ type: 'agenticBuildReview', review, preview });
+    }
+    /**
+     * Read-only accessor for the latest AgenticBuildReview retained per runId (Phase C
+     * retention; the SAME store the decision handler scopes its revert to). The Agent
+     * View detail transport (glyphspek.runs.detail) reads it to project the run's
+     * EVIDENCE (changed files + diff + signed verdict) for the native Evidence pane.
+     * Returns undefined when no review has been posted for the run yet (the honest
+     * "no evidence yet" state — the projection then emits empty changes + no verdict).
+     * Returns the AUTHORITATIVE review only; a preview/fixture review is also retained
+     * but its changes are not real, so it is excluded from the evidence projection.
+     */
+    getRetainedReview(runId) {
+        const entry = this.reviewsByRunId.get(runId);
+        if (!entry || entry.preview)
+            return undefined;
+        return entry.review;
     }
     /**
      * Handle the operator's diff-accept DECISION (Phase C — the SECOND gate). The webview
@@ -1724,6 +1817,53 @@ function activate(context) {
     const runsModel = getGovernedRunsModel();
     const runsTree = new governedRunsTree_1.GovernedRunsTreeProvider(runsModel, context.extensionUri);
     context.subscriptions.push(runsTree);
+    // AGENT VIEW snapshot transport (Slice 1, design §2). The native workbench Home
+    // surface cannot import this tree (layer boundary), so it reaches the run set
+    // through TWO read-only commands:
+    //   glyphspek.runs.snapshot  → the AgentRunSnapshot projection (newest-first runs
+    //                              + the per-run webview-verified fact), built from the
+    //                              SAME GovernedRunsModel the tree/cards render. Pure
+    //                              projection (agentRunSnapshot.ts) — never invents a row.
+    //   glyphspek.runs.revision  → a monotonic counter bumped on every run-set change
+    //                              (and on a webview signature confirmation). The
+    //                              workbench polls this cheap counter and only re-fetches
+    //                              the full snapshot when it advances — a pull transport
+    //                              that matches VS Code's command seam (a command cannot
+    //                              PUSH to the workbench) without busy work.
+    // The verified fact is read from the canonical RunStatusController set, so the
+    // snapshot's 'verified' eligibility uses the SAME signature gate the status bar /
+    // gutter / cards use — the workbench mirror re-derives the card state from it.
+    context.subscriptions.push(runsModel.onDidChange(() => bumpAgentRunsRevision()));
+    context.subscriptions.push(vscode.commands.registerCommand('glyphspek.runs.snapshot', () => (0, agentRunSnapshot_1.projectAgentRuns)(runsModel.list(), (runId) => getRunStatusController().isVerified(runId))));
+    context.subscriptions.push(vscode.commands.registerCommand('glyphspek.runs.revision', () => agentRunsRevision));
+    // AGENT VIEW per-run EVIDENCE transport (Slice 2 Part A, design §1/§3). The native
+    // Evidence pane reaches ONE run's evidence through a third read-only command:
+    //   glyphspek.runs.detail(runId) → the AgentRunDetail projection (rev 2: intent +
+    //                                  authorityLevel + changed files + diff + the SIGNED
+    //                                  verifier verdict facts) for the pane, or `undefined`
+    //                                  if the run is unknown to the model. Built from the
+    //                                  SAME GovernedRunsModel row (which now retains the
+    //                                  run intent from run_created), the SAME canonical
+    //                                  webview-verified gate the snapshot uses
+    //                                  (RunStatusController.isVerified — NOT a
+    //                                  re-implemented Ed25519 check; the workbench never
+    //                                  re-verifies), the SAME canonical per-run authority
+    //                                  the status bar computes (authorityFor — for the
+    //                                  Slice-4 halo), and the latest AUTHORITATIVE review
+    //                                  retained per runId on the Trust Panel
+    //                                  (getRetainedReview). No review yet → an honest
+    //                                  empty-changes / no-verdict shape (never a faked PASS).
+    context.subscriptions.push(vscode.commands.registerCommand('glyphspek.runs.detail', (runId) => {
+        if (typeof runId !== 'string' || runId.length === 0)
+            return undefined;
+        const summary = runsModel.get(runId);
+        if (!summary)
+            return undefined; // unknown run — never fabricate evidence
+        return (0, agentRunDetail_1.projectAgentRunDetail)(summary, TrustPanel.peekCurrent()?.getRetainedReview(runId), getRunStatusController().isVerified(runId), 
+        // The CANONICAL per-run authority — the SAME status-bar computation, so the
+        // Slice-4 halo reflects only what the verifier proved (Slices 3 & 4 Part A).
+        getRunStatusController().authorityFor(runId));
+    }));
     // STATUS-BAR SEGMENTS + HALO FALLBACK + the glyphspek.authority context-key
     // (Slice 2, §1.12 / §1.1 / §2.2). The controller creates the four status-bar
     // items, sets the context-key the future fork ring reads, and (opt-in behind
