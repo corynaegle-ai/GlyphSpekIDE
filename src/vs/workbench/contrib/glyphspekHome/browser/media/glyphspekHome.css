@@ -58,7 +58,12 @@
 }
 
 .glyphspek-home-inner {
-	max-width: 760px;
+	/* Wide enough for the §3 three-pane Agent View (RUNS · COMPOSER · EVIDENCE).
+	 * The original 760px cap was sized for the single-column landing page; the
+	 * Slice-1 grid needs room for two ~220–280px side columns + a flexible center
+	 * (440px sides + 44px gaps leaves the center starved at 760). 1180px gives the
+	 * center its primary width while staying readable on a maximized window. */
+	max-width: 1180px;
 	margin: 0 auto;
 	padding: 64px 32px 80px;
 	display: flex;
@@ -147,15 +152,18 @@
 }
 
 .glyphspek-home .gsh-input-row {
+	/* The composer lives in the (narrower) CENTER pane now, not a full-width page.
+	 * Stack the full-width textarea over the action button: the button can never
+	 * overflow the column the way a nowrap inline button did when the center was
+	 * squeezed. align-items:stretch keeps the textarea full-bleed; the button
+	 * sizes to its own width below it (see .gsh-run-button align-self). */
 	display: flex;
+	flex-direction: column;
 	gap: 10px;
 	align-items: stretch;
 }
-.glyphspek-home.gsh-narrow .gsh-input-row {
-	flex-direction: column;
-}
 .glyphspek-home .gsh-task-input {
-	flex: 1;
+	width: 100%;
 	min-width: 0;
 	resize: vertical;
 	background: var(--gsh-plane-0);
@@ -176,7 +184,7 @@
 	box-shadow: 0 0 0 1px color-mix(in srgb, var(--gsh-verdict) 50%, transparent);
 }
 .glyphspek-home .gsh-run-button {
-	display: flex;
+	display: inline-flex;
 	align-items: center;
 	justify-content: center;
 	gap: 8px;
@@ -189,10 +197,11 @@
 	font-family: inherit;
 	font-size: 13px;
 	font-weight: 600;
-	padding: 0 16px;
-}
-.glyphspek-home.gsh-narrow .gsh-run-button {
-	padding: 10px 16px;
+	/* Sits below the full-width textarea in the composer column; size to its own
+	 * label (align-self:flex-start) with real vertical padding so it never stretches
+	 * full-bleed nor — as before — overflows the column to the right. */
+	align-self: flex-start;
+	padding: 10px 18px;
 }
 .glyphspek-home .gsh-run-button:hover:not(:disabled) {
 	border-color: var(--gsh-verdict);
@@ -378,7 +387,13 @@
  * Collapses to a single column on a narrow pane. */
 .glyphspek-home .gsh-panes {
 	display: grid;
-	grid-template-columns: minmax(220px, 280px) minmax(0, 1fr) minmax(220px, 300px);
+	/* LEFT runs + RIGHT evidence are bounded side columns; CENTER composer is the
+	 * primary, flexible track. Every track has a `min` of 0 (minmax(0, …)) so a
+	 * long word or the textarea/button can NEVER force a track wider than its share
+	 * and starve the 1fr center down to min-content (the one-word-per-line bug).
+	 * The center 1fr is given the lion's share, mirroring the prototype IA
+	 * (side panel · WIDE center · trust panel). */
+	grid-template-columns: minmax(0, 260px) minmax(0, 1fr) minmax(0, 300px);
 	gap: 22px;
 	align-items: start;
 	position: relative;

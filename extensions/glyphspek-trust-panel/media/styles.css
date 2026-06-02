@@ -1841,3 +1841,26 @@ input[type="file"] {
   opacity: 1 !important;
   filter: none !important;
 }
+
+/* HONEST EMPTY STATE (project-scoping). Shown in the in-IDE workspace Trust Panel
+   when no governed run has produced evidence for THIS project yet — instead of the
+   bundled demo sample. Quiet, non-alarming: this is a normal first-open state. */
+.gs-empty-state {
+  padding: 22px 18px;
+  border: 1px dashed var(--border, rgba(128, 128, 128, 0.35));
+  border-radius: 10px;
+  background: var(--bg-card);
+}
+.gs-empty-title {
+  font-size: 1.05em;
+  font-weight: 600;
+  color: var(--text);
+  margin-bottom: 6px;
+}
+.gs-empty-body {
+  font-size: 0.92em;
+  line-height: 1.5;
+  color: var(--text);
+  opacity: 0.7;
+  max-width: 60ch;
+}

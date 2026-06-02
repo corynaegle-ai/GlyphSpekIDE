@@ -1051,6 +1051,26 @@ function anyGlobMatch(patterns, target) {
   return false;
 }
 
+// ../spikes/p0-supervisor/network-allowlist.ts
+function splitHostPortEntry(entry) {
+  const trimmed = entry.trim();
+  const idx = trimmed.lastIndexOf(":");
+  if (idx === -1) return { host: trimmed };
+  const portStr = trimmed.slice(idx + 1);
+  if (/^\d+$/.test(portStr)) return { host: trimmed.slice(0, idx), port: Number(portStr) };
+  return { host: trimmed };
+}
+function networkAllowMatches(allow, host, port) {
+  const target = host.trim().toLowerCase();
+  for (const entry of allow) {
+    const { host: aHost, port: aPort } = splitHostPortEntry(entry);
+    if (aHost.toLowerCase() !== target) continue;
+    if (aPort === void 0) return true;
+    if (aPort === port) return true;
+  }
+  return false;
+}
+
 // ../spikes/p0-supervisor/policy/decide.ts
 function readPath(payload) {
   if (typeof payload === "object" && payload !== null) {
@@ -1070,6 +1090,13 @@ function readHost(payload) {
   if (typeof payload === "object" && payload !== null) {
     const h = payload.host;
     if (typeof h === "string") return h;
+  }
+  return void 0;
+}
+function readPort(payload) {
+  if (typeof payload === "object" && payload !== null) {
+    const p = payload.port;
+    if (typeof p === "number" && Number.isInteger(p) && p > 0) return p;
   }
   return void 0;
 }
@@ -1137,7 +1164,8 @@ function decideRaw(policy, request) {
     }
     case "network": {
       const host = readHost(request.payload);
-      if (host !== void 0 && policy.allow.network.includes(host)) return "allow";
+      const port = readPort(request.payload);
+      if (host !== void 0 && networkAllowMatches(policy.allow.network, host, port)) return "allow";
       return verbToDecision(policy.defaults.network);
     }
     default: {

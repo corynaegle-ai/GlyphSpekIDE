@@ -174,9 +174,15 @@ export class GlyphspekHomePage extends EditorPane {
 			'aria-label': localize('glyphspekHome.aria', "GlyphSpek Home — start a governed run and reach the governance surfaces.")
 		});
 		// Vendored brand icon sprite so `<use href="#gs-…">` resolves inside the pane. Built as a
-		// real DOM node (NOT via insertAdjacentHTML) — the renderer's Trusted Types CSP rejects a
-		// raw HTML-string assignment, which would throw here and blank the whole pane.
-		this.container.insertBefore(createGlyphspekHomeIconSprite(this.container.ownerDocument), this.container.firstChild);
+		// real DOM node via createElementNS/setAttribute (NOT insertAdjacentHTML/innerHTML/DOMParser)
+		// — the renderer's Trusted Types CSP rejects raw HTML-string sinks, which would throw here.
+		// Defense-in-depth: even if sprite construction ever throws, a missing-icons pane is far
+		// better than a blank tab, so we catch + log + continue rendering rather than abort.
+		try {
+			this.container.insertBefore(createGlyphspekHomeIconSprite(this.container.ownerDocument), this.container.firstChild);
+		} catch (err) {
+			console.error('[GlyphSpek Home] icon sprite injection failed; rendering without brand icons', err);
+		}
 		append(parent, this.container);
 
 		// Re-render the command rows when the GlyphSpek extension (de)registers its commands,

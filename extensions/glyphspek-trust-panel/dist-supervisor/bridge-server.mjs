@@ -742,6 +742,49 @@ function anyGlobMatch(patterns, target) {
   return false;
 }
 
+// ../spikes/p0-supervisor/network-allowlist.ts
+function networkSpecFromPolicy(policy, opts = {}) {
+  const allow = dedupeHosts(policy.allow.network);
+  if (allow.length === 0) {
+    return "deny";
+  }
+  return {
+    allow,
+    acknowledgeSoftEgress: opts.acknowledgeSoftEgress === true
+  };
+}
+function splitHostPortEntry(entry) {
+  const trimmed = entry.trim();
+  const idx = trimmed.lastIndexOf(":");
+  if (idx === -1) return { host: trimmed };
+  const portStr = trimmed.slice(idx + 1);
+  if (/^\d+$/.test(portStr)) return { host: trimmed.slice(0, idx), port: Number(portStr) };
+  return { host: trimmed };
+}
+function networkAllowMatches(allow, host, port) {
+  const target = host.trim().toLowerCase();
+  for (const entry of allow) {
+    const { host: aHost, port: aPort } = splitHostPortEntry(entry);
+    if (aHost.toLowerCase() !== target) continue;
+    if (aPort === void 0) return true;
+    if (aPort === port) return true;
+  }
+  return false;
+}
+function dedupeHosts(hosts) {
+  const seen = /* @__PURE__ */ new Set();
+  const out = [];
+  for (const raw of hosts) {
+    const host = raw.trim();
+    if (host.length === 0) continue;
+    const key = host.toLowerCase();
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push(host);
+  }
+  return out;
+}
+
 // ../spikes/p0-supervisor/policy/decide.ts
 function readPath(payload) {
   if (typeof payload === "object" && payload !== null) {
@@ -761,6 +804,13 @@ function readHost(payload) {
   if (typeof payload === "object" && payload !== null) {
     const h = payload.host;
     if (typeof h === "string") return h;
+  }
+  return void 0;
+}
+function readPort(payload) {
+  if (typeof payload === "object" && payload !== null) {
+    const p = payload.port;
+    if (typeof p === "number" && Number.isInteger(p) && p > 0) return p;
   }
   return void 0;
 }
@@ -828,7 +878,8 @@ function decideRaw(policy, request) {
     }
     case "network": {
       const host = readHost(request.payload);
-      if (host !== void 0 && policy.allow.network.includes(host)) return "allow";
+      const port = readPort(request.payload);
+      if (host !== void 0 && networkAllowMatches(policy.allow.network, host, port)) return "allow";
       return verbToDecision(policy.defaults.network);
     }
     default: {
@@ -1607,7 +1658,7 @@ async function startTerminalSession(opts) {
     }
   };
   let openedTrust = facts.creationTrust;
-  let openedRuntimeTrust = facts.runtimeTrust;
+  let openedRuntimeTrust = "untrusted";
   let isolationRuntime;
   let isolationSpec;
   if (isolation) {
@@ -2332,31 +2383,6 @@ ${s.content}`,
     return this.ctx.residency;
   }
 };
-
-// ../spikes/p0-supervisor/network-allowlist.ts
-function networkSpecFromPolicy(policy, opts = {}) {
-  const allow = dedupeHosts(policy.allow.network);
-  if (allow.length === 0) {
-    return "deny";
-  }
-  return {
-    allow,
-    acknowledgeSoftEgress: opts.acknowledgeSoftEgress === true
-  };
-}
-function dedupeHosts(hosts) {
-  const seen = /* @__PURE__ */ new Set();
-  const out = [];
-  for (const raw of hosts) {
-    const host = raw.trim();
-    if (host.length === 0) continue;
-    const key = host.toLowerCase();
-    if (seen.has(key)) continue;
-    seen.add(key);
-    out.push(host);
-  }
-  return out;
-}
 
 // ../spikes/p0-supervisor/trust-gate.ts
 function trustFromCapabilities(caps) {
@@ -3918,10 +3944,14 @@ function capabilitiesForProfile(runtimeProfile, network) {
     case "docker":
       return { fsIsolated: true, hardEgress: network === "deny" };
     case "firecracker":
-      return { fsIsolated: true, hardEgress: true };
+      return { fsIsolated: true, hardEgress: isHardNetworkSpec(network) };
     default:
       return { fsIsolated: false, hardEgress: false };
   }
+}
+function isHardNetworkSpec(network) {
+  if (network === "deny") return true;
+  return network.acknowledgeSoftEgress !== true;
 }
 function settleCreateRunTrust(request) {
   let network;
@@ -3938,17 +3968,27 @@ function settleCreateRunTrust(request) {
     policyLoadError = err instanceof Error ? err.message : String(err);
     network = { allow: ["(unknown)"], acknowledgeSoftEgress: true };
   }
+  if (policyLoadError !== void 0) {
+    return {
+      trust: "untrusted",
+      capabilities: { fsIsolated: false, hardEgress: false },
+      network,
+      policyLoadError
+    };
+  }
   const capabilities = capabilitiesForProfile(request.runtimeProfile, network);
   const trust = trustFromCapabilities(capabilities);
-  return { trust, capabilities, network, ...policyLoadError ? { policyLoadError } : {} };
+  return { trust, capabilities, network };
 }
 function trustReasonForCreate(verdict) {
   if (verdict.trust === "trusted") return void 0;
   if (verdict.trust === "sandboxed-soft-egress") {
     return "runtime is fs-isolated but egress is SOFT (application-layer allowlist; raw-socket bypass possible on Docker/Colima); run is sandboxed-soft-egress, NOT product-trusted. A hard egress allowlist is the Firecracker remote plane (future work).";
   }
-  const base = "runtime is non-isolating (no filesystem boundary the actor cannot escape); run is untrusted (a non-isolating runtime cannot produce a product-trusted run).";
-  return verdict.policyLoadError ? `${base} (policy load error: ${verdict.policyLoadError})` : base;
+  if (verdict.policyLoadError) {
+    return `run policy could not be loaded, so the supervisor cannot attest the run's egress allowlist / verify scope / policy hash; the run is untrusted (a run whose policy bytes are unreadable cannot be trusted). (policy load error: ${verdict.policyLoadError})`;
+  }
+  return "runtime is non-isolating (no filesystem boundary the actor cannot escape); run is untrusted (a non-isolating runtime cannot produce a product-trusted run).";
 }
 function selfHashCheck(selfPath, pinnedSha) {
   if (!pinnedSha) return { ok: true };
@@ -4795,14 +4835,15 @@ var BridgeServer = class {
     const request = validation.request;
     const created = createRun(this.runsBaseDir);
     const lifecycle = new RunLifecycle(created.state);
-    const isolation = isApprovedIsolationRuntime(request.runtimeProfile);
+    const namesApprovedRuntime = isApprovedIsolationRuntime(request.runtimeProfile);
+    const runtimeIsolated = false;
     const trust = "governed-unsandboxed";
     const serverRun = {
       created,
       lifecycle,
       trust,
       request,
-      runtimeIsolated: isolation,
+      runtimeIsolated,
       started: true
       // a terminal session is its own driver; run/start is not used.
     };
@@ -4817,7 +4858,12 @@ var BridgeServer = class {
       ...request.actorVersion ? { actorVersion: request.actorVersion } : {},
       ...request.actorBinary ? { actorBinary: request.actorBinary } : {},
       runtimeProfile: request.runtimeProfile,
-      runtimeTrust: isolation ? "trusted" : "untrusted",
+      // No sandbox is provisioned here, so the runtime-trust badge is 'untrusted'
+      // regardless of the profile name. (startTerminalSession also derives the badge
+      // honestly from real capabilities on the isolation path; on this host path it
+      // forces 'untrusted'. We pass the honest value so the facts never imply
+      // isolation the session does not provide.)
+      runtimeTrust: runtimeIsolated ? "trusted" : "untrusted",
       extensionPosture: request.extensionPosture,
       creationTrust: trust,
       // A governed terminal observes egress at the boundary (not per-tool hooks).
@@ -4843,7 +4889,7 @@ var BridgeServer = class {
         trust
       };
       this.logLine(
-        `[bridge-server] terminal/start \u2192 ${trust} (runId=${created.runId}, proxy=${session.proxyUrl}, posture=${posture}).`
+        `[bridge-server] terminal/start \u2192 ${trust} (runId=${created.runId}, proxy=${session.proxyUrl}, posture=${posture}, runtimeIsolated=${runtimeIsolated}${namesApprovedRuntime ? ` [profile '${request.runtimeProfile}' names an approved runtime but is NOT provisioned on the host path]` : ""}).`
       );
       this.emit(this.successResponse(req.id, result));
     } catch (err) {

@@ -656,6 +656,11 @@ async function computeEventHash(prevHash, evt) {
 async function verifyChainBrowser(events) {
   if (!hasWebCryptoSubtle()) return { ok: false };
   const list = Array.isArray(events) ? events : [];
+  // HONESTY (sweep): an EMPTY event list trivially "passes" the loop below
+  // (it never runs) and its recomputed root is GENESIS_HASH — a signed
+  // {events:[], verdict: pass over GENESIS} bundle could otherwise render
+  // AUTHORITATIVE despite proving nothing. An empty chain is NON-authoritative.
+  if (list.length === 0) return { ok: false, empty: true };
   let expectedPrev = GENESIS_HASH;
   for (let i = 0; i < list.length; i++) {
     const evt = list[i];
@@ -689,18 +694,32 @@ function computeTraceRootBrowser(events) {
 const REAL_SAMPLE_BUNDLE =
   typeof window !== 'undefined' ? window.GLYPHSPEK_SAMPLE_BUNDLE : undefined;
 
+// PROJECT-SCOPING (panel honesty). The IN-IDE Trust Panel sets GLYPHSPEK_PANEL_CONTEXT
+// = 'workspace' (see getWebviewContent). In that context we must NOT preload the
+// bundled DEMO sample on open: a real project's panel starts EMPTY (an honest
+// "no governed run in this project yet" state) and only renders REAL, project-scoped
+// bundles arriving via loadBundleFiles. The standalone zero-install demo page does
+// not set this global, so it still opens on the signed sample to demonstrate
+// in-browser verification.
+const IS_WORKSPACE_PANEL =
+  typeof window !== 'undefined' && window.GLYPHSPEK_PANEL_CONTEXT === 'workspace';
+const WORKSPACE_NAME = typeof window !== 'undefined' ? window.GLYPHSPEK_WORKSPACE_NAME || null : null;
+const PRELOAD_SAMPLE = !IS_WORKSPACE_PANEL;
+
 const state = {
-  trace: REAL_SAMPLE_BUNDLE ? REAL_SAMPLE_BUNDLE.events : SAMPLE_TRACE,
-  claims: REAL_SAMPLE_BUNDLE ? REAL_SAMPLE_BUNDLE.claims || null : SAMPLE_ACTOR_CLAIMS,
-  verifierPublicKey: REAL_SAMPLE_BUNDLE ? REAL_SAMPLE_BUNDLE.verifierPublicKey || null : null,
-  source: REAL_SAMPLE_BUNDLE ? 'embedded signed sample' : 'embedded mock sample (no signature)',
+  trace: PRELOAD_SAMPLE ? (REAL_SAMPLE_BUNDLE ? REAL_SAMPLE_BUNDLE.events : SAMPLE_TRACE) : [],
+  claims: PRELOAD_SAMPLE ? (REAL_SAMPLE_BUNDLE ? REAL_SAMPLE_BUNDLE.claims || null : SAMPLE_ACTOR_CLAIMS) : null,
+  verifierPublicKey: PRELOAD_SAMPLE ? (REAL_SAMPLE_BUNDLE ? REAL_SAMPLE_BUNDLE.verifierPublicKey || null : null) : null,
+  source: PRELOAD_SAMPLE
+    ? (REAL_SAMPLE_BUNDLE ? 'embedded signed sample' : 'embedded mock sample (no signature)')
+    : 'no governed run in this project yet',
   // A standalone verdict.json (capstone-style bundle), if loaded separately from
   // the trace. Takes precedence over an embedded verifier_verdict event. The
   // DEFAULT embedded sample carries its verdict DETACHED (REAL_SAMPLE_BUNDLE.verdict,
   // mirroring a real verdict.json) so the trace can end at the exact event the
   // verdict committed to — making computeTraceRoot(events) === verdict.traceRootHash
   // and the bundle DEMO-AUTHORITATIVE on open (pinned demo trust root, NOT a production verdict).
-  standaloneVerdict: REAL_SAMPLE_BUNDLE ? REAL_SAMPLE_BUNDLE.verdict || null : null,
+  standaloneVerdict: PRELOAD_SAMPLE ? (REAL_SAMPLE_BUNDLE ? REAL_SAMPLE_BUNDLE.verdict || null : null) : null,
   // Latest async verification result for the current trace's verdict.
   sigResult: null,
   // Latest async trace-chain/root integrity result for the current trace.
@@ -719,15 +738,21 @@ function deriveRunHeader(trace) {
   const runId = created ? (created.payload && created.payload.runId) || created.runId : trace[0] && trace[0].runId;
   const stateChanges = trace.filter((e) => e.type === 'run_state_changed');
   const last = stateChanges[stateChanges.length - 1];
-  const status = last ? last.payload.to : created ? 'created' : 'unknown';
+  // Read payloads defensively: a loaded bundle may contain an event with no
+  // `payload` (mirrors the `evt.payload || {}` guard in live.js/payloadOf and the
+  // trace-view surface). A missing payload must degrade gracefully, never throw —
+  // throwing here would blank the whole Trust Panel.
+  const lastPayload = (last && last.payload) || {};
+  const status = last ? lastPayload.to : created ? 'created' : 'unknown';
   const modelCall = trace.find((e) => e.type === 'model_call');
-  const model = modelCall ? modelCall.payload.model : null;
+  const model = modelCall ? ((modelCall.payload || {}).model || null) : null;
   const tokens = trace
     .filter((e) => e.type === 'model_call')
     .reduce(
       (acc, e) => {
-        acc.input += e.payload.inputTokens || 0;
-        acc.output += e.payload.outputTokens || 0;
+        const p = e.payload || {};
+        acc.input += p.inputTokens || 0;
+        acc.output += p.outputTokens || 0;
         return acc;
       },
       { input: 0, output: 0 },
@@ -1547,12 +1572,19 @@ async function verifyTraceIntegrity(events, verdict) {
     chain = { ok: false };
   }
   const recomputedRoot = computeTraceRootBrowser(events);
+  // HONESTY (sweep): a recomputed root equal to GENESIS_HASH means there is no
+  // real trace behind it (empty event list). Such a root must NEVER be treated
+  // as a match — otherwise a verdict whose traceRootHash is GENESIS could bind to
+  // an empty bundle and render authoritative. Belt-and-suspenders with the
+  // empty-list guard in verifyChainBrowser (which already forces chainOk:false).
+  const recomputedIsGenesis = recomputedRoot === GENESIS_HASH;
   const rootMatches =
+    !recomputedIsGenesis &&
     typeof verdictRoot === 'string' &&
     verdictRoot.length > 0 &&
     recomputedRoot === verdictRoot;
   return {
-    chainOk: !!chain.ok,
+    chainOk: !!chain.ok && !recomputedIsGenesis,
     brokenIndex: chain.brokenIndex,
     recomputedRoot,
     verdictRoot,
@@ -1981,10 +2013,59 @@ function wireHostBridge() {
  * ------------------------------------------------------------------ */
 
 function renderAll() {
-  renderRunHeader();
-  renderTimeline();
-  renderClaimsVsVerdict();
-  renderDerivedSections();
+  // PROJECT-SCOPING: in the in-IDE workspace panel with no bundle loaded, show the
+  // honest empty state instead of any (stale/demo) trace — a fresh project shows no
+  // prior-run data. Real bundles (loadBundleFiles) set state.trace and fall through.
+  if (IS_WORKSPACE_PANEL && state.trace.length === 0) {
+    renderWorkspaceEmptyState();
+    return;
+  }
+  // DEFENSE-IN-DEPTH (mirrors the fork's sprite-injection try/catch): a single
+  // malformed event must degrade to a PARTIAL render, never a fully blank panel.
+  // Each section runs in order; if one throws we log it and leave whatever has
+  // already rendered, rather than letting the exception unwind the whole panel.
+  try {
+    renderRunHeader();
+    renderTimeline();
+    renderClaimsVsVerdict();
+    renderDerivedSections();
+  } catch (err) {
+    // eslint-disable-next-line no-console
+    console.error('[GlyphSpek] renderAll: partial render after error', err);
+  }
+}
+
+/**
+ * HONEST EMPTY STATE for the in-IDE workspace Trust Panel: no governed run has
+ * produced evidence for THIS project yet. Render a clear message (not the demo
+ * sample) and clear the other cards so nothing stale or misleading shows.
+ */
+function renderWorkspaceEmptyState() {
+  const header = document.getElementById('run-header');
+  if (header) {
+    clear(header);
+    const box = el('div', { className: 'gs-empty-state' });
+    box.appendChild(el('div', { className: 'gs-empty-title', text: 'No governed run in this project yet' }));
+    const where = WORKSPACE_NAME ? '“' + WORKSPACE_NAME + '”' : 'this workspace';
+    box.appendChild(
+      el('div', {
+        className: 'gs-empty-body',
+        text:
+          'This Trust Panel shows evidence for governed runs in ' +
+          where +
+          '. Start a governed run, or load a run bundle, to see its trace, policy decisions, and verifier verdict here.',
+      }),
+    );
+    header.appendChild(box);
+  }
+  ['timeline', 'actor-claims-body', 'verifier-verdict-body', 'commands-body', 'network-body', 'policy-body'].forEach(
+    function (id) {
+      const n = document.getElementById(id);
+      if (n) {
+        clear(n);
+      }
+    },
+  );
 }
 
 function wireControls() {
@@ -2053,7 +2134,10 @@ document.addEventListener('DOMContentLoaded', function () {
   wireControls();
   wireHostBridge();
   renderAll();
-  // Verify the default (signed) sample's signature in-browser on open and
-  // re-render the verdict gate with the result.
-  verifySignatureAndRerender();
+  // Verify the default (signed) sample's signature in-browser on open and re-render
+  // the verdict gate with the result. Skip when the workspace panel is showing the
+  // honest empty state — there is no trace/verdict to verify yet.
+  if (!(IS_WORKSPACE_PANEL && state.trace.length === 0)) {
+    verifySignatureAndRerender();
+  }
 });

@@ -1580,7 +1580,15 @@
 
     // Verdict banner + assurance + signature state.
     var v = abrVerdictBadge(review.verdict);
-    var banner = el('div', { className: 'verdict-banner ' + v.overallClass + ' abr-verdict-banner' });
+    // HONESTY (sweep): tint the banner by ASSURANCE, not by `overall` alone. A
+    // degraded (inline/unsandboxed) pass must NOT read as full success-green —
+    // a hurried reader could over-read it as a verified pass. When assurance is
+    // degraded we use the existing amber `verdict-error` styling (same
+    // .verdict-banner element) instead of `verdict-pass`. The honest sub-labels
+    // (posture badge, assurance pill, "not independently verified here" sig chip)
+    // stay intact below.
+    var bannerClass = v.assuranceDegraded ? 'verdict-error' : v.overallClass;
+    var banner = el('div', { className: 'verdict-banner ' + bannerClass + ' abr-verdict-banner' });
     banner.appendChild(el('span', { className: 'verdict-label', text: 'VERIFIER VERDICT' }));
     banner.appendChild(el('span', { className: 'verdict-value', text: v.overall }));
     root.appendChild(banner);

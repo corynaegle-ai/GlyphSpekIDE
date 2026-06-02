@@ -108,6 +108,14 @@ const MAX_BUNDLE_FILE_BYTES = 8 * 1024 * 1024;
  */
 const MAX_BUNDLE_TOTAL_BYTES = 32 * 1024 * 1024;
 /**
+ * workspaceState key recording that the operator chose "Always Allow in This Workspace"
+ * at the governed-build authority modal. When set (true), subsequent governed builds in
+ * THIS workspace skip the up-front modal (friction paid once per authority boundary, not
+ * per build). Scoped to workspaceState so the grant never leaks across workspaces, and
+ * cleared by `glyphspek.revokeBuildAuthority`.
+ */
+const BUILD_AUTHORITY_GRANTED_KEY = 'glyphspek.buildAuthority.granted';
+/**
  * The module-private first-party webview gesture gate (sweep-20 High #3). One
  * instance per extension process, created on first use. It owns the operator-
  * gesture registry AND the trusted-run launchers, and is NEVER exported on the
@@ -987,16 +995,13 @@ class TrustPanel {
             return;
         }
         if (decision === 'accepted') {
-            // Keep the changes (already in the working tree). OFFER (do not force) to stage.
-            const STAGE = 'Stage Changes';
-            const choice = await vscode.window.showInformationMessage(`GlyphSpek: accepted run ${runId} — the agent's changes are kept (already in your ` +
-                'working tree). human_accepted recorded.', STAGE);
-            if (choice === STAGE) {
-                const staged = (0, agenticBuildPromotion_1.stageChangedFiles)(cwd, review.changedFiles);
-                if (!staged.ok) {
-                    void vscode.window.showWarningMessage(`GlyphSpek: could not stage some files — ${staged.message}`);
-                }
-            }
+            // Keep the changes (already in the working tree). human_accepted is recorded.
+            //
+            // N3: NO post-decision "Stage Changes?" prompt. Accept is the hot path — the
+            // changes are already in the working tree, so Accept needs no further action.
+            // Staging is an optional git nicety the operator can do themselves (and the diff,
+            // not the index, is the safety net), so we DO NOT interrupt the accept with a
+            // notification. Friction belongs at the authority boundary, not after every Accept.
             return;
         }
         if (decision === 'changes-requested') {
@@ -1182,6 +1187,17 @@ class TrustPanel {
         // boolean cannot break the inline <script>, but we route it through the same
         // escapeForInlineScript seam as the other injected globals for consistency.
         const reduceMotionScript = `<script nonce="${nonce}">window.GLYPHSPEK_REDUCE_MOTION = ${(0, inlineScript_1.escapeForInlineScript)(resolveReduceMotion())};</script>`;
+        // PROJECT-SCOPING (panel honesty). Tell the IN-IDE webview it is the WORKSPACE
+        // Trust Panel, not the standalone zero-install demo. app.js uses this to show an
+        // honest empty state ("no governed run in this project yet") on open instead of
+        // preloading the bundled DEMO sample — so a fresh project never presents another
+        // run's evidence as if it were this project's. The standalone demo page does NOT
+        // set this global, so it keeps the on-open sample (in-browser verify demo). The
+        // workspace folder name rides along for the empty-state copy. Routed through
+        // escapeForInlineScript like the other injected globals so neither value can
+        // break out of the inline <script>.
+        const wsName = vscode.workspace.workspaceFolders?.[0]?.name ?? null;
+        const panelContextScript = `<script nonce="${nonce}">window.GLYPHSPEK_PANEL_CONTEXT = ${(0, inlineScript_1.escapeForInlineScript)('workspace')}; window.GLYPHSPEK_WORKSPACE_NAME = ${(0, inlineScript_1.escapeForInlineScript)(wsName)};</script>`;
         return html
             .replace('{{iconsSprite}}', iconsSprite)
             .replace(/\{\{cspSource\}\}/g, webview.cspSource)
@@ -1192,7 +1208,8 @@ class TrustPanel {
             .replace(/\{\{liveUri\}\}/g, liveUri.toString())
             .replace(/\{\{trustedKeysScript\}\}/g, trustedKeysScript)
             .replace(/\{\{runTrustsScript\}\}/g, runTrustsScript)
-            .replace(/\{\{reduceMotionScript\}\}/g, reduceMotionScript);
+            .replace(/\{\{reduceMotionScript\}\}/g, reduceMotionScript)
+            .replace(/\{\{panelContextScript\}\}/g, panelContextScript);
     }
     /**
      * Forward a validated supervisor `run/event` envelope to the webview's live
@@ -1348,17 +1365,39 @@ function resolveCliPath(supervisorPath) {
     return path.join(supervisorPath, 'p0-supervisor', 'governed-run-cli.ts');
 }
 /**
- * Resolve the runs/worktree base passed to the supervisor as --runs-base. Uses
- * the machine-scoped glyphspek.runOutputRoot setting when set, else a stable
- * $HOME-based default (~/.glyphspek/runs). The bundled supervisor cwds here and
- * writes all run state under it, so it never writes under the install dir.
+ * A filesystem-safe, stable, collision-resistant key for the CURRENT workspace, so
+ * each project's runs live in their own subtree instead of one shared global pile.
+ * Without this, run state from every project accumulated under one base and the
+ * on-disk store / "Load run bundle" picker co-mingled unrelated projects' evidence —
+ * exactly NOT the per-run, project-scoped trust the product promises (a fresh project
+ * would surface another project's runs). No workspace → a stable '_no-workspace'
+ * bucket. The key is `<sanitized-basename>-<sha256(absPath)[0:12]>` so two folders
+ * that share a basename never collide.
+ */
+function workspaceRunsKey() {
+    const ws = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+    if (!ws) {
+        return '_no-workspace';
+    }
+    const base = path.basename(ws).replace(/[^A-Za-z0-9._-]/g, '-').slice(0, 40) || 'workspace';
+    const hash = crypto.createHash('sha256').update(ws).digest('hex').slice(0, 12);
+    return `${base}-${hash}`;
+}
+/**
+ * Resolve the runs/worktree base passed to the supervisor as --runs-base. Uses the
+ * machine-scoped glyphspek.runOutputRoot setting when set, else a stable $HOME-based
+ * default (~/.glyphspek/runs), and ALWAYS namespaces by the current workspace
+ * (workspaceRunsKey) so each project's run state is project-scoped — a fresh project
+ * starts with no prior-run data. The bundled supervisor cwds here and writes all run
+ * state under it, so it never writes under the install dir and never co-mingles one
+ * project's runs with another's.
  */
 function resolveRunsBase() {
     const configured = vscode.workspace
         .getConfiguration('glyphspek')
         .get('runOutputRoot', '');
-    const root = configured && configured.trim() ? configured.trim() : '';
-    return root || path.join(os.homedir(), '.glyphspek', 'runs');
+    const root = configured && configured.trim() ? configured.trim() : path.join(os.homedir(), '.glyphspek', 'runs');
+    return path.join(root, workspaceRunsKey());
 }
 /** Configured run mode, defaulting to the safe verify-only path. */
 function resolveSupervisorMode() {
@@ -1523,22 +1562,15 @@ function resolveTerminalPolicy(context) {
     return { path: defaultPath, policyHash: fp.sha256, provenance: 'shipped-default', scope: 'default' };
 }
 /**
- * Resolve the output directory for this run's bundle under the configured
- * run-output root (default: <workspace>/.glyphspek/runs), timestamped per run.
- * Falls back to the OS temp dir when there is no workspace folder.
+ * Resolve the output directory for THIS run's bundle: a per-run, timestamped subdir
+ * under the project-scoped runs base (see resolveRunsBase). Co-locating the bundle
+ * with the run state keeps a project's evidence under a single project-scoped tree, so
+ * a fresh project never shows another project's bundles. `repo` is retained for
+ * call-site symmetry; the base is already workspace-scoped.
  */
-function resolveOutputDir(repo) {
-    const configuredRoot = vscode.workspace
-        .getConfiguration('glyphspek')
-        .get('runOutputRoot', '');
-    let root = configuredRoot && configuredRoot.trim() ? configuredRoot.trim() : '';
-    if (!root) {
-        const ws = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
-        // Prefer a workspace-local root; else the repo itself; else temp.
-        root = path.join(ws ?? repo, '.glyphspek', 'runs');
-    }
+function resolveOutputDir(_repo) {
     const stamp = new Date().toISOString().replace(/[:.]/g, '-');
-    return path.join(root, stamp);
+    return path.join(resolveRunsBase(), stamp);
 }
 /**
  * A STUB ModelGateway. CLEARLY MARKED: it performs NO real provider call and dials
@@ -2332,6 +2364,18 @@ function activate(context) {
     const buildOutput = vscode.window.createOutputChannel('GlyphSpek Governed Build');
     context.subscriptions.push(buildOutput);
     context.subscriptions.push(vscode.commands.registerCommand('glyphspek.promoteChatToBuild', (intentArg) => promoteChatToBuild(context, gate, buildOutput, intentArg)));
+    // REVOKE the per-workspace "Always Allow" governed-build grant (N1). Clears the
+    // workspaceState key so the next governed build shows the up-front authority modal
+    // again. Honest, idempotent, and surfaces whether a grant was actually present.
+    context.subscriptions.push(vscode.commands.registerCommand('glyphspek.revokeBuildAuthority', async () => {
+        const had = context.workspaceState.get(BUILD_AUTHORITY_GRANTED_KEY) === true;
+        await context.workspaceState.update(BUILD_AUTHORITY_GRANTED_KEY, undefined);
+        void vscode.window.showInformationMessage(had
+            ? 'GlyphSpek: revoked the remembered governed-build authorization for this workspace. ' +
+                'The next governed build will ask for authority again.'
+            : 'GlyphSpek: no remembered governed-build authorization for this workspace — ' +
+                'the up-front modal already fires on every build.');
+    }));
     // Output channel for the supervisor's human-readable progress (stderr). One
     // per session; disposed with the extension.
     const supervisorOutput = vscode.window.createOutputChannel('GlyphSpek Governed Run');
@@ -2546,10 +2590,34 @@ async function promoteChatToBuild(context, gate, output, intentArg) {
     // cannot satisfy the MODAL and thus cannot start a build. The modal names the boundary
     // honestly (governed-unsandboxed). Decline → do NOTHING (no build/start; approved is
     // never sent as anything but true).
-    const granted = await (0, agenticBuildPromotion_1.confirmBuildAuthority)(cwd, (message, proceedLabel) => Promise.resolve(vscode.window.showWarningMessage(message, { modal: true }, proceedLabel)));
-    if (!granted) {
-        output.appendLine(`[host] governed build DECLINED at the authority gate for ${cwd} — nothing started.`);
-        return;
+    //
+    // FRICTION ONCE PER AUTHORITY BOUNDARY (not per build). The modal offers a second
+    // button, "Always Allow in This Workspace": picking it persists the grant in
+    // workspaceState so subsequent governed builds in this SAME workspace skip the modal
+    // (the git diff + the downstream Reject-reverts gesture remain the safety net either
+    // way). A persisted grant can be cleared via `glyphspek.revokeBuildAuthority`. If a
+    // prior "Always Allow" grant exists, skip the modal and proceed directly with a brief,
+    // NON-modal Output note. The one-time "Build…" button never persists.
+    const alreadyGranted = context.workspaceState.get(BUILD_AUTHORITY_GRANTED_KEY) === true;
+    if (!alreadyGranted) {
+        const grant = await (0, agenticBuildPromotion_1.confirmBuildAuthorityWithGrant)(cwd, (message, proceedLabel, alwaysLabel) => Promise.resolve(vscode.window.showWarningMessage(message, { modal: true }, proceedLabel, alwaysLabel)));
+        if (!grant.granted) {
+            output.appendLine(`[host] governed build DECLINED at the authority gate for ${cwd} — nothing started.`);
+            return;
+        }
+        if (grant.remember) {
+            await context.workspaceState.update(BUILD_AUTHORITY_GRANTED_KEY, true);
+            output.appendLine(`[host] governed-build authority GRANTED + remembered for this workspace (${cwd}). ` +
+                'Subsequent builds skip the up-front modal; run "GlyphSpek: Revoke Governed-Build ' +
+                'Authorization (This Workspace)" to require it again. The diff + Reject-reverts stay the safety net.');
+        }
+    }
+    else {
+        // Prior "Always Allow" grant in this workspace — proceed WITHOUT the modal. A
+        // non-modal Output line keeps the boundary visible without interrupting the operator.
+        output.appendLine(`[host] governed-build authority previously remembered for this workspace (${cwd}) — ` +
+            'proceeding without the up-front modal. The git diff + Reject-reverts remain the safety net; ' +
+            'run "GlyphSpek: Revoke Governed-Build Authorization (This Workspace)" to require the modal again.');
     }
     // Mint+consume a first-party operator gesture so the authority grant is attributable
     // (defense-in-depth: the modal already gates this command from a third party, and the
@@ -2982,42 +3050,34 @@ async function openGovernedTerminalSurface(context, output, surface, detected) {
         // CHAT = a governed terminal running INTERACTIVE Claude Code. The interactive TUI
         // IS the chat: it stays on the user's SUBSCRIPTION (interactive `claude` is exempt
         // from the 2026-06-15 headless `claude -p`/Agent-SDK metering carve-out), so it is
-        // cheap + durable. AUTO-RUN it — the whole point of the chat surface is that the
-        // agent launches for you.
+        // cheap + durable.
+        //
+        // PRE-TYPE, DON'T AUTO-RUN (N2). The chat surface used to AUTO-RUN behind an
+        // every-time "Open Chat" modal. We retire that routine interrupt and adopt the
+        // user-driven Governed Terminal's pattern: PRE-TYPE the launch command (no newline)
+        // and let the operator's own Enter BE the launch gesture. That keeps the launch
+        // one-step (no modal) while preserving the anti-silent-launch property — a
+        // third-party `executeCommand('glyphspek.openChat')` can stage the command but cannot
+        // press Enter, so no actor process starts without the operator.
         //
         // BINARY-SWAP GUARD (sweep-27 High). We do NOT send the BARE name `detected.agent`:
         // the governed terminal PRESERVES PATH (for HOME-based auth), so a bare name is
         // RE-RESOLVED by the shell at exec time — a workspace-local `./claude` or a
-        // PATH-injected shim could swap the binary between the modal confirm and the
-        // launch. Instead we send the CANONICALIZED ABSOLUTE path detection already
-        // resolved, shell-QUOTED, so the EXACT inode that was detected/confirmed is the
-        // one that runs regardless of any PATH mutation. AND we REFUSE to auto-run a
-        // canonical path that resolves UNDER a workspace folder (the red flag for a
-        // repo-supplied shim) — instead we warn with the full path and leave the agent
-        // for the operator to launch by hand inside the already-governed terminal.
+        // PATH-injected shim could swap the binary. We send the CANONICALIZED ABSOLUTE path
+        // detection already resolved (pre-typed, the operator presses Enter), and we already
+        // REFUSED a path that resolves UNDER a workspace folder (caught before this point in
+        // openGovernedChat and re-checked above), so the EXACT inode that was detected is the
+        // one staged for the operator to run.
         if (detected && chatLaunch) {
             // chatLaunch was resolved + trust-checked + the binary identity captured BEFORE
-            // session start (above); a workspace-local resolution already returned there, so
-            // here it is trusted for auto-run. We REUSE that exact resolution so the bytes we
-            // launch match the evidence threaded into run_opened + the trace.
+            // session start (above); a workspace-local resolution already returned there. We
+            // pre-type that exact canonical path so the bytes the operator runs match the
+            // evidence threaded into run_opened + the trace.
             const launch = chatLaunch;
-            // WINDOWS GUARD (sweep-28 Medium). launch.launchCommand uses POSIX single-quote
-            // escaping, which is INVALID for PowerShell/cmd (the detector finds claude.cmd/
-            // .exe/.bat on win32). Until a platform/shell-aware (or PTY) launch exists, do
-            // NOT auto-send on win32: PRE-TYPE the canonical path (no newline) and tell the
-            // operator chat auto-run is macOS/Linux for now — they press Enter themselves.
-            if (process.platform === 'win32') {
-                terminal.sendText(launch.launchPath, false);
-                void vscode.window.showInformationMessage(`GlyphSpek Chat: pre-typed ${launch.launchPath} (your '${detected.agent}') — press Enter to run it. ` +
-                    'Chat auto-run is macOS/Linux for now (Windows shell quoting differs); your egress is governed ' +
-                    '(metadata-only), streaming LIVE into the Trust Panel, UNSANDBOXED and never product-trusted.');
-                return;
-            }
-            // Send the EXACT canonical absolute path, shell-quoted, + Enter (auto-run).
-            terminal.sendText(launch.launchCommand, true);
-            void vscode.window.showInformationMessage(`GlyphSpek Chat: launched ${launch.launchPath} (your interactive '${detected.agent}') on YOUR ` +
-                'subscription. Egress is governed (metadata-only) and streaming LIVE into the Trust Panel; this ' +
-                'session is UNSANDBOXED and never product-trusted. GlyphSpek holds no credential.');
+            terminal.sendText(launch.launchPath, false);
+            void vscode.window.showInformationMessage(`GlyphSpek Chat: pre-typed ${launch.launchPath} (your interactive '${detected.agent}') — press Enter ` +
+                'to run it on YOUR subscription. Egress is governed (metadata-only) and streaming LIVE into the ' +
+                'Trust Panel; this session is UNSANDBOXED and never product-trusted. GlyphSpek holds no credential.');
         }
         // The no-CLI case never reaches here (the command shows the honest message and only
         // optionally opens this terminal; see openGovernedChat).
@@ -3081,38 +3141,28 @@ async function openGovernedChat(context, output) {
         await openGovernedTerminalSurface(context, output, 'chat', undefined);
         return;
     }
-    // FIRST-PARTY LAUNCH GESTURE (sweep-26 High). `glyphspek.openChat` is a globally
-    // invokable command and the chat surface AUTO-RUNS a user-authenticated agent CLI
-    // (claude/codex from the user's own ~/.claude/~/.codex auth). A globally invokable
-    // command must NOT silently launch an actor process: require a fresh, explicit
-    // operator confirmation before auto-running. A third-party `executeCommand(
-    // 'glyphspek.openChat')` cannot satisfy this MODAL dialog, so it defeats silent
-    // agent launch from another extension. This gates only the auto-run — the session
-    // is still governed + traced (governed-unsandboxed), never product-trusted. The
-    // user-driven Governed Terminal stays one-step (it only PRE-TYPES, never auto-runs,
-    // so the operator's Enter is itself the gesture).
-    // Resolve the EXACT binary the chat would auto-run NOW (canonicalized absolute path,
-    // workspace-local trust decision) so the modal names what will run and so a
-    // workspace-local resolution is caught BEFORE the operator even confirms (sweep-27).
+    // WORKSPACE-LOCAL BINARY RED FLAG (sweep-27 High) — the ONE genuine modal-worthy case,
+    // PRESERVED. Resolve the EXACT binary the chat would run NOW (canonicalized absolute
+    // path, workspace-local trust decision). If it resolves UNDER a workspace folder it
+    // could be a swapped/planted shim, so refuse the chat-launch ergonomics outright (no
+    // pre-type, no auto-run) and tell the operator the full path honestly.
     const launch = (0, agentLaunch_1.resolveAgentLaunch)(detected.path, workspaceFolderPaths());
     if (!launch.trustedForAutoRun) {
-        // The detected CLI resolves to a workspace-local path — the red flag for a planted
-        // shim. Do NOT offer a one-click auto-run launch. Tell the operator the full path
-        // honestly and refuse to auto-run; openGovernedTerminalSurface re-checks and would
-        // also refuse, but we stop here so no misleading "Open Chat" confirm is shown.
-        void vscode.window.showWarningMessage(`GlyphSpek Chat will NOT auto-run your '${detected.agent}': it resolves to ` +
+        void vscode.window.showWarningMessage(`GlyphSpek Chat will NOT launch your '${detected.agent}': it resolves to ` +
             `${launch.launchPath}, which is INSIDE your workspace. A workspace-local CLI could be a ` +
             'swapped/planted binary. Open a Governed Terminal and run a trusted agent yourself if you intend to.');
         return;
     }
-    const OPEN_CHAT = 'Open Chat';
-    const confirm = await vscode.window.showInformationMessage(`Launch GlyphSpek Chat? This opens a governed terminal and runs ${launch.launchPath} ` +
-        `(your '${detected.agent}') on YOUR subscription — governed (metadata-only egress) + traced, ` +
-        'UNSANDBOXED; GlyphSpek holds no key.', { modal: true }, OPEN_CHAT);
-    if (confirm !== OPEN_CHAT) {
-        // Operator declined the launch gesture — nothing is opened or auto-run.
-        return;
-    }
+    // NO ROUTINE LAUNCH MODAL (N2). The chat path used to fire a blocking "Open Chat" modal
+    // on EVERY open before launching the user's own `claude`. We retire that every-time
+    // interrupt and mirror the Governed Terminal pattern instead: the chat surface now
+    // PRE-TYPES the launch command (no newline) and the operator's own Enter IS the launch
+    // gesture. That defeats the original concern just as well — a third-party
+    // `executeCommand('glyphspek.openChat')` can open a terminal with the command staged,
+    // but it CANNOT press Enter, so no actor process is silently launched (same property
+    // the user-driven Governed Terminal already relies on). The session stays governed +
+    // traced (governed-unsandboxed), never product-trusted. The genuine red-flag modal
+    // (workspace-local binary, above) is preserved.
     await openGovernedTerminalSurface(context, output, 'chat', detected);
 }
 /**
