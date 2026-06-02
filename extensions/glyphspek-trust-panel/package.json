@@ -374,6 +374,11 @@
           "type": "boolean",
           "default": false,
           "description": "Authority Halo fallback (opt-in). When ON, GlyphSpek tints real workbench chrome EDGES (title bar, activity-bar / status-bar borders) to the current run's assurance color (slate=read · amber=claimed · violet=SOFT · blue=verified · red=denied) via workbench.colorCustomizations — an honest pre-fork stand-in for the whole-frame halo ring. OFF by default because it persistently recolors your chrome; when off, the status-bar 'authority:' segment + the Trust Panel header accent are the honest backstop. Fully reversible: turning it off (or deactivating the extension) restores your prior color customizations exactly. The same `glyphspek.authority` context-key is set regardless, so the future fork halo ring needs no extension change."
+        },
+        "glyphspek.workbench.haloMotion": {
+          "type": "boolean",
+          "default": true,
+          "description": "Authority Halo motion (§14.3 accessibility). When ON (default), the Trust Panel animates the one-shot deny-pulse and the amber→blue verify cross-fades. Turn OFF to disable those animations — the STATIC trust colors and shapes still convey every state, and the non-color (shape/label) channel is unaffected. This is the explicit user toggle that complements the OS 'prefers-reduced-motion' preference (which is always honored): EITHER disabling motion here OR the OS preference removes the animations. View-only — it changes nothing about trust."
         }
       }
     }

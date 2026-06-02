@@ -233,7 +233,20 @@
   function rec(runId) {
     let r = state.byRun.get(runId);
     if (!r) {
-      r = { runId, verdict: null, eligible: false, failure: null, liveTraceRoot: null, sig: null };
+      r = {
+        runId,
+        verdict: null,
+        eligible: false,
+        failure: null,
+        liveTraceRoot: null,
+        sig: null,
+        // The CANONICAL gate result fanned from the Trust Panel (glyphspekAuthority →
+        // GovernanceSurfaceRegistry.confirmVerified). undefined = not yet confirmed,
+        // so the run is NOT blue (an unconfirmed run is never authoritative here); true
+        // = the panel's Ed25519 gate confirmed; false = never confirmed or a later
+        // tamper revoked it (caps at UNTRUSTED). AND-ed with this view's own crypto gate.
+        canonicalVerified: undefined,
+      };
       state.byRun.set(runId, r);
     }
     return r;
@@ -273,6 +286,19 @@
     const r = rec(m.runId);
     r.failure = { kind: m.failureKind, message: m.message, staleRootHash: m.staleRootHash };
     touchOrder(m.runId);
+  }
+
+  /**
+   * The CANONICAL Trust Panel gate confirmed (true) or revoked (false) a verified
+   * authority for a run. This is the SAME signal the status bar / gutter / cards
+   * honor; here it is AND-ed with this view's own in-webview Ed25519 gate (renderCard),
+   * so a verdict reaches blue ONLY when BOTH agree. A `false` (never confirmed, or a
+   * later tamper revoked it) caps the run at UNTRUSTED regardless of the local crypto
+   * result. The host never decides verified — this only relays the panel's gate.
+   */
+  function applyConfirmVerified(m) {
+    const r = rec(m.runId);
+    r.canonicalVerified = m.verified === true;
   }
 
   /** Run the async Ed25519 gate for a record, then re-render. */
@@ -374,10 +400,17 @@
     // never reach product-blue — cap at UNTRUSTED even with a valid signature.
     const eligible = r.eligible === true;
 
+    // CANONICAL gate (the only door to blue, AND-ed with the local crypto gate). The
+    // Trust Panel's Ed25519 gate result, fanned via the host's confirmVerified path —
+    // the SAME signal the status bar / gutter / cards read. undefined = not yet
+    // confirmed (held back from blue, never fabricated); false = never confirmed or a
+    // later tamper revoked it (caps at UNTRUSTED).
+    const canonicalVerified = r.canonicalVerified === true;
+
     let stateClass, pillCls, pillGlyph, pillText;
     if (v && sig === null && !hasFailure) {
       stateClass = 'state-pending'; pillCls = 'pending'; pillGlyph = '…'; pillText = 'Pending';
-    } else if (sigVerified && eligible && !bindingMismatch && !hasFailure) {
+    } else if (sigVerified && eligible && !bindingMismatch && !hasFailure && canonicalVerified) {
       stateClass = 'state-pass'; pillCls = 'pass'; pillGlyph = '✓'; pillText = 'Pass · Signed';
     } else {
       stateClass = 'state-untrusted'; pillCls = 'untrusted'; pillGlyph = '✕'; pillText = 'Untrusted';
@@ -427,6 +460,17 @@
     if (sigVerified && !eligible && !hasFailure) {
       card.appendChild(el('div', 'vc-caveat',
         'Signature is valid, but this run’s runtime is not an approved isolation runtime — it can never be product-trusted, so the verdict is held at UNTRUSTED.'));
+    }
+
+    // Canonical-gate caveat: the local crypto gate passed (valid signature, bound,
+    // eligible) but the Trust Panel's canonical gate has NOT confirmed this run (or
+    // a later tamper revoked it). The verdict is held at UNTRUSTED until BOTH gates
+    // agree — blue is never painted from the local gate alone.
+    if (sigVerified && eligible && !bindingMismatch && !hasFailure && !canonicalVerified) {
+      card.appendChild(el('div', 'vc-caveat',
+        r.canonicalVerified === false
+          ? 'Signature verified here, but the Trust Panel’s canonical gate revoked this run’s authority (a later tamper) — held at UNTRUSTED.'
+          : 'Signature verified here; awaiting the Trust Panel’s canonical signature gate to confirm this run before it can read verified-blue.'));
     }
 
     // Per-check results.
@@ -541,6 +585,7 @@
       case 'verdict': applyVerdict(msg); render(); break;
       case 'traceRoot': applyTraceRoot(msg); render(); break;
       case 'failure': applyFailure(msg); render(); break;
+      case 'confirmVerified': applyConfirmVerified(msg); render(); break;
       case 'reset':
         state.byRun.clear();
         state.order.length = 0;

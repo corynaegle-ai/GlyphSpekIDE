@@ -474,6 +474,16 @@
       still renders every posture's honest badge via CREATION_TRUST_BADGE.
     -->
     {{runTrustsScript}}
+    <!--
+      REDUCED-MOTION SETTING (§14.3). The host injects the GlyphSpek Halo Motion
+      toggle (glyphspek.workbench.haloMotion, inverted) as a nonce-guarded global
+      BEFORE live.js runs, so the deny-pulse + amber→blue trust cross-fades are
+      already disabled on FIRST paint when the user turned motion off (no flash). It
+      is then kept live via the `reduceMotion` host message on config change. This is
+      the user-toggle disable path; the OS `prefers-reduced-motion` @media rule is
+      honored independently. View-only — it changes nothing about trust.
+    -->
+    {{reduceMotionScript}}
     <script nonce="{{nonce}}" src="{{sampleBundleUri}}"></script>
     <script nonce="{{nonce}}" src="{{appUri}}"></script>
     <script nonce="{{nonce}}" src="{{liveUri}}"></script>

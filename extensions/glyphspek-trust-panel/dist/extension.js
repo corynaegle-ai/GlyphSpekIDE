@@ -595,6 +595,24 @@ function resolveTrustedVerifierKeys() {
     return (0, configScope_1.selectGlobalScopedTrustKeys)(inspect, keystorePublicKeyPem);
 }
 /**
+ * The webview "reduce motion" value derived from the GlyphSpek Halo Motion setting
+ * (§14.3 accessibility). `glyphspek.workbench.haloMotion` is the explicit user toggle
+ * for the Trust Panel's deny-pulse + amber→blue trust cross-fades; it defaults to ON
+ * (motion enabled), so reduce-motion is its inverse. This is the SECOND disable path
+ * §14.3 requires alongside the OS `prefers-reduced-motion` preference (which the
+ * webview's @media query always honors independently). Guarded so a stub host without
+ * getConfiguration is safe (treats motion as ON → reduce = false). View-only — it
+ * changes nothing about trust, only whether those two animations play.
+ */
+function resolveReduceMotion() {
+    if (typeof vscode.workspace.getConfiguration !== 'function')
+        return false;
+    const haloMotion = vscode.workspace
+        .getConfiguration('glyphspek')
+        .get('workbench.haloMotion', true);
+    return haloMotion === false;
+}
+/**
  * Read the GlyphSpek icon symbol sprite (media/glyphspek-icons.svg) for inline
  * injection into a webview body (docs/assets/ICON-USAGE.md). The sprite is a
  * static, first-party product asset — never untrusted input — so inlining it is
@@ -717,6 +735,16 @@ class TrustPanel {
                     this.pendingSetTier = undefined;
                     void this.panel.webview.postMessage({ type: 'setTier', tier });
                 }
+                // REDUCED-MOTION SETTING (§14.3). Post the current GlyphSpek Halo Motion
+                // toggle on webview creation so the deny-pulse + amber→blue trust cross-
+                // fades honor a user who disabled motion (the global injected pre-boot is
+                // the no-flash seed; this confirms the live value once the webview is up).
+                // View-only — it changes nothing about trust. Kept live via the config
+                // listener (onDidChangeConfiguration) registered in activate().
+                void this.panel.webview.postMessage({
+                    type: 'reduceMotion',
+                    value: resolveReduceMotion(),
+                });
             }
             else if (msg.type === 'requestLoadBundle') {
                 // The webview's "Load run bundle…" button delegates to the host command.
@@ -764,6 +792,13 @@ class TrustPanel {
                     // 'verified' itself — this is its only door to green, exactly as the status
                     // bar reads it and the gutter reads blue.
                     getGovernedRunsCardView()?.confirmVerified(msg.runId, msg.authority === 'verified');
+                    // RAIL GOVERNANCE SURFACES (§5.3/§5.9): the SAME webview gate is the ONLY
+                    // door to verified-blue on the per-run surfaces (Verifier / Workspace). The
+                    // registry fans this to every surface that implements confirmVerified;
+                    // surfaces with no per-run verdict (Trace/Policy/Egress/…) are skipped. A
+                    // surface caps SOFT runs at violet and reverts off blue on a later
+                    // tamper — none decides 'verified' itself, exactly as the gutter/cards.
+                    getGovernanceSurfaceRegistry().confirmVerified(msg.runId, msg.authority === 'verified');
                 }
             }
             else if (msg.type === 'glyphspekTier') {
@@ -1139,6 +1174,14 @@ class TrustPanel {
         // sandboxed-soft-egress runs. escapeForInlineScript (not bare JSON.stringify)
         // keeps the inline <script> un-breakable, matching the trusted-keys seam.
         const runTrustsScript = `<script nonce="${nonce}">window.GLYPHSPEK_RUN_TRUSTS = ${(0, inlineScript_1.escapeForInlineScript)(bridgeProtocol_1.RUN_TRUSTS)};</script>`;
+        // REDUCED-MOTION SETTING (§14.3). Inject the GlyphSpek Halo Motion toggle (the
+        // inverse of glyphspek.workbench.haloMotion) as a nonce-guarded global BEFORE
+        // live.js runs, so a user who disabled motion sees NO deny-pulse / trust cross-
+        // fade on first paint (no flash). live.js seeds from this global on boot and
+        // stays live via the `reduceMotion` message posted on config change below. A
+        // boolean cannot break the inline <script>, but we route it through the same
+        // escapeForInlineScript seam as the other injected globals for consistency.
+        const reduceMotionScript = `<script nonce="${nonce}">window.GLYPHSPEK_REDUCE_MOTION = ${(0, inlineScript_1.escapeForInlineScript)(resolveReduceMotion())};</script>`;
         return html
             .replace('{{iconsSprite}}', iconsSprite)
             .replace(/\{\{cspSource\}\}/g, webview.cspSource)
@@ -1148,7 +1191,8 @@ class TrustPanel {
             .replace(/\{\{appUri\}\}/g, appUri.toString())
             .replace(/\{\{liveUri\}\}/g, liveUri.toString())
             .replace(/\{\{trustedKeysScript\}\}/g, trustedKeysScript)
-            .replace(/\{\{runTrustsScript\}\}/g, runTrustsScript);
+            .replace(/\{\{runTrustsScript\}\}/g, runTrustsScript)
+            .replace(/\{\{reduceMotionScript\}\}/g, reduceMotionScript);
     }
     /**
      * Forward a validated supervisor `run/event` envelope to the webview's live
@@ -1226,6 +1270,26 @@ class TrustPanel {
             return;
         }
         void this.panel.webview.postMessage({ type: 'runEvent', event: validation.event });
+    }
+    /**
+     * Post the current GlyphSpek Halo Motion setting to the webview (§14.3). Called on
+     * config change (onDidChangeConfiguration) so a user toggling motion off/on disables
+     * or re-enables the deny-pulse + amber→blue trust cross-fades live. If the webview
+     * has not signaled `ready` yet, the global injected at boot already carries the
+     * setting (and `ready` re-posts the live value), so there is nothing to buffer here.
+     * View-only — it changes nothing about trust.
+     */
+    postReduceMotion() {
+        if (!this.ready)
+            return;
+        void this.panel.webview.postMessage({
+            type: 'reduceMotion',
+            value: resolveReduceMotion(),
+        });
+    }
+    /** Post the motion setting to the live panel, if one is open (config-change hook). */
+    static notifyReduceMotion() {
+        TrustPanel.current?.postReduceMotion();
     }
 }
 /* ================================================================== *
@@ -2116,6 +2180,20 @@ function activate(context) {
     surfaceOutput.appendLine(`[host] registered ${surfaceProviders.length} rail governance surfaces: ${surfaceRegistry
         .surfaceIds()
         .join(', ')}`);
+    // REDUCED-MOTION SETTING LISTENER (§14.3). Keep the Trust Panel's deny-pulse +
+    // amber→blue trust cross-fades in step with the user's GlyphSpek Halo Motion toggle
+    // (glyphspek.workbench.haloMotion): the panel injects the setting as a global on
+    // creation and posts it on `ready`; here we POST it again whenever the setting
+    // changes so a live toggle takes effect without reopening the panel. Registered as a
+    // disposable (no leak) and guarded so a stub host without the config event is safe.
+    // View-only — it changes nothing about trust, only whether those two animations play.
+    if (typeof vscode.workspace.onDidChangeConfiguration === 'function') {
+        context.subscriptions.push(vscode.workspace.onDidChangeConfiguration((e) => {
+            if (e.affectsConfiguration('glyphspek.workbench.haloMotion')) {
+                TrustPanel.notifyReduceMotion();
+            }
+        }));
+    }
     // ACTIVITY-BAR "Chat" view (the SIDEBAR "chat that's a terminal"). A webview-view
     // hosting an xterm.js terminal connected to a real PTY running the user's
     // interactive `claude`, governed. Reuses the entire governed stack (bridge session,
