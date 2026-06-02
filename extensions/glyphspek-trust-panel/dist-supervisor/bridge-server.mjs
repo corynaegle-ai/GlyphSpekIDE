@@ -2905,27 +2905,44 @@ async function* runAgenticBuild(req, opts = {}) {
 // ../spikes/p0-model-gateway/governed-agentic-run.ts
 var execFileAsync2 = promisify2(execFile2);
 var AGENTIC_RUN_POSTURE = "governed-unsandboxed";
+var AGENTIC_VERIFIER_ISOLATION = "inline-unsandboxed";
 var NOT_VERIFIED_CHECK_NAME = "changed-files only \u2014 NOT independently verified by a build/test";
 var VERIFY_DEFAULT_TIMEOUT_MS = 15 * 6e4;
 var AGENTIC_AGENT_BACKEND = "codex-cli";
 function checkStatusForExit(exitCode) {
   return exitCode === 0 ? "pass" : "fail";
 }
-async function runVerifyCheck(command, cwd, env, timeoutMs) {
+async function runVerifyCheck(command, cwd, env, timeoutMs, signal) {
   const name = command.join(" ") || "(empty command)";
   if (command.length === 0) {
     return { name, command: [...command], status: "error" };
+  }
+  if (signal?.aborted) {
+    return {
+      name: `${name} \u2014 verifier aborted by run/cancel`,
+      command: [...command],
+      status: "error"
+    };
   }
   try {
     await execFileAsync2(command[0], command.slice(1), {
       cwd,
       env,
       timeout: timeoutMs,
-      maxBuffer: 16 * 1024 * 1024
+      maxBuffer: 16 * 1024 * 1024,
+      ...signal ? { signal } : {}
     });
     return { name, command: [...command], status: "pass" };
   } catch (err) {
     const e = err;
+    const aborted = signal?.aborted === true || e.name === "AbortError" || e.code === "ABORT_ERR";
+    if (aborted) {
+      return {
+        name: `${name} \u2014 verifier aborted by run/cancel`,
+        command: [...command],
+        status: "error"
+      };
+    }
     const timedOut = e.killed === true || e.signal === "SIGTERM";
     if (timedOut) {
       return {
@@ -3084,7 +3101,11 @@ async function runGovernedAgenticBuild(opts) {
       // wide window (default 15 min) yet still hard-bound it, so a hung toolchain
       // surfaces an honest "verifier timed out" rather than hanging the run. A caller
       // may raise it further via `timeoutMs` (e.g. an even larger Xcode build).
-      opts.timeoutMs ?? VERIFY_DEFAULT_TIMEOUT_MS
+      opts.timeoutMs ?? VERIFY_DEFAULT_TIMEOUT_MS,
+      // CANCELLATION (sweep-47 M1): forward the SAME abort signal the actor used so a
+      // run/cancel that lands after the actor exits and the verifier started kills the
+      // verifier promptly. An aborted verify is an honest 'error' (never a green pass).
+      opts.signal
     );
     checks.push(check);
   } else {
@@ -3118,7 +3139,14 @@ async function runGovernedAgenticBuild(opts) {
     credentialPosture,
     ...agentic ? { agentic } : {},
     verdict,
-    verifyRan
+    verifyRan,
+    // HONEST ISOLATION (sweep-47 M2): the check ran INLINE over the actor-modified
+    // worktree — never the independent product verifier — so this is always
+    // 'inline-unsandboxed' and the projection MUST NOT label it assurance:'full'.
+    verifierIsolation: AGENTIC_VERIFIER_ISOLATION,
+    // The verify command's provenance: the stated source when a real check ran (default
+    // 'override' for a directly-supplied command), or 'none' when no check ran.
+    verifyCommandSource: verifyRan ? opts.verifyCommandSource ?? "override" : "none"
   };
 }
 
@@ -3429,6 +3457,9 @@ function projectAgenticBuildReview(runId, prompt, result) {
   }));
   const egress = readObservedEgress(result);
   const verdict = result.verdict;
+  const verifierIsolation = readVerifierIsolation(result);
+  const verifyCommandSource = readVerifyCommandSource(result);
+  const assurance = verifierIsolation === "independent-sandboxed" && result.verifyRan !== false ? "full" : "degraded";
   return {
     runId,
     intent: prompt,
@@ -3441,12 +3472,16 @@ function projectAgenticBuildReview(runId, prompt, result) {
     egress,
     verdict: {
       overall: verdict.overallVerdict,
-      // HONEST ASSURANCE: 'full' ONLY when a REAL build/test check ran over the
-      // worktree. When NO independent check ran (changed-files only, verifyRan:false)
-      // the assurance is 'degraded' — the verdict is NOT a fully-verified PASS and a
-      // consumer must not render it as one.
-      assurance: result.verifyRan === false ? "degraded" : "full",
+      assurance,
+      verifierIsolation,
+      verifyCommandSource,
       checks: verdict.checks.map((c) => ({ name: c.name, status: c.status })),
+      // TRACE-INTEGRITY (High B): carry the SIGNED trace root through the render
+      // contract so the mobile/dashboard verdict binds the REAL signed root — not a
+      // blank/stale `run.traceRoot`. This is the exact root `signature` was computed
+      // over (see p0-verifier signVerdict), so a re-signed mobile verdict still points
+      // at the real signed root.
+      traceRootHash: verdict.traceRootHash,
       ...verdict.signature ? {
         signature: {
           alg: verdict.signature.alg,
@@ -3460,6 +3495,25 @@ function projectAgenticBuildReview(runId, prompt, result) {
 function readObservedEgress(result) {
   const maybe = result.egress;
   return Array.isArray(maybe) ? maybe.filter((x) => typeof x === "string") : [];
+}
+function readVerifierIsolation(result) {
+  const maybe = result.verifierIsolation;
+  return maybe === "independent-sandboxed" ? "independent-sandboxed" : "inline-unsandboxed";
+}
+function readVerifyCommandSource(result) {
+  if (result.verifyRan === false) return "none";
+  const maybe = result.verifyCommandSource;
+  switch (maybe) {
+    case "override":
+    case "swiftpm":
+    case "xcode":
+    case "npm":
+    case "node":
+    case "none":
+      return maybe;
+    default:
+      return "override";
+  }
 }
 var DEFAULT_SUPERVISOR_VERSION = "0.0.0-p0";
 var BridgeServer = class {
@@ -3518,6 +3572,20 @@ var BridgeServer = class {
    * desktop flow (a non-approved build is refused there, not parked).
    */
   pendingBuilds = /* @__PURE__ */ new Map();
+  /**
+   * REMOTE-ACTION TRACE RECORDER state (trace-integrity High A). The canonical,
+   * hash-chained trace for a run is the single source of truth. Remote human
+   * actions (mobile approvals, coding messages, diff accept/reject) taken over
+   * the gateway are appended into the TARGET RUN's REAL `TraceWriter` — never a
+   * display-only breadcrumb. This map memoizes one `TraceWriter` per target runId
+   * so the recorder continues (append-only) the same on-disk chain `build/start`
+   * uses, and so the chain head stays consistent across a single connection. The
+   * build path registers its sink here (see `runApprovedBuild`) so a post-approval
+   * remote action chains into the very same trace file the build wrote.
+   */
+  remoteTraceWriters = /* @__PURE__ */ new Map();
+  /** Trace file path per target runId (the run dir's trace.jsonl). */
+  remoteTracePaths = /* @__PURE__ */ new Map();
   constructor(opts) {
     this.supervisorVersion = opts.supervisorVersion ?? DEFAULT_SUPERVISOR_VERSION;
     this.runsBaseDir = opts.runsBaseDir;
@@ -4338,7 +4406,17 @@ var BridgeServer = class {
     }
     if (params.pendingApproval === true) {
       const approvalId = `apr-${runId}`;
-      this.pendingBuilds.set(approvalId, { approvalId, runId, prompt, cwd });
+      const pendingRun = createRun(this.agentic?.runsBaseDir ?? this.runsBaseDir);
+      const pendingTracePath = join7(runSubdirPath(pendingRun.dir, "trace"), "trace.jsonl");
+      this.remoteTracePaths.set(runId, pendingTracePath);
+      this.pendingBuilds.set(approvalId, {
+        approvalId,
+        runId,
+        prompt,
+        cwd,
+        runDir: pendingRun.dir,
+        tracePath: pendingTracePath
+      });
       this.logLine(
         `[bridge-server] build/start ${runId} PENDING approval ${approvalId} (cwd=${cwd}).`
       );
@@ -4362,12 +4440,14 @@ var BridgeServer = class {
    * AbortController so `run/cancel` can SIGKILL the `codex exec` child. Everything
    * runs in an outer try/catch so a failure becomes a terminal `error` event.
    */
-  async runApprovedBuild(runId, prompt, cwd) {
+  async runApprovedBuild(runId, prompt, cwd, existing) {
     const abort = new AbortController();
     try {
-      const buildRun = createRun(this.agentic?.runsBaseDir ?? this.runsBaseDir);
-      const tracePath = join7(runSubdirPath(buildRun.dir, "trace"), "trace.jsonl");
-      const sink = createTraceWriter(tracePath);
+      const buildRun = existing ? { runId, dir: existing.runDir, state: "created" } : createRun(this.agentic?.runsBaseDir ?? this.runsBaseDir);
+      const tracePath = existing ? existing.tracePath : join7(runSubdirPath(buildRun.dir, "trace"), "trace.jsonl");
+      const sink = this.remoteTraceWriters.get(runId) ?? createTraceWriter(tracePath);
+      this.remoteTraceWriters.set(runId, sink);
+      this.remoteTracePaths.set(runId, tracePath);
       const buildLifecycle = new RunLifecycle(buildRun.state);
       const buildServerRun = {
         created: buildRun,
@@ -4420,8 +4500,10 @@ var BridgeServer = class {
       this.emitAgenticBuildEvent({ runId, type: "state", state: "approved" });
       const codexPath = this.agentic?.codexPath ?? resolveOnPath("codex") ?? "";
       let verifyCommand = this.agentic?.verifyCommand;
+      let verifyCommandSource = verifyCommand ? "override" : "none";
       if (!verifyCommand) {
         const resolved = resolveVerifyCommand(cwd);
+        verifyCommandSource = resolved.source;
         if (resolved.command) {
           verifyCommand = resolved.command;
           this.logLine(
@@ -4448,7 +4530,7 @@ var BridgeServer = class {
         // finalizes honestly rather than hanging.
         signal: abort.signal,
         ...this.agentic?.runsBaseDir ? { runsBaseDir: this.agentic.runsBaseDir } : this.runsBaseDir ? { runsBaseDir: this.runsBaseDir } : {},
-        ...verifyCommand ? { verifyCommand } : {},
+        ...verifyCommand ? { verifyCommand, verifyCommandSource } : {},
         ...this.agentic?.denyDirectIp !== void 0 ? { denyDirectIp: this.agentic.denyDirectIp } : {},
         // Stream each governed-run event out as a build/event tagged with our runId.
         emit: (event) => this.streamGovernedAgenticEvent(runId, event),
@@ -4544,6 +4626,93 @@ var BridgeServer = class {
     this.emit(this.successResponse(req.id, { runId, cancelled: true }));
   }
   /**
+   * REMOTE-ACTION TRACE RECORDER (trace-integrity High A). Append ONE remote human
+   * action (mobile approval, coding message, diff accept/reject) into the TARGET RUN's
+   * REAL hash-chained trace — never a display-only breadcrumb, never a no-op. This is
+   * the production seam the gateway's `appendTrace` dep routes into: the supervisor (not
+   * the gateway) owns the canonical chain, so the supervisor resolves the action's
+   * subject id to the target runId and appends to THAT run's `TraceWriter`.
+   *
+   * ID RESOLUTION: the gateway keys remote_* events to the action's subject — an
+   * approvalId (`apr-<runId>`), a diff reviewId (`rev-<runId>`), or a runId/sessionId.
+   * We strip the `apr-`/`rev-` prefix to recover the target runId; an already-runId
+   * subject passes through. The recorded event's `runId` is REWRITTEN to that target so
+   * `remote_*` provenance shares the target run id (the finding's core defect), and
+   * `source` is forced to `'human'` (a remote operator is a human reviewer, never the
+   * supervisor/verifier).
+   *
+   * APPEND-ONLY: we reuse (or lazily create) the run's ONE `TraceWriter` so the chain
+   * head stays continuous and history is never rewritten. When the run dir is unknown
+   * (no pending build, no build yet) we still mint a trace file under the runsBaseDir so
+   * the human action is tamper-evident rather than dropped.
+   */
+  recordRemoteAction(evt) {
+    const targetRunId = this.resolveRemoteTargetRunId(evt);
+    const sink = this.remoteTraceWriterFor(targetRunId);
+    sink.append({
+      ...evt,
+      runId: targetRunId,
+      source: "human"
+    });
+    this.logLine(
+      `[bridge-server] recorded remote ${evt.type} into run ${targetRunId} trace (source=human).`
+    );
+  }
+  /**
+   * Resolve a remote action's subject id to the TARGET run id. `apr-<runId>` (approval)
+   * and `rev-<runId>` (diff review) both embed the run id; anything else is treated as a
+   * runId/sessionId already. We prefer the embedded id over the event's own `runId`
+   * field because the gateway historically stamped the subject id (approval/review id)
+   * INTO `runId` — that mis-keying is exactly what this finding fixes.
+   */
+  resolveRemoteTargetRunId(evt) {
+    const payload = evt.payload ?? {};
+    const strip = (id) => {
+      if (id.startsWith("apr-")) return id.slice("apr-".length);
+      if (id.startsWith("rev-")) return id.slice("rev-".length);
+      return id;
+    };
+    if (typeof payload.runId === "string" && payload.runId.length > 0) {
+      return strip(payload.runId);
+    }
+    if (typeof evt.runId === "string" && (evt.runId.startsWith("apr-") || evt.runId.startsWith("rev-"))) {
+      return strip(evt.runId);
+    }
+    if (typeof payload.subjectId === "string" && (payload.subjectId.startsWith("apr-") || payload.subjectId.startsWith("rev-"))) {
+      return strip(payload.subjectId);
+    }
+    return strip(evt.runId);
+  }
+  /**
+   * The ONE hash-chained `TraceWriter` for a target run, created lazily and memoized so
+   * every remote action (and the build's own events, which register the SAME sink in
+   * `runApprovedBuild`) chains into one append-only file. When no run dir is known yet,
+   * mint one under the runsBaseDir so the action is still recorded (never dropped).
+   */
+  remoteTraceWriterFor(runId) {
+    const existing = this.remoteTraceWriters.get(runId);
+    if (existing) return existing;
+    let tracePath = this.remoteTracePaths.get(runId);
+    if (!tracePath) {
+      const created = createRun(this.agentic?.runsBaseDir ?? this.runsBaseDir);
+      tracePath = join7(runSubdirPath(created.dir, "trace"), "trace.jsonl");
+      this.remoteTracePaths.set(runId, tracePath);
+    }
+    const writer = createTraceWriter(tracePath);
+    this.remoteTraceWriters.set(runId, writer);
+    return writer;
+  }
+  /**
+   * Read back a run's canonical hash-chained trace events (test/inspection helper).
+   * Resolves the run's trace file from the recorder's path map and returns the parsed
+   * events; returns [] when the run has no trace file yet.
+   */
+  readRunTrace(runId) {
+    const tracePath = this.remoteTracePaths.get(runId);
+    if (!tracePath) return [];
+    return readTrace(tracePath);
+  }
+  /**
    * approval/respond — resolve a PENDING governed-build approval (remote-control). On
    * `allow`, GRANT the held build's authority and start it down the SAME approved path
    * (`runApprovedBuild`) — governed codex edits files + the signed verdict streams. On
@@ -4604,7 +4773,10 @@ var BridgeServer = class {
         resolved: true
       })
     );
-    void this.runApprovedBuild(pending.runId, pending.prompt, pending.cwd);
+    void this.runApprovedBuild(pending.runId, pending.prompt, pending.cwd, {
+      runDir: pending.runDir,
+      tracePath: pending.tracePath
+    });
   }
   /**
    * Map ONE {@link GovernedAgenticEvent} from the runner onto the build/event wire

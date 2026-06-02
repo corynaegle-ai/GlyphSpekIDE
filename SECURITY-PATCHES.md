@@ -506,10 +506,12 @@ with PATCH-003.
 ### Mechanism / startup-open wiring
 
 - `GlyphspekHomeStartupContribution` (registered `AfterRestored`, mirroring stock
-  `StartupPageRunnerContribution`) opens Home only when `glyphspek.home.openOnStartup` (new
-  setting, default `true`) is on, the startup is **not** a window reload, **no** editor was
-  restored, and Home isn't already open — so it yields to a restored editor/workspace and never
-  fights the user's tabs.
+  `StartupPageRunnerContribution`) gates on `glyphspek.home.openOnStartup` (new setting, default
+  `true`) and `--skip-welcome`. On a **fresh app launch** it opens Home as the **active landing
+  tab** — in front of any restored editors, which stay open as tabs behind it (the agent-home
+  "land on Home" behavior). On a **window reload** it does **not** steal focus: if Home was already
+  restored it leaves it in place, otherwise it opens Home **inactively** behind the user's active
+  editor. Either way it reuses an existing Home tab (`revealIfOpened`) rather than duplicating it.
 - `GlyphspekHomeEditorResolverContribution` (registered `BlockRestore`) re-maps the Home resource
   scheme back to the pane so a persisted Home tab survives reload. Home has no per-instance state;
   the serializer round-trips an empty object.
@@ -564,8 +566,9 @@ through `ICommandService` with no sandbox seam.
    render **disabled** with the "needs the extension active" hint; on activation they enable live
    (no reload).
 4. `GlyphSpek: Open Home` from the palette re-opens Home (`revealIfOpened` — no duplicate tab).
-5. Reopen with a real file/workspace, or set `glyphspek.home.openOnStartup: false`, or reload the
-   window → Home does **not** force itself over the restored editor.
+5. Fresh launch with restored editors → Home opens as the **active** tab in front of them (they
+   stay open behind it). A window **reload** does **not** steal focus from the active editor;
+   `glyphspek.home.openOnStartup: false` disables the startup-open entirely.
 6. **Honesty:** Recent runs shows the empty-state, never a fabricated run or verdict; Home never
    paints a `verified`/blue trust state of its own (only the halo it inherits reflects assurance).
 
@@ -1060,3 +1063,129 @@ requires the fork.
   remove the three appended `/* GlyphSpek … restyle */` CSS blocks. No runtime/security impact.
 - **Rebase risk: LOW** — the CSS is appended at the end of each part stylesheet and scoped under
   `.monaco-workbench`, so it composes with upstream rules; the theme + product.json are additive.
+
+---
+
+## PATCH-006 — Suppress the upstream "Agents window" from the GlyphSpek UI
+
+- **Status:** `APPLIED` (2026-06-01).
+- **Type:** **Trust-honesty / product-surface patch.** Removes every UI path to Microsoft's upstream
+  Agent Sessions window (`vs/sessions`) so it cannot be reached or advertised from the GlyphSpek UI.
+  Recorded here because it is a `src/vs/**` workbench diff.
+
+### Threat addressed
+
+The upstream "Agents window" ships in this fork's lineage as a full agentic surface, but (a) its
+agent backend is the de-Copilot'd **inert stub** (GATE-002) — it does not function — and (b) it is
+**un-governed**: entirely outside GlyphSpek's trust/trace/verifier envelope (the per-run-envelope
+reality in the M4 audit / CIO-FLAG-1). Left live, it **self-advertises** ("Try out the new Agents
+window") an agent experience a user could mistake for *the* GlyphSpek governed surface — a **false
+impression of governance** sitting next to the real, governed Home/Agent View. A spike
+(`docs/sessions-provider-spike-findings.md`) concluded we are NOT adopting that window (its
+`ISession` model has no slot for posture/verdict/trace/authority/assurance → adopting it forces
+~14 UI-file edits to a 95k-LOC window; verdict: harvest-the-idea, build our own lean Agent View).
+So the hollow surface is suppressed; our own trust-native Agent View replaces it.
+
+### What it does (suppress, do not rip out)
+
+Every UI entry point to the Agents window is un-registered or gated to `false`; the `vs/sessions`
+layer, the action classes, and the window internals are left **dormant and intact** (one-line-per-
+surface revert). Surfaces closed: the welcome-page **banner**; the **command-palette** entries +
+the `Cmd/Ctrl+Shift+A` **keybinding**; the **ChatTitleBarMenu / TitleBar** items + title-bar
+**toggle/widget**; the chat **input tip** ("Continue this session in the Agents Window"); the
+**suggest-next** "Continue in Agents Window" button; and the chat **tip catalog** entry.
+
+### Why an extension cannot do it
+
+These are workbench contribution registrations (`registerAction2` / `registerWorkbenchContribution2`
+/ menu + keybinding contributions / a context-key-gated tip) in `vs/workbench/contrib/chat`, not
+reachable or removable from any extension. Suppressing them is fork-level.
+
+### Changed files
+
+- `src/vs/workbench/contrib/chat/electron-browser/chat.contribution.ts` — commented out the four
+  Agents-window `Action2` registrations (`OpenWorkspaceInAgentsWindowAction`,
+  `ToggleOpenInAgentsWindowTitleBarAction`, `OpenAgentsWindowAction`,
+  `OpenChatSessionInAgentsWindowAction`), the two contributions (`OpenWorkspaceInAgentsContribution`,
+  `AgentsHandoffInputTipContribution`), and their now-unused import. The banner self-gates on
+  `CommandsRegistry.getCommand(OPEN_WORKSPACE_IN_AGENTS_WINDOW_COMMAND_ID)` and the suggest-next
+  button on `OPEN_AGENTS_WINDOW_COMMAND_ID`, so un-registering those commands hides them too.
+- `src/vs/workbench/contrib/chat/browser/chatTipCatalog.ts` — `tip.agentsWindow.when` →
+  `ContextKeyExpr.false()` (never eligible); removed the now-unused `IsWebContext` +
+  `OPEN_AGENTS_WINDOW_PRECONDITION` imports.
+
+### Acceptance test
+
+1. Launch the rebuilt app: no "Try out the new Agents window" banner on welcome/getting-started.
+2. Command Palette has no "Open … Agents Window" entries; `Cmd/Ctrl+Shift+A` does not open it.
+3. Chat title bar / input: no open-in-Agents button/toggle, no "Continue in Agents Window" tip or
+   suggest-next button.
+4. The Agents window cannot be opened from any UI path (the OS-level
+   `nativeHostService.openAgentsWindow` remains but has no UI caller).
+
+### Rollback / rebase note
+
+- **Rollback:** un-comment the registrations in `chat.contribution.ts` (+ its import) and restore
+  `tip.agentsWindow.when` (+ the two imports) in `chatTipCatalog.ts`. The window resurfaces
+  unchanged. No data migration.
+- **Rebase risk: LOW.** All edits are commented-out registrations / a `when: false` in two
+  GlyphSpek-owned diff sites; if upstream adds a new Agents-window entry point, suppress it the
+  same way.
+
+---
+
+## PATCH-007 — Suppress the vestigial Copilot status-bar indicator
+
+- **Status:** `APPLIED` (2026-06-01).
+- **Type:** **Trust-honesty / de-Copilot brand patch.** Removes the stock `$(copilot)` "Copilot
+  Status" status-bar indicator so no Copilot icon/branding shows in the GlyphSpek chrome. A
+  `src/vs/**` workbench diff, hence logged.
+
+### Threat addressed
+
+GlyphSpek de-Copilot'd its agent stack (GATE-002) and ships a first-party Codex-backed chat. But
+the stock `ChatStatusBarEntry` still rendered a `$(copilot)` glyph (`chatStatusEntry.ts:142`, plus a
+`$(copilot) Sign In` variant at `:242`, `name`/`ariaLabel` "Copilot Status") in the status bar —
+visible right next to the GlyphSpek policy chip. A Copilot icon/brand in a de-Copilot'd **trust**
+product is a brand-honesty leak: it implies a Copilot integration that does not exist, and it
+reflects the Copilot **entitlement** system, which is inert in this build (no `product.defaultChatAgent`).
+
+### What it does
+
+In `chatStatusEntry.ts` `update()`, an early-return disposes/skips the entry when
+`product.defaultChatAgent` is absent. The GlyphSpek build configures none, so the Copilot
+entitlement system this indicator reflects is already inert; gating on its absence means the
+indicator never renders. Smallest clean gate; fully reversible.
+
+### Native chat unaffected
+
+The GlyphSpek Codex chat is a separate `ChatViewPane` view container
+(`chatParticipant.contribution.ts`). `ChatStatusBarEntry` is only a status indicator (its command
+opens a Copilot status tooltip / the sign-in flow), **not** a chat-open entry point — so the chat
+panel still opens and works. (The other Copilot-glyph suspects were ruled out: the command-center
+agent widget uses `Codicon.chatSparkle`; the "Copilot Sign In" title-bar action is gated on a
+`signedOut` entitlement that never sets without a `defaultChatAgent`; `chatActions.ts`'s
+`Codicon.copilot` is behind an editor-title experiment context key.)
+
+### Why an extension cannot do it
+
+It is a workbench status-bar contribution in `vs/workbench/contrib/chat`, not reachable or
+removable from any extension.
+
+### Changed files
+
+- `src/vs/workbench/contrib/chat/browser/chatStatus/chatStatusEntry.ts` — early-return/dispose in
+  `update()` when `product.defaultChatAgent` is absent (+~16 lines).
+
+### Acceptance test
+
+1. Launch the rebuilt app → no `$(copilot)` icon and no "Copilot Status"/"Copilot Sign In" text in
+   the status bar.
+2. The GlyphSpek policy chip is still present; the native GlyphSpek (Codex) chat view still opens
+   and works.
+
+### Rollback / rebase note
+
+- **Rollback:** remove the early-return guard in `update()`. The Copilot status indicator returns.
+- **Rebase risk: LOW.** A single guard in one method; if upstream restructures the status entry,
+  re-apply the "no `defaultChatAgent` → don't render" guard.

@@ -60,7 +60,7 @@ const HOME_COMMANDS: readonly IHomeCommand[] = [
 	{
 		commandId: 'workbench.view.extension.glyphspek-egress',
 		label: localize('glyphspekHome.openEgress', "Open Egress / Network"),
-		description: localize('glyphspekHome.openEgress.desc', "Default-deny egress posture; allowed-this-run and blocked attempts."),
+		description: localize('glyphspekHome.openEgress.desc', "Observe-and-trace egress (metadata-only) for governed runs — allowed-this-run is recorded, not blocked."),
 		icon: 'gs-network'
 	},
 	{

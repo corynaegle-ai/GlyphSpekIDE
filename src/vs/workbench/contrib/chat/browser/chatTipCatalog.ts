@@ -6,10 +6,9 @@
 import { MarkdownString } from '../../../../base/common/htmlContent.js';
 import { localize } from '../../../../nls.js';
 import { ContextKeyExpr, ContextKeyExpression } from '../../../../platform/contextkey/common/contextkey.js';
-import { IsWebContext } from '../../../../platform/contextkey/common/contextkeys.js';
 import { IKeybindingService } from '../../../../platform/keybinding/common/keybinding.js';
 import { MenuRegistry } from '../../../../platform/actions/common/actions.js';
-import { ChatConfiguration, ChatModeKind, OPEN_AGENTS_WINDOW_COMMAND_ID, OPEN_AGENTS_WINDOW_PRECONDITION, OPEN_WORKSPACE_IN_AGENTS_WINDOW_COMMAND_ID } from '../common/constants.js';
+import { ChatConfiguration, ChatModeKind, OPEN_AGENTS_WINDOW_COMMAND_ID, OPEN_WORKSPACE_IN_AGENTS_WINDOW_COMMAND_ID } from '../common/constants.js';
 import { ChatContextKeys } from '../common/actions/chatContextKeys.js';
 import { IsSessionsWindowContext } from '../../../common/contextkeys.js';
 import { localChatSessionType } from '../common/chatSessionsService.js';
@@ -439,7 +438,12 @@ export const TIP_CATALOG: readonly ITipDefinition[] = [
 				: defaultMessage;
 			return new MarkdownString(message);
 		},
-		when: ContextKeyExpr.and(IsWebContext.negate(), OPEN_AGENTS_WINDOW_PRECONDITION),
+		// GlyphSpek PATCH-006: the upstream "Agents window" is suppressed in the
+		// GlyphSpek UI (its open commands are no longer registered), so this tip
+		// would render a dead command: link. Disable the tip outright with a
+		// `false` precondition. Reversible by restoring the original `when`
+		// (ContextKeyExpr.and(IsWebContext.negate(), OPEN_AGENTS_WINDOW_PRECONDITION)).
+		when: ContextKeyExpr.false(),
 		excludeWhenCommandsExecuted: [
 			OPEN_AGENTS_WINDOW_COMMAND_ID,
 			OPEN_WORKSPACE_IN_AGENTS_WINDOW_COMMAND_ID,

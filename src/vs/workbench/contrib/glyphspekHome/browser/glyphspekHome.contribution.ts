@@ -7,8 +7,10 @@ import { localize, localize2 } from '../../../../nls.js';
 import { Registry } from '../../../../platform/registry/common/platform.js';
 import { Disposable } from '../../../../base/common/lifecycle.js';
 import { onUnexpectedError } from '../../../../base/common/errors.js';
+import { KeyChord, KeyCode, KeyMod } from '../../../../base/common/keyCodes.js';
 import { Categories } from '../../../../platform/action/common/actionCommonCategories.js';
-import { Action2, registerAction2 } from '../../../../platform/actions/common/actions.js';
+import { Action2, MenuId, MenuRegistry, registerAction2 } from '../../../../platform/actions/common/actions.js';
+import { KeybindingWeight } from '../../../../platform/keybinding/common/keybindingsRegistry.js';
 import { ServicesAccessor } from '../../../../platform/instantiation/common/instantiation.js';
 import { IInstantiationService } from '../../../../platform/instantiation/common/instantiation.js';
 import { IEditorSerializer, EditorExtensions, IEditorFactoryRegistry } from '../../../common/editor.js';
@@ -64,6 +66,12 @@ registerAction2(class extends Action2 {
 			title: localize2('glyphspekHome.open', 'Open Home'),
 			category: Categories.View,
 			f1: true,
+			// "Back to Home" chord. Verified unused: Cmd+K Cmd+H is the Output panel, so use
+			// Cmd+K Cmd+G ("G" for GlyphSpek), which has no default binding on any platform.
+			keybinding: {
+				weight: KeybindingWeight.WorkbenchContrib,
+				primary: KeyChord(KeyMod.CtrlCmd | KeyCode.KeyK, KeyMod.CtrlCmd | KeyCode.KeyG)
+			},
 			metadata: {
 				description: localize2('glyphspekHome.open.desc', 'Open the GlyphSpek Home surface — start a governed run and reach the governance surfaces.')
 			}
@@ -76,6 +84,16 @@ registerAction2(class extends Action2 {
 		// revealIfOpened via IEditorService: a single Home tab, focused if already open.
 		await editorService.openEditor(instantiationService.createInstance(GlyphspekHomeInput), { pinned: false, revealIfOpened: true });
 	}
+});
+
+// ---- Discoverable "back to Home" entry in the View menu (beyond the palette + keybinding). ----
+MenuRegistry.appendMenuItem(MenuId.MenubarViewMenu, {
+	group: '1_open',
+	command: {
+		id: OPEN_HOME_COMMAND_ID,
+		title: localize({ key: 'miGlyphspekHome', comment: ['&& denotes a mnemonic'] }, "GlyphSpek &&Home")
+	},
+	order: 2
 });
 
 /**
@@ -114,14 +132,16 @@ class GlyphspekHomeEditorResolverContribution extends Disposable implements IWor
 }
 
 /**
- * Auto-opens GlyphSpek Home on startup when the editor area would otherwise be empty — the way
- * an agent-home IDE lands on its home rather than a blank editor. Modeled on
- * `StartupPageRunnerContribution`: waits for `Restored`, and only opens on a fresh launch (not a
- * window reload) when no editor is restored. Behind `glyphspek.home.openOnStartup` (default ON).
+ * Lands the IDE on GlyphSpek Home on every fresh app launch — the way an agent-home IDE opens to
+ * its home rather than to last session's panes. Modeled on `StartupPageRunnerContribution`: waits
+ * for `Restored`, then (behind `glyphspek.home.openOnStartup`, default ON) opens Home as the
+ * active editor. Restored editors stay open as tabs behind Home; Home is opened additively and
+ * focused, never replacing them. On a window reload Home is not forced to the foreground, so
+ * reloading mid-work to test a build never steals focus from the user's active editor.
  *
  * Honesty/scope note: this does NOT touch `product.json` or `workbench.startupEditor`. It is an
- * additive, settings-gated startup contribution that coexists with the stock Welcome page — if a
- * user has restored editors or disables the setting, Home does not force itself open.
+ * additive, settings-gated startup contribution that coexists with the stock Welcome page — if the
+ * user disables the setting, Home does not force itself open.
  */
 class GlyphspekHomeStartupContribution extends Disposable implements IWorkbenchContribution {
 
@@ -146,23 +166,33 @@ class GlyphspekHomeStartupContribution extends Disposable implements IWorkbenchC
 			return; // honor --skip-welcome / e2e flags
 		}
 		if (this.configurationService.getValue<boolean>(OPEN_ON_STARTUP_SETTING) === false) {
-			return; // user opted out
+			return; // user opted out — master gate
 		}
-		if (this.lifecycleService.startupKind === StartupKind.ReloadedWindow) {
-			return; // a reload restores prior editors; don't re-inject Home
-		}
-		// Only land on Home when nothing else is open (a restored file/workspace wins).
-		if (this.editorService.activeEditor) {
-			return;
-		}
-		// Don't duplicate an already-open Home.
-		if (this.editorService.editors.some(e => e.typeId === glyphspekHomeInputTypeId)) {
+
+		// Don't duplicate an already-open Home: reveal it instead. On a fresh launch this still
+		// brings Home forward (active); on a reload it leaves the existing Home where it was.
+		const isReload = this.lifecycleService.startupKind === StartupKind.ReloadedWindow;
+		const homeAlreadyOpen = this.editorService.editors.some(e => e.typeId === glyphspekHomeInputTypeId);
+
+		if (isReload) {
+			// Reloading mid-work to test a build must not steal focus from the user's active editor.
+			// Skip if Home is already restored; otherwise open it inactively, behind the active pane.
+			if (homeAlreadyOpen) {
+				return;
+			}
+			await this.editorService.openEditor(
+				this.instantiationService.createInstance(GlyphspekHomeInput),
+				{ pinned: true, inactive: true, revealIfOpened: true }
+			);
 			return;
 		}
 
+		// Fresh app launch: land on Home and make it the active editor, even if other editors were
+		// restored. Restored editors stay open as tabs behind Home — `revealIfOpened` reuses an
+		// existing Home tab (no duplicate) and the default (active, focused) options bring it forward.
 		await this.editorService.openEditor(
 			this.instantiationService.createInstance(GlyphspekHomeInput),
-			{ pinned: false }
+			{ pinned: true, revealIfOpened: true }
 		);
 	}
 }
@@ -178,7 +208,7 @@ Registry.as<IConfigurationRegistry>(ConfigurationExtensions.Configuration).regis
 			type: 'boolean',
 			default: true,
 			scope: ConfigurationScope.APPLICATION,
-			description: localize('glyphspek.home.openOnStartup', "Open the GlyphSpek Home surface at startup when the editor area would otherwise be empty (the way an agent-home IDE lands on its home). Reopen any time with the \"GlyphSpek: Open Home\" command. Does not override a restored editor or workspace.")
+			description: localize('glyphspek.home.openOnStartup', "Open the GlyphSpek Home surface as the active tab on startup (the way an agent-home IDE lands on its home). Restored editors stay open behind it; a window reload keeps your current editor focused. Reopen any time with the \"GlyphSpek: Open Home\" command.")
 		}
 	}
 });

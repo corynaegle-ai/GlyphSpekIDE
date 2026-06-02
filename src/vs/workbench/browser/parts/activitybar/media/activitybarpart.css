@@ -95,7 +95,7 @@
 	border-color: var(--vscode-activityBar-border, var(--vscode-contrastBorder, transparent));
 }
 
-/* A little top padding so the first icon doesn't crowd the title-bar hairline. */
-.monaco-workbench .activitybar > .content > .composite-bar {
-	padding-top: 4px;
-}
+/* NOTE: intentionally NO top padding on .composite-bar — it is the JS-measured layout
+   container the activity-bar overflow math sizes against (a fixed compositeSize per item vs.
+   the measured content height). Padding here desyncs that math and can clip the bottom item,
+   so the breathing room is dropped to keep PATCH-005's "no geometry change" property true. */

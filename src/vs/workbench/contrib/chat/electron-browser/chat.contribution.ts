@@ -48,7 +48,10 @@ import { registerChatDeveloperActions } from './actions/chatDeveloperActions.js'
 import { registerChatExportZipAction } from './actions/chatExportZip.js';
 import { registerExportAgentTracesDbAction } from './actions/exportAgentTracesDb.js';
 import { HoldToVoiceChatInChatViewAction, InlineVoiceChatAction, KeywordActivationContribution, QuickVoiceChatAction, ReadChatResponseAloud, StartVoiceChatAction, StopListeningAction, StopListeningAndSubmitAction, StopReadAloud, StopReadChatItemAloud, VoiceChatInChatViewAction } from './actions/voiceChatActions.js';
-import { OpenWorkspaceInAgentsWindowAction, OpenWorkspaceInAgentsContribution, OpenAgentsWindowAction, OpenChatSessionInAgentsWindowAction, AgentsHandoffInputTipContribution, ToggleOpenInAgentsWindowTitleBarAction } from './agentSessions/agentSessionsActions.js';
+// GlyphSpek PATCH-006: imports for the upstream Agents-window surfaces are
+// intentionally left commented out alongside their now-suppressed registrations
+// below. Restore this line together with the registrations to re-enable.
+// import { OpenWorkspaceInAgentsWindowAction, OpenWorkspaceInAgentsContribution, OpenAgentsWindowAction, OpenChatSessionInAgentsWindowAction, AgentsHandoffInputTipContribution, ToggleOpenInAgentsWindowTitleBarAction } from './agentSessions/agentSessionsActions.js';
 import { NativeBuiltinToolsContribution } from './builtInTools/tools.js';
 import { NativePluginGitCommandService } from './pluginGitCommandService.js';
 
@@ -236,10 +239,20 @@ class ChatLifecycleHandler extends Disposable {
 	}
 }
 
-registerAction2(OpenWorkspaceInAgentsWindowAction);
-registerAction2(ToggleOpenInAgentsWindowTitleBarAction);
-registerAction2(OpenAgentsWindowAction);
-registerAction2(OpenChatSessionInAgentsWindowAction);
+// GlyphSpek PATCH-006: the upstream Microsoft "Agents window" surface is
+// de-Copilot'd, un-governed, and superseded by our own lean Agent View. Do not
+// register the actions that surface it so it is unreachable from the UI: this
+// removes the command-palette (f1) entries, the Cmd/Ctrl+Shift+A keybinding, the
+// ChatTitleBarMenu / TitleBar menu items, and the title-bar toggle. Because
+// `canShowAgentsBanner` and the suggest-next handoff button both gate on these
+// commands being present in the CommandsRegistry, leaving them unregistered also
+// hides the "Try out the new Agents window" banner and the "Continue in Agents
+// Window" button. The action/contribution classes and `vs/sessions` internals
+// remain intact so this is fully reversible by restoring the lines below.
+// registerAction2(OpenWorkspaceInAgentsWindowAction);
+// registerAction2(ToggleOpenInAgentsWindowTitleBarAction);
+// registerAction2(OpenAgentsWindowAction);
+// registerAction2(OpenChatSessionInAgentsWindowAction);
 registerAction2(StartVoiceChatAction);
 
 registerAction2(VoiceChatInChatViewAction);
@@ -265,8 +278,12 @@ registerWorkbenchContribution2(ChatSuspendThrottlingHandler.ID, ChatSuspendThrot
 registerWorkbenchContribution2(ChatLifecycleHandler.ID, ChatLifecycleHandler, WorkbenchPhase.AfterRestored);
 registerWorkbenchContribution2(AgentHostContribution.ID, AgentHostContribution, WorkbenchPhase.AfterRestored);
 registerWorkbenchContribution2(AgentHostTerminalContribution.ID, AgentHostTerminalContribution, WorkbenchPhase.AfterRestored);
-registerWorkbenchContribution2(OpenWorkspaceInAgentsContribution.ID, OpenWorkspaceInAgentsContribution, WorkbenchPhase.BlockRestore);
-registerWorkbenchContribution2(AgentsHandoffInputTipContribution.ID, AgentsHandoffInputTipContribution, WorkbenchPhase.Eventually);
+// GlyphSpek PATCH-006: also leave the title-bar "Open in Agents" widget
+// contribution and the "Continue this session in the Agents Window" input-tip
+// contribution unregistered so neither surface advertises the Agents window.
+// Reversible by restoring the two lines below.
+// registerWorkbenchContribution2(OpenWorkspaceInAgentsContribution.ID, OpenWorkspaceInAgentsContribution, WorkbenchPhase.BlockRestore);
+// registerWorkbenchContribution2(AgentsHandoffInputTipContribution.ID, AgentsHandoffInputTipContribution, WorkbenchPhase.Eventually);
 
 // How long to wait for the agent host to surface an AgentInfo before
 // throwing an error. Long enough for normal startup, short enough to avoid

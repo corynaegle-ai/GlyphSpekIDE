@@ -239,7 +239,11 @@
  *  from the theme without hardcoding a color here. Does not touch sizing/geometry.
  * ------------------------------------------------------------------------------------------- */
 
-/* Rounded hover/active surface behind the icon (inset so it never touches the rail edges). */
+/* Rounded hover/active surface behind the icon (inset so it never touches the rail edges).
+ * INVARIANT: the icon box (width/height) + its margin must sum back to --activity-bar-width /
+ * --activity-bar-action-height (the rail assumes a fixed 48px item / 52px compositeSize for its
+ * overflow math). If you change a width/height constant below, change the margin to match — or
+ * the per-item geometry desyncs from the overflow computation and the bottom icon can clip. */
 .monaco-workbench .activitybar > .content :not(.monaco-menu) > .monaco-action-bar .action-item .action-label.codicon {
 	border-radius: 8px;
 	margin: 3px 6px;
