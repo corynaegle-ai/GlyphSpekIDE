@@ -2333,6 +2333,37 @@ ${s.content}`,
   }
 };
 
+// ../spikes/p0-supervisor/network-allowlist.ts
+function networkSpecFromPolicy(policy, opts = {}) {
+  const allow = dedupeHosts(policy.allow.network);
+  if (allow.length === 0) {
+    return "deny";
+  }
+  return {
+    allow,
+    acknowledgeSoftEgress: opts.acknowledgeSoftEgress === true
+  };
+}
+function dedupeHosts(hosts) {
+  const seen = /* @__PURE__ */ new Set();
+  const out = [];
+  for (const raw of hosts) {
+    const host = raw.trim();
+    if (host.length === 0) continue;
+    const key = host.toLowerCase();
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push(host);
+  }
+  return out;
+}
+
+// ../spikes/p0-supervisor/trust-gate.ts
+function trustFromCapabilities(caps) {
+  if (!caps.fsIsolated) return "untrusted";
+  return caps.hardEgress ? "trusted" : "sandboxed-soft-egress";
+}
+
 // ../spikes/p0-model-gateway/gateway.ts
 var ModelGateway = class {
   backends = /* @__PURE__ */ new Map();
@@ -3881,6 +3912,44 @@ var APPROVED_ISOLATION_RUNTIMES = [
 function isApprovedIsolationRuntime(runtimeProfile) {
   return APPROVED_ISOLATION_RUNTIMES.includes(runtimeProfile.trim().toLowerCase());
 }
+function capabilitiesForProfile(runtimeProfile, network) {
+  const profile = runtimeProfile.trim().toLowerCase();
+  switch (profile) {
+    case "docker":
+      return { fsIsolated: true, hardEgress: network === "deny" };
+    case "firecracker":
+      return { fsIsolated: true, hardEgress: true };
+    default:
+      return { fsIsolated: false, hardEgress: false };
+  }
+}
+function settleCreateRunTrust(request) {
+  let network;
+  let policyLoadError;
+  try {
+    const loaded = loadPolicy(request.policyPath);
+    if (loaded.policy) {
+      network = networkSpecFromPolicy(loaded.policy, { acknowledgeSoftEgress: true });
+    } else {
+      policyLoadError = loaded.errors.join("; ");
+      network = { allow: ["(unknown)"], acknowledgeSoftEgress: true };
+    }
+  } catch (err) {
+    policyLoadError = err instanceof Error ? err.message : String(err);
+    network = { allow: ["(unknown)"], acknowledgeSoftEgress: true };
+  }
+  const capabilities = capabilitiesForProfile(request.runtimeProfile, network);
+  const trust = trustFromCapabilities(capabilities);
+  return { trust, capabilities, network, ...policyLoadError ? { policyLoadError } : {} };
+}
+function trustReasonForCreate(verdict) {
+  if (verdict.trust === "trusted") return void 0;
+  if (verdict.trust === "sandboxed-soft-egress") {
+    return "runtime is fs-isolated but egress is SOFT (application-layer allowlist; raw-socket bypass possible on Docker/Colima); run is sandboxed-soft-egress, NOT product-trusted. A hard egress allowlist is the Firecracker remote plane (future work).";
+  }
+  const base = "runtime is non-isolating (no filesystem boundary the actor cannot escape); run is untrusted (a non-isolating runtime cannot produce a product-trusted run).";
+  return verdict.policyLoadError ? `${base} (policy load error: ${verdict.policyLoadError})` : base;
+}
 function selfHashCheck(selfPath, pinnedSha) {
   if (!pinnedSha) return { ok: true };
   if (!selfPath) {
@@ -4399,9 +4468,10 @@ var BridgeServer = class {
     const request = validation.request;
     const created = createRun(this.runsBaseDir);
     const lifecycle = new RunLifecycle(created.state);
-    const isolation = isApprovedIsolationRuntime(request.runtimeProfile);
-    const trust = isolation ? "trusted" : "untrusted";
-    const reason = isolation ? void 0 : `runtime profile "${request.runtimeProfile}" is not an approved isolation runtime; run is untrusted (non-isolating runtime cannot produce a product-trusted run).`;
+    const verdict = settleCreateRunTrust(request);
+    const trust = verdict.trust;
+    const isolation = verdict.capabilities.fsIsolated;
+    const reason = trustReasonForCreate(verdict);
     this.runs.set(created.runId, {
       created,
       lifecycle,
@@ -4415,7 +4485,7 @@ var BridgeServer = class {
       ...reason ? { reason } : {}
     };
     this.logLine(
-      `[bridge-server] run/create \u2192 ${trust} (runId=${created.runId}, runtime=${request.runtimeProfile}, actor=${request.actorType}).`
+      `[bridge-server] run/create \u2192 ${trust} (runId=${created.runId}, runtime=${request.runtimeProfile}, actor=${request.actorType}, fsIsolated=${verdict.capabilities.fsIsolated}, hardEgress=${verdict.capabilities.hardEgress}).`
     );
     this.emit(this.successResponse(req.id, result));
   }
