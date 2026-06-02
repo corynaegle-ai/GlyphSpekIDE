@@ -602,6 +602,10 @@
   // The authority last posted to the host (so the status-bar `verified` segment is
   // driven by the SAME gate the verdict pane uses). Avoids redundant posts.
   var lastPostedAuthority = null;
+  // The friction TIER last posted to the host (so the fork chrome can react to it —
+  // e.g. recede the editor at Ask). De-duplicated like the authority post. This is
+  // the FRICTION axis only; it NEVER carries or implies assurance (data-authority).
+  var lastPostedTier = null;
 
   /**
    * Apply the derived axes to the live-view root + populate the friction surface.
@@ -645,6 +649,12 @@
     // carries the result of the webview's signature-before-display gate the host
     // cannot run. View-only on the panel; honest by construction.
     postAuthority(view.runId, authority);
+
+    // Publish the effective FRICTION tier to the host (orthogonal to authority) so
+    // fork chrome can react — e.g. recede the center editor at Ask. View-only: this
+    // is "which evidence to show / how light the surface feels", NOT a grant. The
+    // promote modal remains the only authority door.
+    postTier(tier);
   }
 
   /**
@@ -700,6 +710,10 @@
         if (note) note.innerHTML = FRICTION_COPY[tier] || FRICTION_COPY.governed;
         syncLadder(tier, true);
       }
+      // Pre-run Ask exploration still publishes the tier so the fork can recede the
+      // editor the moment the user slides to Ask, before any run exists (the selected-
+      // run path posts via setFrictionSurface above).
+      postTier(tier);
     }
     // Move keyboard focus to the now-checked rung (radiogroup focus management).
     focusCheckedRung();
@@ -743,6 +757,22 @@
     lastPostedAuthority = key;
     if (typeof window !== 'undefined' && typeof window.GLYPHSPEK_POST === 'function') {
       window.GLYPHSPEK_POST({ type: 'glyphspekAuthority', runId: runId, authority: authority });
+    }
+  }
+
+  /**
+   * Post the effective FRICTION tier to the host (mirrors postAuthority, but on the
+   * orthogonal axis). De-duplicated so we don't spam the host on every re-render. The
+   * host mirrors it to the `glyphspek.tier` context-key the fork chrome reads to
+   * recede the editor at Ask. VIEW-ONLY — it carries no assurance and grants nothing;
+   * the promote modal stays the only authority door.
+   */
+  function postTier(tier) {
+    if (LADDER_TIERS.indexOf(tier) === -1) return;
+    if (tier === lastPostedTier) return;
+    lastPostedTier = tier;
+    if (typeof window !== 'undefined' && typeof window.GLYPHSPEK_POST === 'function') {
+      window.GLYPHSPEK_POST({ type: 'glyphspekTier', tier: tier });
     }
   }
 
@@ -1805,8 +1835,31 @@
     return base;
   }
 
+  /* --------------------------- reduced motion (§14.3) --------------------------- */
+  /**
+   * Apply the webview's "reduce motion" Settings toggle by adding/removing the
+   * `glyphspek-reduce-motion` class on <html> (styles.css shares the OS-pref rule
+   * list with that class). This is the webview-readable analog of the fork's
+   * `glyphspek.workbench.haloMotion` setting: it gives the Trust Panel the SECOND
+   * disable path §14.3 requires (the @media query covers the OS preference; this
+   * covers a user/host Settings toggle). View-only — it changes nothing about trust,
+   * only whether the deny-pulse + trust cross-fades animate. `on === undefined`
+   * (no setting posted yet) leaves the class untouched so the OS pref still governs.
+   */
+  function applyReduceMotion(on) {
+    if (typeof document === 'undefined' || !document.documentElement) return;
+    if (on === undefined || on === null) return;
+    document.documentElement.classList.toggle('glyphspek-reduce-motion', on === true);
+  }
+
   /* --------------------------- wiring --------------------------- */
   function wireLive() {
+    // Reduced-motion Settings toggle (§14.3): seed from a host-injected global if the
+    // host set one BEFORE this script ran (mirrors GLYPHSPEK_RUN_TRUSTS / trusted-key
+    // injection), then keep it live via the `reduceMotion` host message below.
+    if (typeof window !== 'undefined' && typeof window.GLYPHSPEK_REDUCE_MOTION !== 'undefined') {
+      applyReduceMotion(window.GLYPHSPEK_REDUCE_MOTION === true);
+    }
     // Host → webview run-event stream. The real supervisor stream and the mock
     // driver both arrive here, so the real stream slots in with NO renderer change.
     window.addEventListener('message', function (event) {
@@ -1816,6 +1869,10 @@
         ingestRunEvent(msg.event);
       } else if (msg.type === 'runEvents' && Array.isArray(msg.events)) {
         for (var i = 0; i < msg.events.length; i++) ingestRunEvent(msg.events[i]);
+      } else if (msg.type === 'reduceMotion') {
+        // §14.3 Settings-toggle path: the host posts the user's GlyphSpek "reduce
+        // motion" setting (the webview-side analog of the fork's haloMotion key).
+        applyReduceMotion(msg.value === true);
       } else if (msg.type === 'selectRun' && typeof msg.runId === 'string') {
         // FOCUS a run from the activity-bar Governed Runs tree (view-only nav: it
         // confers no trust and starts nothing). Select the run if we know it and
@@ -1947,6 +2004,10 @@
       currentLadderTier: currentLadderTier,
       setFrictionSurface: setFrictionSurface,
       LADDER_TIERS: LADDER_TIERS,
+      // FRICTION-TIER PUBLISH (Phase 1 §A) — exposed so the tier-publish test can
+      // assert the de-duplicated `glyphspekTier` post on the REAL panel code. The
+      // host mirrors it to the `glyphspek.tier` context-key the fork chrome reads.
+      postTier: postTier,
       // AGENTIC BUILD REVIEW (Phase B) — exposed for the renderer/parser tests
       // (test/agenticBuildReview.test.mjs) so the diff parser, the honest verdict
       // badge, and the full render are asserted on the REAL panel code.
@@ -1954,6 +2015,9 @@
       buildDiffView: buildDiffView,
       abrVerdictBadge: abrVerdictBadge,
       renderAgenticBuildReview: renderAgenticBuildReview,
+      // REDUCED-MOTION toggle (§14.3) — exposed so a test can assert the webview's
+      // Settings-toggle path adds/removes the `glyphspek-reduce-motion` class.
+      applyReduceMotion: applyReduceMotion,
     };
   }
 

@@ -1,0 +1,235 @@
+/*
+ * GlyphSpek POLICY-as-code rail surface — stylesheet (Spec §5.9).
+ *
+ * Mirrors the VALUES of the shared blended trust tokens (media/styles.css) without
+ * importing that sheet (the a11y agent owns it). Loaded as a webview-URI <link> under
+ * the provider's CSP (style-src cspSource + nonce). No external fonts/assets.
+ *
+ * HONESTY palette: deny is RED (--fail) and rendered distinctly; observe-only is the
+ * soft/violet token (NOT a green allow); allow is --pass; ask is --claim (amber).
+ */
+
+:root {
+  --plane-0: #0f1419;
+  --plane-1: #161c24;
+  --plane-2: #1d2530;
+  --border: #2a333f;
+  --border-lit: #36424f;
+  --text: #d7dde5;
+  --text-2: #aeb9c7;
+  --text-dim: #8b97a6;
+  --claim: #d9a441;   /* ask / force_ask (amber) */
+  --verdict: #5b9cf0;
+  --pass: #3fb568;    /* allow (green) */
+  --fail: #e0544b;    /* deny / blocked (red, distinct) */
+  --soft: #a98bff;    /* observe-only soft plane (violet, NOT an allow) */
+  --human: #8aa0bd;
+  --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  --sans: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+  --r-sm: 6px;
+  --r-md: 9px;
+}
+
+* { box-sizing: border-box; }
+
+body {
+  margin: 0;
+  padding: 12px 10px 18px;
+  background: var(--plane-1);
+  color: var(--text);
+  font-family: var(--sans);
+  font-size: 13px;
+}
+
+.surface-h {
+  font-size: 10.5px;
+  letter-spacing: .8px;
+  text-transform: uppercase;
+  color: var(--text-dim);
+  padding: 2px 4px 10px;
+}
+
+section { margin-bottom: 14px; }
+
+.sec-h {
+  font-size: 10px;
+  letter-spacing: .6px;
+  text-transform: uppercase;
+  color: var(--text-dim);
+  margin: 0 0 6px 2px;
+}
+
+.card {
+  background: var(--plane-0);
+  border: 1px solid var(--border);
+  border-radius: var(--r-md);
+  padding: 11px 12px;
+}
+
+/* --- git-reviewed banner --- */
+.banner {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  border-radius: var(--r-sm);
+  padding: 8px 10px;
+  margin-bottom: 8px;
+  font-size: 12px;
+  line-height: 1.45;
+}
+.banner.reviewed { background: rgba(63, 181, 104, .10); border: 1px solid rgba(63, 181, 104, .35); }
+.banner.unread   { background: rgba(224, 84, 75, .08);  border: 1px solid rgba(224, 84, 75, .30); }
+.banner .dot { width: 8px; height: 8px; border-radius: 50%; flex: 0 0 auto; }
+.banner.reviewed .dot { background: var(--pass); }
+.banner.unread .dot   { background: var(--fail); }
+.banner .b-title { font-weight: 600; color: var(--text); }
+.banner .b-sub   { color: var(--text-2); }
+
+.path-line {
+  font-family: var(--mono);
+  font-size: 11px;
+  color: var(--text-2);
+  word-break: break-all;
+  margin: 0 0 4px;
+}
+.path-line .label { color: var(--text-dim); }
+.hash-line {
+  font-family: var(--mono);
+  font-size: 10.5px;
+  color: var(--text-dim);
+  word-break: break-all;
+}
+.src-note { color: var(--text-dim); font-size: 11px; margin-top: 4px; }
+
+/* --- defaults grid --- */
+.defaults { display: grid; grid-template-columns: 1fr auto; gap: 4px 10px; margin-top: 4px; }
+.defaults .d-tool { font-family: var(--mono); font-size: 11.5px; color: var(--text-2); }
+.defaults .d-verb { font-size: 11px; font-weight: 700; text-align: right; letter-spacing: .3px; }
+.verb-allow { color: var(--pass); }
+.verb-deny  { color: var(--fail); }
+.verb-ask   { color: var(--claim); }
+.verb-other { color: var(--text-2); }
+
+/* --- rule lists --- */
+.rule-group { margin-top: 8px; }
+.rule-group > .rg-h {
+  font-size: 10.5px; letter-spacing: .4px; text-transform: uppercase;
+  color: var(--text-dim); margin: 0 0 3px;
+}
+.rule-group.allow > .rg-h { color: var(--pass); }
+.rule-group.deny  > .rg-h { color: var(--fail); }
+.rule-sub { font-size: 10.5px; color: var(--text-dim); margin: 4px 0 1px 2px; }
+ul.rules { list-style: none; margin: 0; padding: 0; }
+ul.rules li {
+  font-family: var(--mono);
+  font-size: 11px;
+  color: var(--text-2);
+  padding: 1px 0 1px 10px;
+  word-break: break-all;
+}
+.rule-group.deny ul.rules li { color: #e8a59f; }
+
+.muted { color: var(--text-dim); font-size: 11.5px; line-height: 1.5; }
+.empty { color: var(--text-dim); font-size: 11.5px; font-style: italic; }
+
+/* raw fallback */
+pre.raw {
+  font-family: var(--mono);
+  font-size: 11px;
+  color: var(--text-2);
+  background: var(--plane-2);
+  border: 1px solid var(--border);
+  border-radius: var(--r-sm);
+  padding: 8px 9px;
+  margin: 6px 0 0;
+  white-space: pre-wrap;
+  word-break: break-word;
+  max-height: 240px;
+  overflow: auto;
+}
+
+/* --- per-run decision breakdown --- */
+.counts { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 8px; }
+.count-chip {
+  display: inline-flex; align-items: center; gap: 5px;
+  font-size: 11px; font-weight: 600;
+  border-radius: 999px; padding: 2px 9px;
+  border: 1px solid var(--border-lit);
+  color: var(--text-2);
+}
+.count-chip .n { font-variant-numeric: tabular-nums; }
+.count-chip.allow { color: var(--pass); border-color: rgba(63,181,104,.45); }
+.count-chip.ask   { color: var(--claim); border-color: rgba(217,164,65,.45); }
+.count-chip.deny  { color: var(--fail); border-color: rgba(224,84,75,.5); }
+.count-chip.blocked { color: var(--fail); border-color: rgba(224,84,75,.5); }
+.count-chip.observe { color: var(--soft); border-color: rgba(169,139,255,.45); }
+
+ul.decisions { list-style: none; margin: 0; padding: 0; }
+.decision {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: 2px 9px;
+  border-left: 3px solid var(--border-lit);
+  background: var(--plane-2);
+  border-radius: 0 var(--r-sm) var(--r-sm) 0;
+  padding: 6px 9px;
+  margin-bottom: 5px;
+}
+.decision.d-deny    { border-left-color: var(--fail); background: rgba(224,84,75,.07); }
+.decision.d-allow   { border-left-color: var(--pass); }
+.decision.d-ask     { border-left-color: var(--claim); }
+.decision.d-observe { border-left-color: var(--soft); }
+
+.decision .d-verb {
+  grid-row: 1 / span 2;
+  align-self: start;
+  font-size: 10px; font-weight: 800; letter-spacing: .4px; text-transform: uppercase;
+  padding: 2px 7px; border-radius: var(--r-sm);
+  white-space: nowrap;
+}
+.decision.d-deny    .d-verb { color: var(--fail); background: rgba(224,84,75,.16); }
+.decision.d-allow   .d-verb { color: var(--pass); background: rgba(63,181,104,.14); }
+.decision.d-ask     .d-verb { color: var(--claim); background: rgba(217,164,65,.14); }
+.decision.d-observe .d-verb { color: var(--soft); background: rgba(169,139,255,.14); }
+.decision.d-other   .d-verb { color: var(--text-2); background: var(--plane-1); }
+
+.decision .d-cap {
+  font-family: var(--mono);
+  font-size: 11.5px;
+  color: var(--text);
+  word-break: break-all;
+}
+.decision .d-meta {
+  font-size: 10.5px;
+  color: var(--text-dim);
+}
+.decision .d-meta .tag { color: var(--text-2); }
+.decision .d-blocked {
+  display: inline-block;
+  font-size: 9.5px; font-weight: 800; letter-spacing: .4px;
+  color: var(--fail); border: 1px solid rgba(224,84,75,.5);
+  border-radius: 999px; padding: 0 6px; margin-left: 6px;
+}
+.decision .d-observe-tag {
+  display: inline-block;
+  font-size: 9.5px; font-weight: 800; letter-spacing: .4px;
+  color: var(--soft); border: 1px solid rgba(169,139,255,.5);
+  border-radius: 999px; padding: 0 6px; margin-left: 6px;
+}
+
+.run-tag {
+  font-family: var(--mono);
+  font-size: 10.5px;
+  color: var(--text-dim);
+  margin-bottom: 6px;
+  word-break: break-all;
+}
+
+.disclaimer {
+  color: var(--text-dim);
+  font-size: 10.5px;
+  line-height: 1.5;
+  margin-top: 8px;
+  padding-top: 8px;
+  border-top: 1px solid var(--border);
+}

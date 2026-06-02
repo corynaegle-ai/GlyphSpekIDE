@@ -22,6 +22,15 @@
     "onView:glyphspek.chat",
     "onView:glyphspek.runs",
     "onView:glyphspek.runs.cards",
+    "onView:glyphspek.surface.trace",
+    "onView:glyphspek.surface.policy",
+    "onView:glyphspek.surface.verifier",
+    "onView:glyphspek.surface.egress",
+    "onView:glyphspek.surface.modelcalls",
+    "onView:glyphspek.surface.workspace",
+    "onView:glyphspek.surface.search",
+    "onView:glyphspek.surface.settings",
+    "onView:glyphspek.surface.actor",
     "onCommand:glyphspek.openTrustPanel",
     "onCommand:glyphspek.loadRunBundle",
     "onCommand:glyphspek.runGovernedTask",
@@ -165,6 +174,16 @@
           "id": "glyphspek-search",
           "title": "Search",
           "icon": "media/icons/gs-search-bar.svg"
+        },
+        {
+          "id": "glyphspek-settings",
+          "title": "Settings",
+          "icon": "media/icons/gs-settings.svg"
+        },
+        {
+          "id": "glyphspek-actor",
+          "title": "Bound Actor",
+          "icon": "media/icons/gs-actors.svg"
         }
       ]
     },
@@ -195,6 +214,7 @@
         {
           "id": "glyphspek.surface.trace",
           "name": "Trace / Provenance",
+          "type": "webview",
           "icon": "media/icons/gs-trace.svg",
           "contextualTitle": "GlyphSpek Trace"
         }
@@ -203,6 +223,7 @@
         {
           "id": "glyphspek.surface.policy",
           "name": "Policy-as-code",
+          "type": "webview",
           "icon": "media/icons/gs-policy.svg",
           "contextualTitle": "GlyphSpek Policy"
         }
@@ -211,6 +232,7 @@
         {
           "id": "glyphspek.surface.verifier",
           "name": "Independent Verifier",
+          "type": "webview",
           "icon": "media/icons/gs-verifier.svg",
           "contextualTitle": "GlyphSpek Verifier"
         }
@@ -219,6 +241,7 @@
         {
           "id": "glyphspek.surface.egress",
           "name": "Egress / Network",
+          "type": "webview",
           "icon": "media/icons/gs-network.svg",
           "contextualTitle": "GlyphSpek Egress"
         }
@@ -227,6 +250,7 @@
         {
           "id": "glyphspek.surface.modelcalls",
           "name": "Model Calls / Actors",
+          "type": "webview",
           "icon": "media/icons/gs-broker.svg",
           "contextualTitle": "GlyphSpek Model Calls"
         }
@@ -235,6 +259,7 @@
         {
           "id": "glyphspek.surface.workspace",
           "name": "Workspace",
+          "type": "webview",
           "icon": "media/icons/gs-worktree.svg",
           "contextualTitle": "GlyphSpek Workspace"
         }
@@ -243,8 +268,27 @@
         {
           "id": "glyphspek.surface.search",
           "name": "Search",
+          "type": "webview",
           "icon": "media/icons/gs-search.svg",
           "contextualTitle": "GlyphSpek Search"
+        }
+      ],
+      "glyphspek-settings": [
+        {
+          "id": "glyphspek.surface.settings",
+          "name": "Settings",
+          "type": "webview",
+          "icon": "media/icons/gs-settings.svg",
+          "contextualTitle": "GlyphSpek Settings"
+        }
+      ],
+      "glyphspek-actor": [
+        {
+          "id": "glyphspek.surface.actor",
+          "name": "Bound Actor",
+          "type": "webview",
+          "icon": "media/icons/gs-actors.svg",
+          "contextualTitle": "GlyphSpek Bound Actor"
         }
       ]
     },
@@ -252,34 +296,6 @@
       {
         "view": "glyphspek.runs",
         "contents": "No governed runs yet.\n\nGlyphSpek governs an agent's egress (metadata-only) and signs a tamper-evident trace. Open a Governed Terminal to start an honest, governed (soft, unsandboxed) session.\n\n[New Governed Terminal](command:glyphspek.runs.newGovernedTerminal)\n\nOr open the Trust Panel to load an existing run bundle.\n[Open Trust Panel](command:glyphspek.runs.openTrustPanel)"
-      },
-      {
-        "view": "glyphspek.surface.trace",
-        "contents": "The hash-chained, tamper-evident TRACE for the focused run.\n\nThe trace is rendered as evidence inside the Trust Panel today. This dedicated surface is a follow-on; open the Trust Panel to inspect the trace.\n\n[Open Trust Panel](command:glyphspek.runs.openTrustPanel)"
-      },
-      {
-        "view": "glyphspek.surface.policy",
-        "contents": "POLICY-as-code decisions (allow / deny / ask) for governed runs.\n\nPolicy decisions render inside the Trust Panel today. This dedicated surface is a follow-on.\n\n[Open Trust Panel](command:glyphspek.runs.openTrustPanel)"
-      },
-      {
-        "view": "glyphspek.surface.verifier",
-        "contents": "The INDEPENDENT verifier re-runs the declared checks in a clean trust domain and signs a verdict.\n\nA verdict is product-authoritative only after the Trust Panel's in-browser Ed25519 signature gate passes.\n\n[Open Trust Panel](command:glyphspek.runs.openTrustPanel)"
-      },
-      {
-        "view": "glyphspek.surface.egress",
-        "contents": "EGRESS / network posture for governed runs.\n\nToday the soft governed terminal is observe-and-trace (metadata-only) — NOT a hard allowlist. The honest egress evidence renders inside the Trust Panel.\n\n[Open Trust Panel](command:glyphspek.runs.openTrustPanel)"
-      },
-      {
-        "view": "glyphspek.surface.modelcalls",
-        "contents": "MODEL CALLS / actors — the brokered model RPCs and the bound actor.\n\nModel-call evidence renders inside the Trust Panel / Chat today. This dedicated surface is a follow-on.\n\n[Open Trust Panel](command:glyphspek.runs.openTrustPanel)"
-      },
-      {
-        "view": "glyphspek.surface.workspace",
-        "contents": "WORKSPACE files, scoped to the focused run.\n\nThe per-run changed-file list with provenance dots lives in the Governed Runs view. Open it to see what the focused run changed.\n\n[Open Trust Panel](command:glyphspek.runs.openTrustPanel)"
-      },
-      {
-        "view": "glyphspek.surface.search",
-        "contents": "Scoped SEARCH across the workspace.\n\nThis dedicated surface is a follow-on; use the stock Search for now."
       }
     ],
     "menus": {

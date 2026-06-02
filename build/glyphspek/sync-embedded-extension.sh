@@ -284,12 +284,44 @@ sync_tree() {
 	fi
 }
 
+# Recursively mirror dist/ shipping the built .js set ONLY (no .map), preserving
+# subdirectories (e.g. dist/surfaces/). sync_dir_glob's non-recursive `ls -1 *.js`
+# silently dropped a NEW dist subfolder (dist/surfaces/ — the rail governance-surface
+# providers), so the embedded copy was missing the module extension.js require()s and
+# the extension failed to activate. This recursive variant cannot miss a subfolder.
+# $1 = source dir, $2 = dest dir, $3 = label prefix. .map files are excluded.
+sync_dist_tree() {
+	local sdir="$1" ddir="$2" prefix="$3"
+	local f rel
+	# copy/check each source .js (recursive; relative paths preserve subdirs; no .map)
+	while IFS= read -r f; do
+		[ -n "$f" ] || continue
+		rel="${f#"$sdir"/}"
+		sync_file "$f" "$ddir/$rel" "$prefix/$rel"
+	done < <(find "$sdir" -type f -name '*.js' ! -name '*.map' | sort)
+	# remove embedded .js (recursive) that no longer exists in source (stale entrypoint)
+	if [ -d "$ddir" ]; then
+		while IFS= read -r f; do
+			[ -n "$f" ] || continue
+			rel="${f#"$ddir"/}"
+			if [ ! -f "$sdir/$rel" ]; then
+				if [ "$CHECK_ONLY" -eq 1 ]; then
+					note_change "STALE:    $prefix/$rel (in embedded, not in source)"
+				else
+					rm -f "$ddir/$rel"
+					note_change "removed:  $prefix/$rel (stale, not in source)"
+				fi
+			fi
+		done < <(find "$ddir" -type f -name '*.js' ! -name '*.map' | sort)
+	fi
+}
+
 # ---- (4) sync the artifacts -------------------------------------------------
 sync_file "$SOURCE/package.json" "$EMBEDDED/package.json" "package.json"
 [ -f "$SOURCE/README.md" ] && sync_file "$SOURCE/README.md" "$EMBEDDED/README.md" "README.md"
-# dist/: ship the built .js set ONLY (no .map) — matches the embedded convention
-# and the gate's expectation.
-sync_dir_glob "$SOURCE/dist"            "$EMBEDDED/dist"            '*.js'  "dist"
+# dist/: ship the built .js set ONLY (no .map), RECURSIVELY (incl. dist/surfaces/) —
+# matches the embedded convention and the gate's expectation.
+sync_dist_tree "$SOURCE/dist"           "$EMBEDDED/dist"                    "dist"
 sync_dir_glob "$SOURCE/dist-supervisor" "$EMBEDDED/dist-supervisor" '*.mjs' "dist-supervisor"
 # media/: webview assets — mirror the whole tree recursively (incl. subdirs like
 # media/icons/), so a new asset subfolder can't silently fail to ship.

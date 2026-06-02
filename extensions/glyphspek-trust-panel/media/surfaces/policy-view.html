@@ -1,0 +1,28 @@
+<!--
+  GlyphSpek POLICY-as-code rail surface — reference shell (Spec §5.9).
+
+  NOTE: this file is REFERENCE ONLY and is not fetched at runtime. The provider
+  (extension/src/surfaces/policyViewProvider.ts) renders the live webview shell
+  itself (shellHtml) so it can inject the per-load CSP nonce + asWebviewUri'd asset
+  URIs for policy-view.css / policy-view.js. This file documents the equivalent
+  static structure (the #surface-root the renderer paints into) per the per-surface
+  asset-slot convention established in surfaceViewBase.ts.
+
+  The runtime shell is CSP-locked:
+    default-src 'none';
+    style-src  <cspSource> 'nonce-…';
+    script-src 'nonce-…';
+    img-src    <cspSource> https: data:;
+    font-src   <cspSource>;
+-->
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <link rel="stylesheet" href="policy-view.css" />
+  </head>
+  <body>
+    <div id="surface-root"></div>
+    <script src="policy-view.js"></script>
+  </body>
+</html>

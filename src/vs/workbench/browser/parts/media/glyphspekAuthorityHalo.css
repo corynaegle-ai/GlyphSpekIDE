@@ -25,28 +25,57 @@
 	--glyphspek-halo-glow: 0 0 0 rgba(0, 0, 0, 0);
 	--glyphspek-substrate: #070a0f;            /* the void behind the floating frame */
 	--glyphspek-halo-radius: 12px;
+	/*
+	 * NON-COLOR ASSURANCE CHANNEL (§3.4, a11y-audit P1-A — the honesty-critical fix).
+	 * Under deuteranopia SOFT-violet (#a98bff) and verified-blue (#5b9cf0) are ~ΔE 4.2
+	 * (indistinct), so a colorblind reviewer could mistake a CAPPED SOFT session for a
+	 * SIGNED verdict — exactly the §2.2 distinction that must never blur. The ring
+	 * therefore carries a SHAPE channel that survives grayscale, per the §3.4 contract:
+	 *   read     → solid thin, NO glow (flat / neutral)
+	 *   claimed  → DASHED ring (self-reported, unverified)
+	 *   soft     → DOUBLE ring (solid-muted + a distinct second hairline) — never the
+	 *              single solid verified ring; this is what separates violet from blue
+	 *              when hue cannot.
+	 *   verified → single SOLID ring + the strongest glow (signed authority)
+	 *   denied   → solid + pulse + a ✕ glyph in the corner
+	 * Defaults to the read treatment; each state overrides below.
+	 */
+	--glyphspek-halo-border-style: solid;      /* read = solid thin */
+	--glyphspek-halo-width: 1.5px;
+	/* The SOFT "double ring": an extra inset hairline drawn via box-shadow. Off by
+	   default (transparent); only the soft state turns it on, giving violet a ring
+	   STRUCTURE the single-ring verified blue never has. */
+	--glyphspek-halo-double: 0 0 0 0 transparent;
 }
 
-/* ---- assurance → ring color + glow ---- */
+/* ---- assurance → ring color + glow + SHAPE (the non-color channel) ---- */
 .monaco-workbench[data-glyphspek-authority='read'] {
 	--glyphspek-halo: #8aa0bd;
 	--glyphspek-halo-glow: 0 0 0 rgba(0, 0, 0, 0);
+	--glyphspek-halo-border-style: solid;
 }
 .monaco-workbench[data-glyphspek-authority='claimed'] {
 	--glyphspek-halo: #d9a441;                 /* amber — agent acted, unverified */
 	--glyphspek-halo-glow: 0 0 38px -8px #d9a441;
+	--glyphspek-halo-border-style: dashed;     /* DASHED = self-reported / claimed (§3.4) */
 }
 .monaco-workbench[data-glyphspek-authority='soft'] {
 	--glyphspek-halo: #a98bff;                 /* violet — governed-unsandboxed / SOFT */
 	--glyphspek-halo-glow: 0 0 36px -10px #a98bff;
+	--glyphspek-halo-border-style: solid;      /* solid-MUTED... */
+	--glyphspek-halo-width: 2px;
+	/* ...but DOUBLE: a second inset hairline gives SOFT a ring structure verified-blue
+	   never has, so violet≠blue in grayscale/deuteranopia (the P1-A fix). */
+	--glyphspek-halo-double: inset 0 0 0 4px rgba(7, 10, 15, 0.9), inset 0 0 0 5.5px var(--glyphspek-halo);
 }
 .monaco-workbench[data-glyphspek-authority='verified'] {
 	--glyphspek-halo: #5b9cf0;                 /* blue — verifier signed (signature-verified only) */
 	--glyphspek-halo-glow: 0 0 42px -6px #5b9cf0;
+	--glyphspek-halo-border-style: solid;      /* single SOLID ring + glow = signed authority */
 }
 .monaco-workbench[data-glyphspek-authority='denied'] {
-	--glyphspek-halo: #e0544b;                 /* red — denied / tampered */
-	--glyphspek-halo-glow: 0 0 46px -4px #e0544b;
+	--glyphspek-halo: #ef6a60;                 /* red — denied / tampered (brightened for AA, a11y P1-B) */
+	--glyphspek-halo-glow: 0 0 46px -4px #ef6a60;
 }
 
 /*
@@ -60,13 +89,40 @@
 	inset: 0;
 	z-index: 1000;                             /* above parts, below modal overlays/notifications */
 	pointer-events: none;                      /* never intercept clicks, drags, or resize sashes */
-	border: 1.5px solid var(--glyphspek-halo);
+	/* Border WIDTH + STYLE are the non-color channel (§3.4): width/style vary per
+	   authority so the ring's SHAPE — not only its hue — encodes the assurance state. */
+	border: var(--glyphspek-halo-width) var(--glyphspek-halo-border-style) var(--glyphspek-halo);
 	border-radius: var(--glyphspek-halo-radius);
 	box-shadow:
 		var(--glyphspek-halo-glow),
+		var(--glyphspek-halo-double),            /* SOFT's extra inset hairline (else transparent) */
 		inset 0 0 0 1px rgba(255, 255, 255, 0.04);
 	/* Calm cross-fade between assurance states (disabled under reduced motion). */
-	transition: border-color 0.5s ease, box-shadow 0.5s ease;
+	transition: border-color 0.5s ease, box-shadow 0.5s ease, border-style 0s;
+}
+
+/*
+ * DENIED ✕ (§3.4, a11y-audit P2-A). Denied must carry a non-color glyph that survives
+ * grayscale/deuteranopia — color + pulse alone do not. The ring's floating-frame
+ * substrate ::before is taken, so the ✕ rides a tiny corner badge drawn on the same
+ * ::after via an inline mask-free text glyph: we repurpose the ring overlay's content
+ * (empty for every other state) to a corner-anchored ✕ ONLY when denied. It is
+ * pointer-events:none (inherited) and never affects layout.
+ */
+.monaco-workbench[data-glyphspek-authority='denied']::after {
+	content: '\2715';                          /* ✕ — the denied non-color mark */
+	color: #fff;
+	font-size: 13px;
+	font-weight: 800;
+	line-height: 1;
+	text-align: center;
+	/* Anchor the glyph to the top-right inside the ring; the border still paints. */
+	display: flex;
+	align-items: flex-start;
+	justify-content: flex-end;
+	padding: 5px 9px;
+	/* A small red chip behind the glyph so it reads on any editor background. */
+	text-shadow: 0 0 3px #000, 0 0 2px var(--glyphspek-halo);
 }
 
 /* `read` is square-edged when not floating (ring hugs the stock workbench edge). */
@@ -113,7 +169,7 @@
 		box-shadow: var(--glyphspek-halo-glow), inset 0 0 0 1px rgba(255, 255, 255, 0.04);
 	}
 	35% {
-		box-shadow: 0 0 64px -2px #e0544b, inset 0 0 0 1px rgba(255, 255, 255, 0.04);
+		box-shadow: 0 0 64px -2px #ef6a60, inset 0 0 0 1px rgba(255, 255, 255, 0.04);
 	}
 }
 

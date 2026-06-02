@@ -86,6 +86,7 @@ const statusBarSegments_1 = require("./statusBarSegments");
 const haloChrome_1 = require("./haloChrome");
 const provenanceGutter_1 = require("./provenanceGutter");
 const governedRunsCardView_1 = require("./governedRunsCardView");
+const surfaces_1 = require("./surfaces");
 /** The file names that make up a run bundle, in load order. */
 const BUNDLE_FILE_NAMES = [
     'trace.jsonl',
@@ -136,6 +137,22 @@ function getGovernedRunsModel() {
     if (!governedRunsModel)
         governedRunsModel = new governedRunsModel_1.GovernedRunsModel();
     return governedRunsModel;
+}
+/**
+ * The honest friction-tier vocabulary (BLENDED-WORKBENCH-SPEC §6). Mirrors the
+ * webview's LADDER_TIERS. Used to validate the `glyphspekTier` message before it
+ * reaches the `glyphspek.tier` context-key so the fork chrome only ever sees a known
+ * tier. FRICTION axis only — orthogonal to the assurance vocabulary.
+ */
+const FRICTION_TIERS = new Set([
+    'ask',
+    'inline',
+    'governed',
+    'sensitive',
+    'sovereign',
+]);
+function isFrictionTier(value) {
+    return FRICTION_TIERS.has(value);
 }
 /* ================================================================== *
  * RUN STATUS CONTROLLER (Slice 2 — status-bar segments + halo fallback +
@@ -414,6 +431,24 @@ function getGovernedRunsCardView() {
     return governedRunsCardView;
 }
 /**
+ * The RAIL GOVERNANCE-SURFACE registry (Blended Workbench §5.3 / §5.9). One per
+ * extension process. Every nine-surface webview provider is registered into it in
+ * activate(); TrustPanel.postRunEvent fans EVERY raw run/event envelope out to it
+ * (registry.dispatch) alongside the model / status bar / gutter / cards feeds — so
+ * each per-surface reader consumes the IDENTICAL stream the panel does, with no new
+ * supervisor API. The scaffold's stubs ingest a no-op; per-surface readers fold the
+ * stream into evidence (validating it themselves, never rendering a higher assurance
+ * than the stream supplies). Module-scoped so postRunEvent (a TrustPanel method) can
+ * reach it without threading it through every call site.
+ */
+let governanceSurfaceRegistry;
+function getGovernanceSurfaceRegistry() {
+    if (!governanceSurfaceRegistry) {
+        governanceSurfaceRegistry = new surfaces_1.GovernanceSurfaceRegistry();
+    }
+    return governanceSurfaceRegistry;
+}
+/**
  * The AGENT VIEW snapshot REVISION (Slice 1, design §2). A monotonic counter bumped
  * on every run-set change AND on every webview signature confirmation — the two
  * facts the workbench Agent View renders (a row appearing/updating, and an
@@ -667,6 +702,23 @@ class TrustPanel {
                     // 'verified' itself — this is its only door to green, exactly as the status
                     // bar reads it and the gutter reads blue.
                     getGovernedRunsCardView()?.confirmVerified(msg.runId, msg.authority === 'verified');
+                }
+            }
+            else if (msg.type === 'glyphspekTier') {
+                // FRICTION-TIER PUBLISH (Blended Workbench Phase 1, §A). The panel's
+                // Authority Ladder is a VIEW control; the webview posts the effective
+                // friction tier (ask | inline | governed | sensitive | sovereign) here so
+                // the FORK chrome can react to it — e.g. recede the center editor at Ask
+                // (glyphspekTierChrome). We mirror it to the `glyphspek.tier` context-key,
+                // exactly as the authority context-key is plumbed.
+                //
+                // ORTHOGONAL + VIEW-ONLY: this is the FRICTION axis only. It carries NO
+                // assurance, NEVER touches `glyphspek.authority` (the halo), and grants
+                // NOTHING — receding the editor REDUCES perceived authority, it adds no
+                // friction and confers no trust. The promote modal (glyphspekPromote)
+                // remains the only authority door. This can only come from our own webview.
+                if (typeof msg.tier === 'string' && isFrictionTier(msg.tier)) {
+                    this.applyTierContextKey(msg.tier);
                 }
             }
             else if (msg.type === 'startTrustedRun') {
@@ -945,8 +997,28 @@ class TrustPanel {
         const column = vscode.window.activeTextEditor?.viewColumn ?? vscode.ViewColumn.One;
         this.panel.reveal(column);
     }
+    /**
+     * Mirror the friction tier to the `glyphspek.tier` context-key (Phase 1 §A),
+     * de-duplicated. The FORK chrome (glyphspekTierChrome) reads this key to recede the
+     * center editor at Ask. View-only — it confers no authority and never touches the
+     * orthogonal `glyphspek.authority` (assurance / halo) key.
+     */
+    applyTierContextKey(tier) {
+        if (tier === this.lastTier) {
+            return;
+        }
+        this.lastTier = tier;
+        void vscode.commands.executeCommand('setContext', 'glyphspek.tier', tier);
+    }
     dispose() {
         TrustPanel.current = undefined;
+        // Clear the friction-tier context-key so the fork chrome returns to its neutral
+        // (non-receded) state when no Trust Panel is driving the friction axis. The
+        // orthogonal authority key is owned by RunStatusController, untouched here.
+        if (this.lastTier !== undefined) {
+            this.lastTier = undefined;
+            void vscode.commands.executeCommand('setContext', 'glyphspek.tier', undefined);
+        }
         while (this.disposables.length) {
             this.disposables.pop()?.dispose();
         }
@@ -1031,6 +1103,14 @@ class TrustPanel {
         // webview-verified run's covered hunks). It does its own validate-then-fold and
         // ignores malformed input, so this never paints from a foreign/malformed event.
         getProvenanceGutterController()?.notify(rawEvent);
+        // Feed the RAIL GOVERNANCE SURFACES (Slice 4, §5.3/§5.9) from the SAME stream so
+        // each registered per-surface reader (trace / policy / verifier / egress / model-
+        // calls / workspace / search / settings / actor) sees the IDENTICAL raw envelope
+        // the panel / model / status bar / gutter / cards see. The registry only fans out
+        // (isolating a misbehaving surface); each surface validates + folds at its own
+        // altitude and never renders a higher assurance than the stream supplies. The
+        // scaffold's stubs ingest a no-op, so this is inert until per-surface readers land.
+        getGovernanceSurfaceRegistry().dispatch(rawEvent);
         const validation = (0, runEventProtocol_1.validateRunEvent)(rawEvent);
         if (!validation.ok) {
             // SCHEMA-VERSION MISMATCH (sweep-19 Medium #6 — FAIL CLOSED). A `rev` problem
@@ -1907,56 +1987,64 @@ function activate(context) {
             governedRunsCardView = undefined;
         },
     });
-    // RAIL GOVERNANCE-SURFACE containers (Slice 4, §5.3 / §1.11). Each governance icon in
-    // the rail is its own activity-bar view container (package.json viewsContainers). The
-    // Runs surface is fully built (the cards above); Trace/Policy/Verifier/Egress/Model-
-    // Calls/Workspace/Search are registered with an EMPTY tree provider so their declared
-    // viewsWelcome (an honest, clearly-labeled placeholder pointing at the Trust Panel
-    // where that evidence renders today) shows — the icons are live, not dead, and full
-    // per-surface detail is a deliberate follow-on (§1.11). NOTE: making the rail
-    // governance-ONLY (hiding the stock Explorer/Extensions icons) is a FORK tweak — an
-    // extension cannot hide stock containers — deferred to the integration fork build.
+    // RAIL GOVERNANCE-SURFACE READERS (Slice 4, §5.3 / §5.9). Each governance icon in the
+    // rail is its own activity-bar view container (package.json viewsContainers). The Runs
+    // surface is fully built (the cards above); the other NINE surfaces (trace · policy ·
+    // verifier · egress · model-calls · workspace · search · settings · actor) are now real
+    // WEBVIEW VIEWS backed by per-surface stub providers under src/surfaces/. The stubs
+    // render an HONEST "<surface> — coming online" placeholder (no fabricated trust data)
+    // and implement the GovernanceSurfaceProvider SEAM: each is registered into the shared
+    // GovernanceSurfaceRegistry, which TrustPanel.postRunEvent fans EVERY raw run/event
+    // envelope out to — so a per-surface reader consumes the IDENTICAL stream the panel /
+    // model / status bar / gutter / cards consume, with no new supervisor API. Per-surface
+    // readers replace each stub's render in its own file (naming convention in
+    // surfaceViewBase.ts). NOTE: making the rail governance-ONLY (hiding the stock
+    // Explorer/Extensions icons) is a FORK tweak — an extension cannot hide stock containers
+    // — deferred to the integration fork build.
     //
-    // ROBUST REGISTRATION (defense-in-depth): createTreeView THROWS if a view id is not yet
-    // registered in the manifest. After adding a NEW activity-bar container, the host only
-    // fully registers it on a FULL RELAUNCH — a Reload Window can leave the just-added
-    // container un-registered, so createTreeView for it throws. We wrap each call in its own
-    // try/catch: a successfully-created view still registers, a not-yet-registered one is
-    // skipped (logged, not surfaced) so activate() never throws out / pops a "No view is
-    // registered with id: …" notification. The user picks up the new surfaces on next FULL
-    // relaunch; this guard covers the reload-window window. (The views ARE declared in
-    // package.json — this is purely defensive registration, not a removal.)
-    const SURFACE_VIEW_IDS = [
-        'glyphspek.surface.trace',
-        'glyphspek.surface.policy',
-        'glyphspek.surface.verifier',
-        'glyphspek.surface.egress',
-        'glyphspek.surface.modelcalls',
-        'glyphspek.surface.workspace',
-        'glyphspek.surface.search',
-    ];
-    const emptySurfaceProvider = {
-        getTreeItem: (e) => e,
-        getChildren: () => [],
-    };
+    // ROBUST REGISTRATION (defense-in-depth): registerWebviewViewProvider does NOT throw on
+    // an as-yet-unregistered view id (it resolves lazily when the view is first shown), so a
+    // newly-added activity-bar container simply resolves its provider on next show / full
+    // relaunch. We STILL wrap each surface registration in a per-id try/catch (below) so that
+    // any single failing registration is isolated and never aborts activate() or the other
+    // surfaces. We log the registered set for diagnostics.
     const surfaceOutput = vscode.window.createOutputChannel('GlyphSpek');
     context.subscriptions.push(surfaceOutput);
-    for (const id of SURFACE_VIEW_IDS) {
+    const surfaceRegistry = getGovernanceSurfaceRegistry();
+    const surfaceProviders = [
+        new surfaces_1.TraceSurfaceViewProvider(context.extensionUri),
+        new surfaces_1.PolicySurfaceViewProvider(context.extensionUri),
+        new surfaces_1.VerifierSurfaceViewProvider(context.extensionUri),
+        new surfaces_1.EgressSurfaceViewProvider(context.extensionUri),
+        new surfaces_1.ModelCallsSurfaceViewProvider(context.extensionUri),
+        new surfaces_1.WorkspaceSurfaceViewProvider(context.extensionUri),
+        new surfaces_1.SearchSurfaceViewProvider(context.extensionUri),
+        new surfaces_1.SettingsSurfaceViewProvider(context.extensionUri),
+        new surfaces_1.ActorSurfaceViewProvider(context.extensionUri),
+    ];
+    for (const provider of surfaceProviders) {
+        // Per-surface try/catch (defense-in-depth): registerWebviewViewProvider does not throw
+        // on an as-yet-unregistered manifest id (it resolves lazily on first show), but should
+        // any single surface registration fail, isolate it so the OTHER surfaces (and the rest
+        // of activate()) still come up — graceful degradation, never an aborted activation.
         try {
-            context.subscriptions.push(vscode.window.createTreeView(id, {
-                treeDataProvider: emptySurfaceProvider,
-                showCollapseAll: false,
+            // (a) Register the webview view provider for the surface's package.json view id.
+            context.subscriptions.push(vscode.window.registerWebviewViewProvider(provider.surfaceId, provider, {
+                webviewOptions: { retainContextWhenHidden: true },
             }));
+            // (b) Register the SAME provider into the run/event fan-out registry so it sees the
+            //     shared stream (postRunEvent → registry.dispatch → provider.ingestRunEvent).
+            surfaceRegistry.register(provider);
+            // (c) Dispose the provider's webview state on deactivate.
+            context.subscriptions.push({ dispose: () => provider.dispose() });
         }
         catch (err) {
-            // Not-yet-registered (e.g. after a Reload Window that didn't pick up a newly-added
-            // activity-bar container) — skip it silently and CONTINUE; it registers on next
-            // FULL relaunch. Never let this throw out of activate() / surface a notification.
-            const message = String(err?.message ?? err);
-            surfaceOutput.appendLine(`[host] surface view "${id}" not registered yet (${message}); skipping — it registers on a full relaunch.`);
-            console.warn(`[glyphspek] skipping un-registered surface view "${id}": ${message}`);
+            surfaceOutput.appendLine(`[host] surface ${provider.surfaceId} failed to register (skipped): ${err instanceof Error ? err.message : String(err)}`);
         }
     }
+    surfaceOutput.appendLine(`[host] registered ${surfaceProviders.length} rail governance surfaces: ${surfaceRegistry
+        .surfaceIds()
+        .join(', ')}`);
     // ACTIVITY-BAR "Chat" view (the SIDEBAR "chat that's a terminal"). A webview-view
     // hosting an xterm.js terminal connected to a real PTY running the user's
     // interactive `claude`, governed. Reuses the entire governed stack (bridge session,
@@ -3253,5 +3341,9 @@ function deactivate() {
         provenanceGutterController.dispose();
         provenanceGutterController = undefined;
     }
+    // Drop the rail governance-surface registry (Slice 4). Each surface provider's own
+    // webview dispose was pushed into context.subscriptions; clearing the singleton lets
+    // a re-activate in the same process build a fresh, empty registry.
+    governanceSurfaceRegistry = undefined;
 }
 //# sourceMappingURL=extension.js.map

@@ -122,6 +122,113 @@
     emptyErrEl.hidden = false;
   }
 
+  /*
+   * ───────────────────────────────────────────────────────────────────────────
+   * INLINE BROKER-VERDICT CHIPS (spec §5.6). When the HOST delivers a REAL broker
+   * `decide()` verdict for a governed command ({type:'brokerVerdict', verdict, ...}),
+   * we pin an inline `.brk` chip to the command's terminal line using xterm's
+   * marker + decoration API, with the non-color redundancy required by §3.4 (text
+   * label + glyph + fill/border shape). HONESTY: this fires ONLY on a host message —
+   * the webview never parses the raw PTY stream to guess commands or fabricate an
+   * `allow`. No message → no chip.
+   * ───────────────────────────────────────────────────────────────────────────
+   */
+
+  // Verdict → { glyph, label }. The ✕ on deny is spec-called-out (§3.4); ✓/?? give
+  // allow/ask their own non-color glyphs so grayscale/deuteranopia still reads them.
+  const VERDICT_META = {
+    allow: { glyph: '✓', label: 'ALLOW' }, // ✓
+    ask: { glyph: '?', label: 'ASK' },
+    deny: { glyph: '✕', label: 'DENY' }, // ✕
+  };
+
+  function buildChipEl(chip) {
+    const meta = VERDICT_META[chip.verdict];
+    if (!meta) return null; // unknown verdict → render nothing (honest)
+    const el = document.createElement('span');
+    el.className = 'brk ' + chip.verdict;
+    el.setAttribute('role', 'status');
+
+    const glyph = document.createElement('span');
+    glyph.className = 'brk-glyph';
+    glyph.setAttribute('aria-hidden', 'true');
+    glyph.textContent = meta.glyph;
+
+    const label = document.createElement('span');
+    label.className = 'brk-label';
+    label.textContent = meta.label;
+
+    el.appendChild(glyph);
+    el.appendChild(label);
+
+    // Exit code (context only) when the command has finished — never fabricated.
+    if (typeof chip.exitCode === 'number') {
+      const exit = document.createElement('span');
+      exit.className = 'brk-exit';
+      exit.textContent = 'exit ' + chip.exitCode;
+      el.appendChild(exit);
+    }
+
+    // Accessible + hover description. `command` is host-redacted before it reaches us.
+    const desc =
+      'Broker verdict: ' +
+      meta.label +
+      (typeof chip.exitCode === 'number' ? ' (exit ' + chip.exitCode + ')' : '') +
+      (chip.command ? ' — ' + chip.command : '');
+    el.title = desc;
+    el.setAttribute('aria-label', desc);
+    return el;
+  }
+
+  function renderBrokerVerdict(chip) {
+    if (!chip || !VERDICT_META[chip.verdict] || !term) return;
+
+    // Anchor a marker to the current line so the chip pins to the command, not a
+    // detached log. registerMarker/registerDecoration are the vendored xterm APIs.
+    let decoration = null;
+    try {
+      const marker = term.registerMarker(0);
+      if (marker && typeof term.registerDecoration === 'function') {
+        decoration = term.registerDecoration({ marker });
+      }
+    } catch (_e) {
+      /* decoration API unavailable on this build: fall through to no chip */
+    }
+
+    const denyCue = () => {
+      // A denied command must be FELT (§5.6) — a brief frame pulse + chip flash.
+      // CSS disables the animation under prefers-reduced-motion; the static red
+      // border/fill + ✕ + DENY label still carry the state there.
+      if (chip.verdict !== 'deny') return;
+      termWrap.classList.remove('deny-pulse');
+      // reflow so re-adding the class restarts the animation
+      void termWrap.offsetWidth;
+      termWrap.classList.add('deny-pulse');
+      window.setTimeout(() => termWrap.classList.remove('deny-pulse'), 700);
+    };
+
+    if (decoration && typeof decoration.onRender === 'function') {
+      // xterm calls onRender with the cell element backing the decoration; we mount
+      // the chip into it once and flash deny on first render.
+      let mounted = false;
+      decoration.onRender((cellEl) => {
+        if (mounted || !cellEl) return;
+        const chipEl = buildChipEl(chip);
+        if (!chipEl) return;
+        cellEl.style.position = cellEl.style.position || 'relative';
+        cellEl.style.zIndex = '5';
+        cellEl.appendChild(chipEl);
+        if (chip.verdict === 'deny') chipEl.classList.add('flash');
+        mounted = true;
+        denyCue();
+      });
+    } else {
+      // Decoration API unavailable: still honor the deny cue at the frame level so a
+      // denial is never silent, even if the per-line chip could not anchor.
+      denyCue();
+    }
+  }
+
   startBtn.addEventListener('click', () => {
     if (started) return;
     started = true;
@@ -143,6 +250,12 @@
       case 'output':
         ensureTerminal();
         if (typeof msg.data === 'string') term.write(msg.data);
+        break;
+      case 'brokerVerdict':
+        // A REAL broker decide() verdict from the host (spec §5.6). Render the inline
+        // chip pinned to the command line. Never synthesized — only on this message.
+        ensureTerminal();
+        renderBrokerVerdict(msg);
         break;
       case 'exited':
         if (term) {

@@ -148,10 +148,13 @@ fi
 echo
 
 # ---- (3) dist/ built .js file set -------------------------------------------
-# The embedded copy ships .js only (no .map). Compare the .js basenames.
+# The embedded copy ships .js only (no .map). Compare the .js set RECURSIVELY (by
+# path relative to dist/, so subdirs like dist/surfaces/ are included) — a flat
+# `ls -1 *.js` silently ignored the dist/surfaces/ subfolder and let a missing
+# module (the rail governance-surface providers) slip through.
 if [ -d "$SOURCE/dist" ] && [ -d "$EMBEDDED/dist" ]; then
-	SRC_DIST="$(cd "$SOURCE/dist" && ls -1 *.js 2>/dev/null | sort)"
-	EMB_DIST="$(cd "$EMBEDDED/dist" && ls -1 *.js 2>/dev/null | sort)"
+	SRC_DIST="$(cd "$SOURCE/dist" && find . -type f -name '*.js' ! -name '*.map' | sed 's|^\./||' | sort)"
+	EMB_DIST="$(cd "$EMBEDDED/dist" && find . -type f -name '*.js' ! -name '*.map' | sed 's|^\./||' | sort)"
 	compare_set "dist/ .js file set" "$SRC_DIST" "$EMB_DIST"
 else
 	echo "FAIL: dist/ directory missing (source: $SOURCE/dist, embedded: $EMBEDDED/dist)"

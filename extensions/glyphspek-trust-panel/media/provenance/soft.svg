@@ -1,1 +1,4 @@
-<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 16 16"><rect x="1" y="0" width="3" height="16" rx="1.5" fill="#a98bff"/></svg>
+<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 16 16"><!-- soft/violet (§3.4: solid-muted + a DISTINCT mark). HOLLOW (outlined) bar — a ring
+     STRUCTURE, never the solid fill of verified-blue. This is the honesty-critical P1-A
+     separator: under deuteranopia violet≈blue by hue, so soft is HOLLOW and verified is
+     SOLID — distinguishable in grayscale without relying on color. --><rect x="1" y="0.75" width="3" height="14.5" rx="1.5" fill="none" stroke="#a98bff" stroke-width="1"/><rect x="2" y="6.5" width="1" height="3" rx="0.5" fill="#a98bff"/></svg>

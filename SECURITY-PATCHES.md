@@ -1189,3 +1189,133 @@ removable from any extension.
 - **Rollback:** remove the early-return guard in `update()`. The Copilot status indicator returns.
 - **Rebase risk: LOW.** A single guard in one method; if upstream restructures the status entry,
   re-apply the "no `defaultChatAgent` → don't render" guard.
+
+---
+
+## PATCH-008 — Friction-tier editor recede at Ask (product look; reads a context-key, paints chrome)
+
+- **Status:** `APPLIED` (2026-06-02).
+- **Type:** **UX / product-look patch.** Threat addressed = **N/A**. This is the **friction-axis**
+  sibling of the Authority Halo (PATCH-003): where the halo paints the *assurance* axis as a
+  whole-frame ring, this paints the *friction* axis (the five-rung Authority Ladder tier from
+  `design/ide-concept/BLENDED-WORKBENCH-SPEC.md` §5.5.1/§6) by receding the center editor at the
+  **Ask** tier. It is recorded here because it is a `src/vs/**` workbench diff and the ledger policy
+  requires **every** workbench diff be logged — but it is **not** a security patch: it only **reads**
+  an existing context-key and **paints chrome**. It cannot change trust state, grant authority, mint
+  a verdict, or imply assurance. Receding the editor *reduces* perceived authority (Ask should feel
+  light); it adds no friction and confers no trust.
+
+### What it does
+
+At the **Ask** friction tier the center editor area *recedes* per §5.5.1 — grayscale + reduced
+opacity + a subtle translucent scrim — so the lowest authority tier *feels* genuinely light. The
+other four tiers leave the editor fully legible. Entering/leaving the receded state cross-fades over
+`0.5s` (matching the halo).
+
+| `glyphspek.tier` | Editor area |
+|---|---|
+| `ask` | recede: `grayscale(0.4) brightness(0.9)` + `opacity 0.62` + translucent scrim |
+| `inline` / `governed` (default) / `sensitive` / `sovereign` | normal (no recede) |
+
+### Mechanism (read-only — it consumes the tier, it does not derive it)
+
+A workbench contribution (`GlyphSpekTierChromeContribution`) observes the `glyphspek.tier`
+**context-key** the GlyphSpek first-party extension sets on every effective-tier change
+(`extension/src/extension.ts` `setContext('glyphspek.tier', <tier>)`; values
+`ask|inline|governed|sensitive|sovereign`; the Trust Panel webview posts `glyphspekTier` →
+`media/live.js` `postTier`). It mirrors that value to a `data-glyphspek-tier` attribute on the
+`.monaco-workbench` root (`IWorkbenchLayoutService.mainContainer`); companion CSS keys the editor
+recede off that attribute, scoped to `.part.editor` only. An unknown/unset key resolves to the
+neutral `governed` default (no recede). The contribution **never** decides anything — it reflects
+exactly the friction tier the extension's VIEW control published. The promote modal
+(`glyphspekPromote`) remains the only authority door; this patch publishes a view cue, not a grant.
+
+### Orthogonality (the two-axis honesty invariant)
+
+This patch is the **friction** axis; the halo (PATCH-003) is the **assurance** axis (§2.1). They are
+kept in separate files and separate context-keys: this contribution **never** reads or writes
+`glyphspek.authority`, and the halo never reads `glyphspek.tier`. The recede CSS touches only
+`.part.editor`; the halo CSS touches only the frame `::after` ring. Neither can change the other's
+state. The only shared element is the reduce-motion class (see Accessibility), which the halo owns
+and this patch only consumes in CSS.
+
+### Why an extension cannot do it
+
+The editor part chrome (`.part.editor`) is workbench layout, not reachable by any extension surface —
+a webview is confined to its own rect and cannot desaturate / dim / scrim the host editor area or
+key off a workbench-root attribute. Receding the center editor requires workbench-level DOM, hence
+the fork.
+
+### Layout safety (verified — the non-layout decision, mirrors PATCH-003)
+
+The recede is **paint-only**: a `filter` + `opacity` on `.part.editor` plus a non-layout,
+`pointer-events: none` `::after` scrim (`position: absolute; inset: 0`). `filter`/`opacity` do not
+change the part's box, and the scrim adds nothing to the layout — so the workbench grid, sash
+hit-testing, split layouts, full-screen, zoom, and the title-bar drag region are all unaffected, and
+the scrim is **click-through**. We deliberately do **not** put `pointer-events: none` on the part
+itself: the user must still be able to click into the editor while asking, and must always be able
+to click a ladder rung / promote / leave Ask — the cue is visual, never an interaction trap. Scope is
+strictly `.part.editor`; the title bar, activity bar/rail, side bar, panel, status bar, and the
+GlyphSpek Trust Panel webview all stay fully legible at Ask (the ladder + the Ask affordance must
+remain bright).
+
+### Accessibility
+
+Honors **both** the OS `prefers-reduced-motion` (CSS media query) **and** the shared
+`glyphspek-halo-reduce-motion` class the Authority Halo contribution toggles from the
+`glyphspek.workbench.haloMotion` setting: either drops the `0.5s` cross-fade and keeps the **static**
+receded state. The recede is never the sole carrier of the friction state — the extension's Trust
+Panel ladder + the `#friction-note` text already name the tier out-of-band.
+
+### Setting
+
+- `glyphspek.workbench.askEditorRecede` (`boolean`, default **ON**, `APPLICATION` scope). When OFF
+  the contribution adds a `glyphspek-tier-recede-off` opt-out class the CSS uses to suppress the
+  recede; the `data-glyphspek-tier` attribute still reflects the friction axis for any future cue.
+  Registered under the same `glyphspek` configuration id as the halo's `glyphspek.workbench.*`
+  settings so they group in the Settings UI.
+
+### Changed files
+
+- `src/vs/workbench/browser/parts/glyphspekTierChrome.ts` — **new** contribution
+  (`GlyphSpekTierChromeContribution`, registered `registerWorkbenchContribution2` @
+  `WorkbenchPhase.AfterRestored`) + the `glyphspek.workbench.askEditorRecede` setting registration.
+- `src/vs/workbench/browser/parts/media/glyphspekTierChrome.css` — **new** the editor-recede
+  (`.part.editor` grayscale/opacity + click-through scrim), `0.5s` cross-fade, reduced-motion rules.
+- `src/vs/workbench/workbench.common.main.ts` — one import line wiring the contribution in.
+- (Extension side, not a fork diff:) `extension/src/extension.ts` mirrors the webview's
+  `glyphspekTier` message to `setContext('glyphspek.tier', …)`; `extension/media/live.js` posts the
+  effective tier via `postTier`.
+
+### Acceptance test
+
+1. Launch the rebuilt app. With no Trust Panel driving the friction axis the editor is normal (the
+   key resolves to the `governed` default — no recede).
+2. Open the GlyphSpek Trust Panel and slide the Authority Ladder to **Ask** (or focus a run whose
+   reflected tier is Ask): the center editor desaturates + dims behind a subtle scrim over a calm
+   `0.5s` cross-fade. The title bar, rail, side bar, status bar, and the Trust Panel stay bright.
+3. Slide back to **Inline / Governed / Sensitive / Sovereign**: the editor cross-fades back to fully
+   legible with the same timing.
+4. With OS "reduce motion" on **or** `glyphspek.workbench.haloMotion: false`, no cross-fade — the
+   static receded state remains at Ask.
+5. Toggle `glyphspek.workbench.askEditorRecede: false` — the editor stays fully legible at Ask (the
+   cue is suppressed); the friction tier still tracks on the attribute.
+6. **Layout regression:** at Ask, click into the editor (it still focuses/edits), resize
+   editor/terminal/panel splits, toggle full-screen, zoom, drag the title bar — all behave exactly as
+   stock (the recede is paint-only + the scrim is click-through).
+7. **Orthogonality:** changing the tier never changes the halo ring color, and changing a run's
+   assurance never receding/un-receding the editor (separate keys, separate files).
+8. **Honesty:** the receded editor implies no trust state — no verdict, no sandbox/trace/verifier
+   chrome is shown as active by this patch; it is purely the friction cue.
+
+### Rollback / rebase note
+
+- **Rollback:** delete `src/vs/workbench/browser/parts/glyphspekTierChrome.ts` +
+  `…/media/glyphspekTierChrome.css` and remove the one import line in `workbench.common.main.ts`. The
+  `data-glyphspek-tier` attribute and the `glyphspek.workbench.askEditorRecede` setting then
+  disappear; nothing else is touched (the halo, the extension's context-key, and the status bar are
+  independent and unaffected). No data migration.
+- **Rebase risk: LOW.** Additive and self-contained; the only stock touch is one import line in
+  `workbench.common.main.ts` and a dependency on the stable `IWorkbenchLayoutService.mainContainer` +
+  `IContextKeyService.onDidChangeContext` APIs and the `.part.editor` class. If upstream renames
+  `.part.editor` or `.monaco-workbench`/`mainContainer`, re-point the CSS selector / attribute target.

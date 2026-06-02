@@ -51,7 +51,15 @@
   --verdict: #5b9cf0; /* blue = INDEPENDENTLY VERIFIED (brightened from #4b8fe0, §3.2) */
   --verdict-bg: #11202f;
   --pass: #3fb568;
-  --fail: #e0544b;
+  /* red = FAILED / denied / tampered. BRIGHTENED from #e0544b (§14.1 / a11y-audit
+     P1-B): the old value cleared AA text contrast (4.5:1) only down to plane-1
+     (4.07 on plane-2, 3.67 on plane-3 — FAIL). #ef6a60 clears 4.5:1 as TEXT on
+     every plane (substrate 6.51 · plane-0 6.08 · plane-1 5.63 · plane-2 5.08 ·
+     plane-3 4.58) while staying unmistakably red. Used for text, border, AND
+     translucent washes; the solid-fill red pills keep dark #260605 text, whose
+     contrast on the brighter fill IMPROVES (4.99 → 6.21), so the single-token bump
+     is safe everywhere. */
+  --fail: #ef6a60;
   --human: #8aa0bd; /* slate = human-authored / neutral provenance (new) */
   --neutral: #6b7686;
   /* SOFT (graft, §3.2): governed-unsandboxed / lower assurance. Capped — it is the
@@ -1629,11 +1637,33 @@ input[type="file"] {
 }
 
 /*
- * MOTION POLICY (§3.3 / §14): animation is reserved for trust transitions only
- * (the amber→blue verify cross-fade on the halo, the deny-pulse). prefers-reduced-
- * motion (and the implied Settings "reduce motion") disables ALL of it — the static
- * trust color stays, only the motion is removed.
+ * MOTION POLICY (§3.3 / §14.3): animation is reserved for trust transitions only
+ * (the amber→blue verify cross-fade on the halo, the deny-pulse). §14.3 requires BOTH
+ * the OS `prefers-reduced-motion` preference AND an explicit Settings toggle to
+ * disable all trust motion — exactly the dual path the fork's Authority Halo uses
+ * (the OS media query + the `glyphspek-halo-reduce-motion` class driven by
+ * `glyphspek.workbench.haloMotion`).
+ *
+ * The webview mirrors that: the SAME rule list below is shared by two selectors —
+ *   (1) the OS preference, via @media (prefers-reduced-motion: reduce), and
+ *   (2) the Settings toggle, via the `.glyphspek-reduce-motion` class that live.js
+ *       puts on <html> from a host-injected setting (window.GLYPHSPEK_REDUCE_MOTION)
+ *       or a `reduceMotion` host message — the webview-readable analog of the fork's
+ *       haloMotion setting.
+ * Either path removes the deny-pulse + the trust cross-fades; the STATIC trust color
+ * always stays.
  */
+.glyphspek-reduce-motion #live-view .friction-header,
+.glyphspek-reduce-motion .authority-level,
+.glyphspek-reduce-motion .friction-note,
+.glyphspek-reduce-motion .ladder .rung,
+.glyphspek-reduce-motion [data-tier] #live-badges-card,
+.glyphspek-reduce-motion [data-tier] .claims-verdict,
+.glyphspek-reduce-motion [data-tier] #live-view > .card,
+.glyphspek-reduce-motion [data-tier] #live-view .derived-grid {
+  transition: none !important;
+  animation: none !important;
+}
 @media (prefers-reduced-motion: reduce) {
   #live-view .friction-header,
   .authority-level,

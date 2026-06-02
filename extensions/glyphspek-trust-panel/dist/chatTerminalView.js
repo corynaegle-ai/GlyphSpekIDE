@@ -103,6 +103,25 @@ class ChatTerminalViewProvider {
     post(msg) {
         void this.view?.webview.postMessage(msg);
     }
+    /**
+     * Deliver a REAL broker `decide()` verdict for one governed command to the webview,
+     * which renders the inline `.brk` chip (spec §5.6). HONESTY CONTRACT: callers must
+     * only invoke this with an actual broker verdict — there is deliberately no
+     * "default allow" path, so a command with no real verdict simply gets no chip.
+     *
+     * This is the typed seam the host wires to once per-command brokering + bridge→view
+     * event plumbing land (today the chat PTY is boundary-observed and the run/event
+     * stream goes to the Trust Panel; see {@link BrokerVerdictChip} and the report). It
+     * is intentionally additive: nothing calls it yet, so no synthetic chip is produced.
+     */
+    postBrokerVerdict(chip) {
+        if (!chip || (chip.verdict !== 'allow' && chip.verdict !== 'ask' && chip.verdict !== 'deny')) {
+            // Refuse to forward a malformed/absent verdict — a missing chip is honest;
+            // a fabricated one is not.
+            return;
+        }
+        this.post({ type: 'brokerVerdict', ...chip });
+    }
     onMessage(msg) {
         if (!msg || typeof msg !== 'object')
             return;
