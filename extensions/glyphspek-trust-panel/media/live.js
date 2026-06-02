@@ -606,6 +606,12 @@
   // e.g. recede the editor at Ask). De-duplicated like the authority post. This is
   // the FRICTION axis only; it NEVER carries or implies assurance (data-authority).
   var lastPostedTier = null;
+  // PATCH-009 loop-breaker: when TRUE, postTier() is suppressed. Set while applying a
+  // tier the HOST pushed (from a native title-bar ladder click) so syncing the webview
+  // ladder does NOT echo `glyphspekTier` straight back to the host — the host already
+  // set the context-key. The native ladder reads the key; the webview reads the host
+  // push. One source, no round-trip.
+  var applyingHostTier = false;
 
   /**
    * Apply the derived axes to the live-view root + populate the friction surface.
@@ -769,10 +775,32 @@
    */
   function postTier(tier) {
     if (LADDER_TIERS.indexOf(tier) === -1) return;
+    // Loop-breaker (PATCH-009): suppress the echo while applying a host-pushed tier
+    // (a native title-bar ladder click). The host already set the context-key; echoing
+    // would be a redundant round-trip. Still record lastPostedTier so a later genuine
+    // webview-originated change to a DIFFERENT tier still posts.
+    if (applyingHostTier) { lastPostedTier = tier; return; }
     if (tier === lastPostedTier) return;
     lastPostedTier = tier;
     if (typeof window !== 'undefined' && typeof window.GLYPHSPEK_POST === 'function') {
       window.GLYPHSPEK_POST({ type: 'glyphspekTier', tier: tier });
+    }
+  }
+
+  /**
+   * Apply a friction tier the HOST pushed (PATCH-009) — from a NATIVE title-bar
+   * Authority Ladder rung click. Syncs the webview ladder via the SAME setViewTier path
+   * the webview's own rungs use, but suppresses the `glyphspekTier` echo so there is no
+   * host↔webview loop (the host already set the context-key the native ladder reads).
+   * VIEW-ONLY — confers no authority, never touches data-authority.
+   */
+  function applyHostTier(tier) {
+    if (LADDER_TIERS.indexOf(tier) === -1) return;
+    applyingHostTier = true;
+    try {
+      setViewTier(tier);
+    } finally {
+      applyingHostTier = false;
     }
   }
 
@@ -1884,6 +1912,13 @@
         // evidence object (real backend or the preview fixture). View-only: render
         // the compact evidence + the accept/reject/request-changes controls.
         renderAgenticBuildReview(msg.review, { preview: !!msg.preview });
+      } else if (msg.type === 'setTier' && typeof msg.tier === 'string') {
+        // FRICTION-TIER SYNC (PATCH-009). The host pushes the effective tier after a
+        // NATIVE title-bar Authority Ladder rung click so the webview ladder reflects
+        // it. Applied WITHOUT echoing `glyphspekTier` back (applyHostTier suppresses the
+        // post) — the host already set the context-key. VIEW-ONLY: confers no authority,
+        // never touches data-authority (the assurance axis / halo).
+        applyHostTier(msg.tier);
       }
     });
 
@@ -2008,6 +2043,10 @@
       // assert the de-duplicated `glyphspekTier` post on the REAL panel code. The
       // host mirrors it to the `glyphspek.tier` context-key the fork chrome reads.
       postTier: postTier,
+      // FRICTION-TIER SYNC (PATCH-009) — exposed so a test can assert that a host-
+      // pushed tier (native title-bar ladder click) syncs the webview ladder WITHOUT
+      // echoing `glyphspekTier` back (the loop-breaker), on the REAL panel code.
+      applyHostTier: applyHostTier,
       // AGENTIC BUILD REVIEW (Phase B) — exposed for the renderer/parser tests
       // (test/agenticBuildReview.test.mjs) so the diff parser, the honest verdict
       // badge, and the full render are asserted on the REAL panel code.

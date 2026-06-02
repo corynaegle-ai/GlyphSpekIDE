@@ -58,6 +58,7 @@ import './browser/parts/statusbar/statusbarPart.js';
 import './browser/parts/titlebar/menubar.contribution.js';
 import './browser/parts/glyphspekAuthorityHalo.js'; // GlyphSpek PATCH-003: whole-frame Authority Halo ring (assurance axis)
 import './browser/parts/glyphspekTierChrome.js'; // GlyphSpek PATCH-008: friction-tier editor recede (Ask) — orthogonal friction axis
+import './browser/parts/glyphspekTitleLadder.js'; // GlyphSpek PATCH-009: title-bar Authority Ladder (friction axis, canonical control)
 
 //#endregion
 

@@ -123,8 +123,19 @@ export class DecorationsOverlay extends DynamicViewOverlay {
 				continue;
 			}
 
+			// GlyphSpek (Blended Workbench §5.5): tag whole-line decoration divs with a
+			// stable structural class `cdr-wl`. A whole-line decoration is a per-row
+			// background plane (the provenance trust tint, findMatch row fill, etc.) and
+			// previously shared the bare `.cdr` rules with column-scoped decorations,
+			// which left its compositing against the current-line highlight, selection,
+			// and the (experimental) GPU glyph canvas undefined — so a calm, low-alpha
+			// row tint washed out on the caret's line and could be occluded under GPU
+			// rendering. The `cdr-wl` hook lets `decorations.css` give whole-line
+			// backgrounds a deterministic, beneath-text stacking + a reduced-motion-aware
+			// background transition (the amber→blue verify flip / tamper revert), without
+			// changing any decoration DATA — the extension still drives the color/alpha.
 			const decorationOutput = (
-				'<div class="cdr '
+				'<div class="cdr cdr-wl '
 				+ d.options.className
 				+ '" style="left:0;width:100%;"></div>'
 			);

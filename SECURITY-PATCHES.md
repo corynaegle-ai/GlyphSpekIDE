@@ -1319,3 +1319,82 @@ Panel ladder + the `#friction-note` text already name the tier out-of-band.
   `workbench.common.main.ts` and a dependency on the stable `IWorkbenchLayoutService.mainContainer` +
   `IContextKeyService.onDidChangeContext` APIs and the `.part.editor` class. If upstream renames
   `.part.editor` or `.monaco-workbench`/`mainContainer`, re-point the CSS selector / attribute target.
+
+---
+
+## PATCH-009 — Title-bar Authority Ladder (product look; reads two context-keys, invokes a command, paints chrome)
+
+- **Status:** `APPLIED` (2026-06-02).
+- **Type:** **UX / product-look patch.** Threat addressed = **N/A**. The title-bar member of the GlyphSpek chrome trio: the Authority Halo (PATCH-003) paints the *assurance* ring, the Tier Chrome (PATCH-008) recedes the editor at Ask, and this promotes the five-rung **friction** Authority Ladder (`design/ide-concept/BLENDED-WORKBENCH-SPEC.md` §5.2.2/§6) out of the Trust Panel webview into the title bar as the canonical friction control. Recorded here because it is a `src/vs/**` workbench diff (ledger policy logs every workbench diff) — but it is **not** a security patch: it only **reads** two existing context-keys, **invokes** a command, and **paints chrome**. It cannot change trust state, grant authority, mint a verdict, or imply assurance.
+
+### What it does
+Adds a native title-bar widget in `.titlebar-center`: an actor-mini chip, a five-rung radiogroup (`ask · inline · governed · sensitive · sovereign`), and a level chip. The active rung is driven by the `glyphspek.tier` context-key; the level chip + active-rung tint borrow the `glyphspek.authority` halo color (tint only) and carry the §3.4 non-color glyph+label. Clicking/keying a rung invokes the `glyphspek.setTier` command (view-only friction change). Behind `glyphspek.workbench.titleLadder` (default ON).
+
+### Mechanism (read two keys, invoke one command — it does not derive or write trust)
+A workbench contribution (`GlyphSpekTitleLadderContribution`, `registerWorkbenchContribution2` @ `AfterRestored`) mounts the widget into the title-bar part's `.titlebar-center` (`IWorkbenchLayoutService.getContainer(mainWindow, Parts.TITLEBAR_PART)`), re-mounting idempotently on title-bar visibility changes + self-healing if the center is recreated. It READS `glyphspek.tier` (active rung) and `glyphspek.authority` (level chip color/label, tint only) via `onDidChangeContext`. On a rung click it INVOKES `glyphspek.setTier` via `ICommandService` — it NEVER writes a context-key. The extension's `glyphspek.setTier` command is the single writer of `glyphspek.tier` (via a `TierController`), which also syncs the Trust Panel webview ladder. One source, two views.
+
+### Orthogonality (the two-axis honesty invariant)
+This is the **friction** axis; the halo (PATCH-003) is the **assurance** axis (§2.1). The widget never reads or writes `glyphspek.authority` except to borrow its color for tint, and never sets assurance from the tier. The promote modal remains the only authority door (§6/§2.4 "tier is enforced authority, not a UI hint" — the ladder reflects a grant, it does not confer one).
+
+### Why an extension cannot do it
+The title-bar center region is workbench chrome, not reachable by any extension surface — a webview is confined to its own rect and cannot render into the host title bar or key off a workbench-part container. Hence the fork.
+
+### Layout safety (non-layout)
+The widget lives inside the existing `.titlebar-center` flex region; it adds no part height and changes no JS-computed part dimensions. Rungs are `-webkit-app-region: no-drag` so they are clickable over the title-bar drag region without trapping the drag elsewhere. No `pointer-events` trap. **Non-layout: YES** (it occupies the existing center flex slot only; the title bar height is unchanged).
+
+### Accessibility
+`role=radiogroup`/`radio`, one `aria-checked` + one roving `tabindex=0`, the full keyboard map (arrows/Home/End/Space/Enter), a visible focus ring, the §3.4 non-color glyph+label on the level chip, and reduced-motion honored via both the OS preference and the shared `glyphspek-halo-reduce-motion` class (owned by the halo; consumed here in CSS only).
+
+### Setting
+- `glyphspek.workbench.titleLadder` (`boolean`, default **ON**, `APPLICATION` scope). Registered under the same `glyphspek` config id as the halo/tier-chrome settings so they group.
+
+### Changed files
+- `src/vs/workbench/browser/parts/glyphspekTitleLadder.ts` — **new** contribution + the `glyphspek.workbench.titleLadder` setting.
+- `src/vs/workbench/browser/parts/media/glyphspekTitleLadder.css` — **new** ladder/actor-mini/level-chip styling + assurance→tint map + reduced-motion rules.
+- `src/vs/workbench/workbench.common.main.ts` — one import line wiring the contribution in.
+- (Extension side, not a fork diff:) `extension/src/extension.ts` adds the `glyphspek.setTier` command + a `TierController` (the single `glyphspek.tier` writer) that syncs the webview; `extension/media/live.js` adds the `setTier` receiver (`applyHostTier`, no-echo loop-breaker).
+
+### Acceptance test
+1. Launch the rebuilt app. With no friction driver the ladder shows the `governed` default active; the level chip reads the run's true assurance (or `read · no authority yet`).
+2. Click a title-bar rung (e.g. **Ask**): the active rung moves, the `glyphspek.tier` key flips, the editor recedes (PATCH-008), and — if the Trust Panel is open — its webview ladder moves to the same rung. No authority is granted (no promote modal fires).
+3. With the Trust Panel open, click a rung in the **webview** ladder: the **title-bar** ladder moves to match (via the context-key). No host↔webview loop.
+4. Drive a run to verified-blue: the level chip + active-rung tint go blue with the `✓ verified · signed` label; slide the ladder across tiers — the chip stays blue (the rung never changes assurance).
+5. With OS "reduce motion" on **or** `glyphspek.workbench.haloMotion: false`: rung/chip transitions are static.
+6. Toggle `glyphspek.workbench.titleLadder: false`: the widget is removed from the title bar; the `glyphspek.tier` key still tracks for the editor-recede chrome.
+7. **Layout regression:** the title bar height is unchanged; the window drag region still works around the widget; rungs remain clickable.
+
+### Rollback
+Remove the one import line in `workbench.common.main.ts` and delete `glyphspekTitleLadder.ts` + `glyphspekTitleLadder.css`. The extension's `glyphspek.setTier` command + `TierController` become inert (the webview ladder still drives the tier through the same controller). Fully reversible; no other fork file references it.
+
+---
+
+## PATCH-010 — Whole-line provenance tint plane (Blended Workbench §5.5/§8)
+
+- **Status:** `APPLIED` (2026-06-02).
+- **Type:** **UX / product-look patch (fork editor-internals rendering fix).** Threat addressed = **N/A**. Recorded here because it is a `src/vs/**` (editor) diff (ledger policy logs every workbench/editor diff) — but it is **not** a security patch: it changes **no** provenance DATA, **no** public API, and **no** honesty cap. It only fixes *where* the extension's existing whole-line trust tint sits in the compositing stack so it renders reliably.
+
+### What it does
+Files: `src/vs/editor/browser/viewParts/decorations/decorations.ts`, `src/vs/editor/browser/viewParts/decorations/decorations.css`.
+
+Whole-line (`isWholeLine`) decoration divs are now tagged with a structural `cdr-wl` class and given a dedicated CSS plane: own stacking context (`isolation: isolate`, `z-index:0`) so a low-alpha per-row background composites predictably beneath text and against the current-line highlight / selection / GPU glyph canvas instead of washing out; plus a reduced-motion-aware `background-color` transition for the amber→blue verify flip / tamper revert. CSS/structure only — no decoration DATA, no public API, no honesty-cap change. Makes the GlyphSpek extension's existing per-line provenance trust tint (human/claimed/soft/verified, driven by `extension/src/provenanceGutter.ts`) render reliably.
+
+### Why an extension cannot do it
+A whole-line `backgroundColor` decoration *is* the extension's right data path, but the bare `.cdr` row div had no dedicated, low-priority, beneath-everything plane — its visibility through the line-highlight/selection overlay siblings and the experimental GPU glyph canvas was incidental, at the mercy of theme alpha and render mode. Only an editor-internals change can give that row div a deterministic stacking context; no extension surface can reach the `DecorationsOverlay` row compositing.
+
+### Honesty caps (unchanged — owned by the extension's `ProvenanceModel`)
+- **Verified-blue per line only** where the verifier verdict covered that hunk AND the webview signature gate confirmed it (`confirmVerified`); the host never promotes to blue.
+- **SOFT capped at violet**, never blue (`isSoftCreationTrust`).
+- **File/hunk granularity**, never synthesized per-token.
+- **amber→blue flip in place** on verify; **revert off blue** on tamper / de-authoritative failure — both are model recomputes; the fork only animates the resulting color change.
+- A11y shape channel (soft = hollow/outlined, verified = solid+glow) stays in the gutter SVGs; the row tint is supplementary (0.06 alpha, isolated), never load-bearing.
+
+### Acceptance test
+1. Open a file changed by a governed run → a calm per-row tint behind the text (amber claimed / violet soft) composed with the gutter bar.
+2. Trigger a signature-verified verdict → the amber→blue flip animates in place.
+3. Trigger tamper → revert off blue.
+4. Toggle `editor.experimentalGpuAcceleration: on` → the tint still shows (whole-line backgrounds stay DOM-rendered).
+5. Enable reduce-motion → the flip is instant.
+
+### Rollback / rebase note
+- **Rollback:** revert the `cdr-wl` class addition in `decorations.ts` and the `.cdr.cdr-wl` rule block in `decorations.css`. The extension's whole-line decoration still renders (as the bare `.cdr`); only the dedicated plane disappears. No data migration.
+- **Rebase risk: LOW.** Self-patch rationale: fork-distribution editor-internals capability the spec flagged as the riskiest/highest-value element; no upstream rebase dependency. If upstream restructures `_renderWholeLineDecorations` / the `.cdr` div literal, re-apply the `cdr-wl` class tag at the whole-line emit site and re-point the CSS rule.

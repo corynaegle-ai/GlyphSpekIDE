@@ -155,6 +155,60 @@ function isFrictionTier(value) {
     return FRICTION_TIERS.has(value);
 }
 /* ================================================================== *
+ * TIER CONTROLLER (Blended Workbench PATCH-009) — the SINGLE writer of the
+ * `glyphspek.tier` context-key, the one source feeding the two friction views.
+ *
+ * The friction tier (ask | inline | governed | sensitive | sovereign — §6) is set
+ * from exactly two view controls, both of which route through here so there is NO
+ * second writer of the context-key:
+ *
+ *   (1) The NATIVE title-bar Authority Ladder (fork, glyphspekTitleLadder.ts) — its
+ *       rung click invokes the `glyphspek.setTier` command, which calls set() here.
+ *   (2) The WEBVIEW Trust Panel ladder — its rung click posts `glyphspekTier`, whose
+ *       host handler calls set() here.
+ *
+ * set() (a) de-dups + writes the `glyphspek.tier` context-key (the native ladder + the
+ * editor-recede chrome read it), and (b) syncs the Trust Panel webview ladder if one is
+ * open (so a native click reflects in the webview, and vice-versa via the no-echo
+ * receiver in live.js). It NEVER force-opens the panel — the native ladder is the
+ * canonical control and works with no webview present.
+ *
+ * VIEW-ONLY / ORTHOGONAL (§2.1, §6, §2.4): this is the FRICTION axis only. It carries
+ * NO assurance, NEVER touches `glyphspek.authority` (the halo), and grants NOTHING. The
+ * promote modal remains the only authority door.
+ */
+class TierController {
+    /**
+     * Set the effective friction tier. `sync` decides whether to echo to the webview
+     * ladder: a NATIVE click syncs the webview; a WEBVIEW-originated set does NOT echo
+     * back to the same webview (it already updated its own DOM) — that avoids a loop.
+     * The caller MUST have validated the tier (isFrictionTier).
+     */
+    set(tier, options) {
+        if (tier !== this.lastTier) {
+            this.lastTier = tier;
+            void vscode.commands.executeCommand('setContext', 'glyphspek.tier', tier);
+        }
+        if (options.syncWebview) {
+            TrustPanel.syncLadderTier(tier);
+        }
+    }
+    /** Clear the context-key back to its neutral (unset) state on teardown. */
+    reset() {
+        if (this.lastTier !== undefined) {
+            this.lastTier = undefined;
+            void vscode.commands.executeCommand('setContext', 'glyphspek.tier', undefined);
+        }
+    }
+}
+let tierController;
+function getTierController() {
+    if (!tierController) {
+        tierController = new TierController();
+    }
+    return tierController;
+}
+/* ================================================================== *
  * RUN STATUS CONTROLLER (Slice 2 — status-bar segments + halo fallback +
  * the `glyphspek.authority` context-key).
  *
@@ -655,6 +709,14 @@ class TrustPanel {
                         preview: pending.preview,
                     });
                 }
+                // Replay a pending tier-sync so a NATIVE title-bar ladder click that raced
+                // the webview boot still syncs the webview ladder (PATCH-009). FRICTION
+                // axis only — view-only, confers no authority.
+                if (this.pendingSetTier !== undefined) {
+                    const tier = this.pendingSetTier;
+                    this.pendingSetTier = undefined;
+                    void this.panel.webview.postMessage({ type: 'setTier', tier });
+                }
             }
             else if (msg.type === 'requestLoadBundle') {
                 // The webview's "Load run bundle…" button delegates to the host command.
@@ -717,8 +779,13 @@ class TrustPanel {
                 // NOTHING — receding the editor REDUCES perceived authority, it adds no
                 // friction and confers no trust. The promote modal (glyphspekPromote)
                 // remains the only authority door. This can only come from our own webview.
+                //
+                // Routes through the SINGLE writer (TierController). `syncWebview: false`:
+                // this webview already updated its OWN ladder DOM before posting, so echoing
+                // a `setTier` back would be a redundant round-trip — the native title-bar
+                // ladder reads the context-key TierController sets here and updates itself.
                 if (typeof msg.tier === 'string' && isFrictionTier(msg.tier)) {
-                    this.applyTierContextKey(msg.tier);
+                    getTierController().set(msg.tier, { syncWebview: false });
                 }
             }
             else if (msg.type === 'startTrustedRun') {
@@ -998,27 +1065,31 @@ class TrustPanel {
         this.panel.reveal(column);
     }
     /**
-     * Mirror the friction tier to the `glyphspek.tier` context-key (Phase 1 §A),
-     * de-duplicated. The FORK chrome (glyphspekTierChrome) reads this key to recede the
-     * center editor at Ask. View-only — it confers no authority and never touches the
-     * orthogonal `glyphspek.authority` (assurance / halo) key.
+     * Sync the OPEN Trust Panel webview's Authority Ladder to `tier` (PATCH-009). Called
+     * by TierController when a NATIVE title-bar rung click re-tiers the workbench, so the
+     * webview ladder reflects it. No-op if no panel is open (the native ladder is the
+     * canonical control and works without the webview). The webview applies this WITHOUT
+     * echoing `glyphspekTier` back (see live.js `setTier` receiver), so there is no loop.
+     * View-only — confers no authority. Static so TierController need not hold a ref.
      */
-    applyTierContextKey(tier) {
-        if (tier === this.lastTier) {
+    static syncLadderTier(tier) {
+        TrustPanel.current?.postSetTier(tier);
+    }
+    /** Post (or buffer) a `setTier` sync to this webview. FRICTION axis only; view-only. */
+    postSetTier(tier) {
+        if (!this.ready) {
+            this.pendingSetTier = tier;
             return;
         }
-        this.lastTier = tier;
-        void vscode.commands.executeCommand('setContext', 'glyphspek.tier', tier);
+        void this.panel.webview.postMessage({ type: 'setTier', tier });
     }
     dispose() {
         TrustPanel.current = undefined;
-        // Clear the friction-tier context-key so the fork chrome returns to its neutral
-        // (non-receded) state when no Trust Panel is driving the friction axis. The
-        // orthogonal authority key is owned by RunStatusController, untouched here.
-        if (this.lastTier !== undefined) {
-            this.lastTier = undefined;
-            void vscode.commands.executeCommand('setContext', 'glyphspek.tier', undefined);
-        }
+        // NOTE: we deliberately do NOT clear the `glyphspek.tier` context-key here. Since
+        // PATCH-009 the NATIVE title-bar Authority Ladder is the CANONICAL friction control
+        // and persists after the webview closes; the key reflects the workbench's current
+        // friction view and is owned by the TierController (cleared only on deactivate).
+        // The orthogonal authority key is owned by RunStatusController, untouched here.
         while (this.disposables.length) {
             this.disposables.pop()?.dispose();
         }
@@ -2078,6 +2149,22 @@ function activate(context) {
     }));
     context.subscriptions.push(vscode.commands.registerCommand('glyphspek.openTrustPanel', () => {
         TrustPanel.createOrShow(context.extensionUri, gate);
+    }));
+    // SET FRICTION TIER (Blended Workbench PATCH-009). The CANONICAL friction control —
+    // the native title-bar Authority Ladder (fork, glyphspekTitleLadder.ts) — invokes
+    // this on a rung click. It (a) validates the tier, (b) routes through the SINGLE
+    // writer (TierController) which sets the `glyphspek.tier` context-key the native
+    // ladder + the editor-recede chrome read, and (c) syncs the Trust Panel webview
+    // ladder if one is open. It does NOT force-open the panel.
+    //
+    // VIEW-ONLY (§6, §2.4 "tier is enforced authority, not a UI hint"): selecting a rung
+    // changes friction / which evidence is visible. It does NOT grant authority and NEVER
+    // touches the assurance axis (`glyphspek.authority` / the halo). The promote modal
+    // remains the only authority door. An unknown tier is rejected (fail closed to no-op).
+    context.subscriptions.push(vscode.commands.registerCommand('glyphspek.setTier', (tier) => {
+        if (typeof tier === 'string' && isFrictionTier(tier)) {
+            getTierController().set(tier, { syncWebview: true });
+        }
     }));
     // Inline edit (Cmd-K-style, DEMO). Takes the active editor selection + an
     // instruction and previews it through the stub gateway. This is still the demo
@@ -3345,5 +3432,12 @@ function deactivate() {
     // webview dispose was pushed into context.subscriptions; clearing the singleton lets
     // a re-activate in the same process build a fresh, empty registry.
     governanceSurfaceRegistry = undefined;
+    // Clear the friction-tier context-key (PATCH-009) so the native title-bar ladder +
+    // the editor-recede chrome return to their neutral (governed/non-receded) state when
+    // the extension deactivates. The TierController owns this key for the session.
+    if (tierController) {
+        tierController.reset();
+        tierController = undefined;
+    }
 }
 //# sourceMappingURL=extension.js.map

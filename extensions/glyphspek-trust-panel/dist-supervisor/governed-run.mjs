@@ -938,7 +938,7 @@ function verifyChain(events) {
 }
 
 // ../spikes/p0-verifier/verifier.ts
-import { cpSync, existsSync as existsSync2, readdirSync } from "node:fs";
+import { cpSync, existsSync as existsSync2, readdirSync, rmSync as rmSync2, statSync } from "node:fs";
 import * as path3 from "node:path";
 
 // ../spikes/p0-supervisor/policy/load.ts
@@ -1236,14 +1236,35 @@ function statusForExit(exitCode) {
 function checkName(command) {
   return command.join(" ") || "(empty command)";
 }
-function overlaySourceWorktree(sourceWorktree, verifierWorktree) {
-  for (const entry of readdirSync(sourceWorktree)) {
-    if (entry === ".git") continue;
-    cpSync(path3.join(sourceWorktree, entry), path3.join(verifierWorktree, entry), {
-      recursive: true,
-      force: true
-    });
+var MIRROR_EXCLUDE_TOPLEVEL = /* @__PURE__ */ new Set([".git"]);
+function mirrorDir(src, dest, exclude) {
+  const srcEntries = new Set(readdirSync(src).filter((e) => !exclude.has(e)));
+  for (const entry of readdirSync(dest)) {
+    if (exclude.has(entry)) continue;
+    if (!srcEntries.has(entry)) {
+      rmSync2(path3.join(dest, entry), { recursive: true, force: true });
+    }
   }
+  for (const entry of srcEntries) {
+    const srcPath = path3.join(src, entry);
+    const destPath = path3.join(dest, entry);
+    const st = statSync(srcPath);
+    if (st.isDirectory()) {
+      if (existsSync2(destPath) && !statSync(destPath).isDirectory()) {
+        rmSync2(destPath, { force: true });
+      }
+      cpSync(srcPath, destPath, { recursive: true, force: true });
+      mirrorDir(srcPath, destPath, /* @__PURE__ */ new Set());
+    } else {
+      if (existsSync2(destPath) && statSync(destPath).isDirectory()) {
+        rmSync2(destPath, { recursive: true, force: true });
+      }
+      cpSync(srcPath, destPath, { force: true });
+    }
+  }
+}
+function overlaySourceWorktree(sourceWorktree, verifierWorktree) {
+  mirrorDir(sourceWorktree, verifierWorktree, MIRROR_EXCLUDE_TOPLEVEL);
 }
 async function runVerification(input) {
   const { repoPath, sourceWorktree, policyPath, tracePath, privateKey } = input;

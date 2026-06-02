@@ -1,8 +1,8 @@
 // ../spikes/p0-supervisor/bridge-server.ts
 import { createHash as createHash3 } from "node:crypto";
-import { readFileSync as readFileSync4, statSync as statSync2 } from "node:fs";
-import { spawnSync } from "node:child_process";
-import { join as join7 } from "node:path";
+import { readFileSync as readFileSync4, statSync as statSync3 } from "node:fs";
+import { spawnSync as spawnSync2 } from "node:child_process";
+import { join as join8 } from "node:path";
 
 // ../spikes/p0-supervisor/run.ts
 import { randomUUID } from "node:crypto";
@@ -53,6 +53,106 @@ var UNTRUSTED_PROVENANCE = [
   "tool-output",
   "mcp"
 ];
+
+// ../spikes/p0-contracts/policy.ts
+var POLICY_DEFAULT_VERBS = ["allow", "deny", "ask"];
+function isPlainObject(v) {
+  return typeof v === "object" && v !== null && !Array.isArray(v);
+}
+function isStringArray(v) {
+  return Array.isArray(v) && v.every((x) => typeof x === "string");
+}
+function isStringMatrix(v) {
+  return Array.isArray(v) && v.every((row) => isStringArray(row));
+}
+function validateDefaultVerb(value, path4, errors) {
+  if (typeof value !== "string" || !POLICY_DEFAULT_VERBS.includes(value)) {
+    errors.push(
+      `${path4} must be one of ${POLICY_DEFAULT_VERBS.join(" | ")}, got ${describe(value)}`
+    );
+  }
+}
+function describe(v) {
+  if (v === null) return "null";
+  if (Array.isArray(v)) return "array";
+  return typeof v;
+}
+function parsePolicy(raw) {
+  const errors = [];
+  if (!isPlainObject(raw)) {
+    return { errors: [`policy must be an object, got ${describe(raw)}`] };
+  }
+  if (typeof raw.version !== "number" || !Number.isFinite(raw.version)) {
+    errors.push(`version must be a finite number, got ${describe(raw.version)}`);
+  }
+  let defaults;
+  if (!isPlainObject(raw.defaults)) {
+    errors.push(`defaults must be an object, got ${describe(raw.defaults)}`);
+  } else {
+    const d = raw.defaults;
+    validateDefaultVerb(d.file_read, "defaults.file_read", errors);
+    validateDefaultVerb(d.file_write, "defaults.file_write", errors);
+    validateDefaultVerb(d.command, "defaults.command", errors);
+    validateDefaultVerb(d.network, "defaults.network", errors);
+    validateDefaultVerb(d.mcp, "defaults.mcp", errors);
+    if (errors.length === 0) {
+      defaults = {
+        file_read: d.file_read,
+        file_write: d.file_write,
+        command: d.command,
+        network: d.network,
+        mcp: d.mcp
+      };
+    }
+  }
+  let allow;
+  if (!isPlainObject(raw.allow)) {
+    errors.push(`allow must be an object, got ${describe(raw.allow)}`);
+  } else {
+    const a = raw.allow;
+    if (!isStringArray(a.read_paths)) errors.push("allow.read_paths must be a string[]");
+    if (!isStringArray(a.write_paths)) errors.push("allow.write_paths must be a string[]");
+    if (!isStringMatrix(a.commands)) errors.push("allow.commands must be a string[][]");
+    if (!isStringArray(a.network)) errors.push("allow.network must be a string[]");
+    allow = {
+      read_paths: isStringArray(a.read_paths) ? a.read_paths : [],
+      write_paths: isStringArray(a.write_paths) ? a.write_paths : [],
+      commands: isStringMatrix(a.commands) ? a.commands : [],
+      network: isStringArray(a.network) ? a.network : []
+    };
+  }
+  let deny;
+  if (!isPlainObject(raw.deny)) {
+    errors.push(`deny must be an object, got ${describe(raw.deny)}`);
+  } else {
+    const dn = raw.deny;
+    if (!isStringArray(dn.read_paths)) errors.push("deny.read_paths must be a string[]");
+    if (!isStringArray(dn.write_paths)) errors.push("deny.write_paths must be a string[]");
+    if (!isStringMatrix(dn.commands)) errors.push("deny.commands must be a string[][]");
+    deny = {
+      read_paths: isStringArray(dn.read_paths) ? dn.read_paths : [],
+      write_paths: isStringArray(dn.write_paths) ? dn.write_paths : [],
+      commands: isStringMatrix(dn.commands) ? dn.commands : []
+    };
+  }
+  let verify;
+  if (!isStringMatrix(raw.verify)) {
+    errors.push("verify must be a string[][]");
+  } else {
+    verify = raw.verify.map((row) => Object.freeze([...row]));
+  }
+  if (errors.length > 0) {
+    return { errors };
+  }
+  const policy = {
+    version: raw.version,
+    defaults,
+    allow,
+    deny,
+    verify: Object.freeze(verify)
+  };
+  return { policy, errors: [] };
+}
 
 // ../spikes/p0-contracts/trace.ts
 var TRACE_EVENT_VERSION = 1;
@@ -238,6 +338,16 @@ var AUTONOMY_TIERS = [
   "auto",
   "turbo"
 ];
+function shapeNonEmptyString(v) {
+  return typeof v === "string" && v.trim().length > 0;
+}
+function isBuildVerdictSignaturePresent(signature) {
+  return !!signature && shapeNonEmptyString(signature.alg) && shapeNonEmptyString(signature.value) && shapeNonEmptyString(signature.keyId);
+}
+function computeBuildAssurance(input) {
+  const independentlyVerified = input.verifierIsolation === "independent-sandboxed" && input.verifyRan === true && input.overall !== "error" && isBuildVerdictSignaturePresent(input.signature);
+  return independentlyVerified ? "full" : "degraded";
+}
 function validateRunRequest(input) {
   const missing = [];
   const req = input ?? {};
@@ -337,7 +447,7 @@ import { dirname } from "node:path";
 function isPlainArray(value) {
   return Array.isArray(value);
 }
-function isPlainObject(value) {
+function isPlainObject2(value) {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 function canonicalJson(obj) {
@@ -357,7 +467,7 @@ function encode(value) {
     );
     return `[${parts.join(",")}]`;
   }
-  if (isPlainObject(value)) {
+  if (isPlainObject2(value)) {
     const keys = Object.keys(value).sort();
     const parts = [];
     for (const key of keys) {
@@ -446,9 +556,9 @@ function createTraceWriter(traceFilePath) {
   };
   return { path: traceFilePath, append };
 }
-function readTrace(path3) {
-  if (!existsSync(path3)) return [];
-  const raw = readFileSync(path3, "utf8");
+function readTrace(path4) {
+  if (!existsSync(path4)) return [];
+  const raw = readFileSync(path4, "utf8");
   const events = [];
   const lines = raw.split("\n");
   for (let i = 0; i < lines.length; i++) {
@@ -459,7 +569,7 @@ function readTrace(path3) {
       parsed = JSON.parse(line);
     } catch (err) {
       throw new Error(
-        `readTrace: invalid JSON on line ${i + 1} of ${path3}: ${err.message}`
+        `readTrace: invalid JSON on line ${i + 1} of ${path4}: ${err.message}`
       );
     }
     events.push(parsed);
@@ -525,6 +635,27 @@ function signVerdict(core, privateKey, keyId) {
 // ../spikes/p0-supervisor/policy/load.ts
 import { readFileSync as readFileSync2 } from "node:fs";
 import { extname } from "node:path";
+function loadPolicy(path4) {
+  const ext = extname(path4).toLowerCase();
+  if (ext === ".yml" || ext === ".yaml") {
+    throw new Error(`P0 uses JSON policy; convert ${path4}`);
+  }
+  let text;
+  try {
+    text = readFileSync2(path4, "utf8");
+  } catch (err) {
+    const reason = err instanceof Error ? err.message : String(err);
+    return { errors: [`could not read policy file ${path4}: ${reason}`] };
+  }
+  let raw;
+  try {
+    raw = JSON.parse(text);
+  } catch (err) {
+    const reason = err instanceof Error ? err.message : String(err);
+    return { errors: [`policy file ${path4} is not valid JSON: ${reason}`] };
+  }
+  return parsePolicy(raw);
+}
 
 // ../spikes/p0-supervisor/policy/glob.ts
 function decompose(p) {
@@ -672,18 +803,18 @@ function decide(policy, request) {
 function decideRaw(policy, request) {
   switch (request.tool) {
     case "file_read": {
-      const path3 = readPath(request.payload);
-      if (path3 !== void 0) {
-        if (anyGlobMatch(policy.deny.read_paths, path3)) return "deny";
-        if (anyGlobMatch(policy.allow.read_paths, path3)) return "allow";
+      const path4 = readPath(request.payload);
+      if (path4 !== void 0) {
+        if (anyGlobMatch(policy.deny.read_paths, path4)) return "deny";
+        if (anyGlobMatch(policy.allow.read_paths, path4)) return "allow";
       }
       return verbToDecision(policy.defaults.file_read);
     }
     case "file_write": {
-      const path3 = readPath(request.payload);
-      if (path3 !== void 0) {
-        if (anyGlobMatch(policy.deny.write_paths, path3)) return "deny";
-        if (anyGlobMatch(policy.allow.write_paths, path3)) return "allow";
+      const path4 = readPath(request.payload);
+      if (path4 !== void 0) {
+        if (anyGlobMatch(policy.deny.write_paths, path4)) return "deny";
+        if (anyGlobMatch(policy.allow.write_paths, path4)) return "allow";
       }
       return verbToDecision(policy.defaults.file_write);
     }
@@ -876,8 +1007,8 @@ async function driveScriptedRun(opts) {
 function sinkEvents(sink) {
   const maybe = sink.events;
   if (Array.isArray(maybe)) return maybe;
-  const path3 = sink.path;
-  if (typeof path3 === "string") return readTrace(path3);
+  const path4 = sink.path;
+  if (typeof path4 === "string") return readTrace(path4);
   return [];
 }
 function signEphemeral(checks, overallVerdict, traceRootHash, injectedKey) {
@@ -1728,8 +1859,8 @@ function finalizeTerminalRun(opts) {
 function sinkEvents2(sink) {
   const maybe = sink.events;
   if (Array.isArray(maybe)) return maybe;
-  const path3 = sink.path;
-  if (typeof path3 === "string") return readTrace(path3);
+  const path4 = sink.path;
+  if (typeof path4 === "string") return readTrace(path4);
   return [];
 }
 function signTerminalVerdict(core, injectedKey) {
@@ -2558,10 +2689,421 @@ var CodexChatBackend = class {
 // ../spikes/p0-model-gateway/governed-agentic-run.ts
 import { execFile as execFile2 } from "node:child_process";
 import { promisify as promisify2 } from "node:util";
-import { join as join5 } from "node:path";
+import { join as join6 } from "node:path";
+
+// ../spikes/p0-verifier/verifier.ts
+import { cpSync, existsSync as existsSync2, readdirSync, rmSync as rmSync2, statSync as statSync2 } from "node:fs";
+import * as path3 from "node:path";
+
+// ../spikes/p0-sandbox/docker-runtime.ts
+import { spawn as spawn3, spawnSync } from "node:child_process";
+import { randomUUID as randomUUID4 } from "node:crypto";
+var WORKDIR_MOUNT = "/workspace";
+var HOME_MOUNT = "/home/agent";
+var DEFAULT_IMAGE = process.env.GLYPHSPEK_SANDBOX_IMAGE ?? "node:22-alpine";
+var KEEPALIVE_SECONDS = 86400;
+var TIMEOUT_EXIT_CODE = 124;
+var SPAWN_FAIL_EXIT_CODE = 1;
+function containerNameFor(runId) {
+  const safe = runId.replace(/[^a-zA-Z0-9_.-]/g, "-");
+  return `glyphspek-${safe}`;
+}
+function envFlags(env) {
+  return Object.entries(env).flatMap(([k, v]) => ["-e", `${k}=${v}`]);
+}
+var HOST_ALIAS = "host.docker.internal";
+function denyNetworkFlags() {
+  return ["--network", "none"];
+}
+function proxyEnv(proxyUrl) {
+  return {
+    HTTP_PROXY: proxyUrl,
+    HTTPS_PROXY: proxyUrl,
+    http_proxy: proxyUrl,
+    https_proxy: proxyUrl,
+    // Never route the proxy host through itself; everything else MUST be proxied.
+    NO_PROXY: HOST_ALIAS,
+    no_proxy: HOST_ALIAS
+  };
+}
+function npmOfflineEnvForDeny() {
+  return {
+    npm_config_offline: "true",
+    npm_config_update_notifier: "false",
+    npm_config_fund: "false",
+    npm_config_audit: "false",
+    npm_config_progress: "false"
+  };
+}
+function npmQuietEnvForAllow() {
+  return {
+    npm_config_update_notifier: "false",
+    npm_config_fund: "false",
+    npm_config_audit: "false"
+  };
+}
+function resourceFlags(limits) {
+  const flags = [];
+  if (limits?.cpus !== void 0) flags.push("--cpus", String(limits.cpus));
+  if (limits?.memoryMb !== void 0) flags.push("--memory", `${limits.memoryMb}m`);
+  return flags;
+}
+function runDocker(args, timeoutMs) {
+  return new Promise((resolve2) => {
+    const child = spawn3("docker", args, { stdio: ["ignore", "pipe", "pipe"] });
+    let stdout = "";
+    let stderr = "";
+    let timedOut = false;
+    let settled = false;
+    let timer;
+    if (typeof timeoutMs === "number" && timeoutMs > 0) {
+      timer = setTimeout(() => {
+        timedOut = true;
+        child.kill("SIGKILL");
+      }, timeoutMs);
+    }
+    child.stdout?.on("data", (c) => {
+      stdout += c.toString("utf8");
+    });
+    child.stderr?.on("data", (c) => {
+      stderr += c.toString("utf8");
+    });
+    const finish = (result) => {
+      if (settled) return;
+      settled = true;
+      if (timer) clearTimeout(timer);
+      resolve2(result);
+    };
+    child.on("error", (err) => {
+      finish({
+        exitCode: SPAWN_FAIL_EXIT_CODE,
+        stdout,
+        stderr: stderr + String(err.message ?? err)
+      });
+    });
+    child.on("close", (code) => {
+      const exitCode = timedOut ? TIMEOUT_EXIT_CODE : code === null ? SPAWN_FAIL_EXIT_CODE : code;
+      finish({ exitCode, stdout, stderr, ...timedOut ? { timedOut: true } : {} });
+    });
+  });
+}
+function denyNetworkConfig() {
+  return { flags: denyNetworkFlags(), env: {} };
+}
+var SOFT_EGRESS_POSTURE_MESSAGE = "egress posture: SOFT application-layer allowlist (proxy-honoring only; NOT a hard boundary; bypassable by proxy-stripping clients)";
+var softEgressWarned = false;
+function softEgressNotAcknowledgedError() {
+  return new Error(
+    "DockerSandboxRuntime: network:{ allow } on the Docker-local runtime is an APPLICATION-LAYER (proxy-only) egress allowlist, NOT a hard boundary \u2014 a process that strips the HTTP(S) proxy env vars or opens a raw socket can bypass it. It therefore FAILS CLOSED (no egress) unless explicitly acknowledged. Pass network:{ allow, acknowledgeSoftEgress: true } to opt into the soft allowlist with eyes open, or use network:'deny' for a hard boundary (--network none) / the remote plane for a hard egress allowlist."
+  );
+}
+function signalSoftEgressPosture(onDecision) {
+  if (!softEgressWarned) {
+    softEgressWarned = true;
+    console.warn(`DockerSandboxRuntime: ${SOFT_EGRESS_POSTURE_MESSAGE}`);
+  }
+  if (onDecision) {
+    try {
+      onDecision({
+        id: randomUUID4(),
+        ts: Date.now(),
+        kind: "http",
+        // 'deny' is the conservative label for a posture note: this entry is not
+        // an actual permitted request, it records that the boundary is soft.
+        decision: "deny",
+        host: "(egress-posture)",
+        port: 0,
+        method: SOFT_EGRESS_POSTURE_MESSAGE
+      });
+    } catch {
+    }
+  }
+}
+async function allowNetworkConfig(allow, onDecision) {
+  let proxy;
+  try {
+    proxy = await startEgressProxy({
+      allow,
+      onDecision,
+      // A container addresses host-local services via host.docker.internal, but
+      // that alias does NOT resolve on the host where this proxy runs. Map it to
+      // the host loopback so an allowlisted host-local target (the common test
+      // shape, and any host-side service) is actually reachable once permitted.
+      // The allow/deny decision is still made on the requested host, not this.
+      upstreamLookup: { [HOST_ALIAS]: "127.0.0.1" }
+    });
+  } catch {
+    return denyNetworkConfig();
+  }
+  const proxyUrlForContainer = `http://${HOST_ALIAS}:${proxy.port}`;
+  const flags = ["--add-host", `${HOST_ALIAS}:host-gateway`];
+  return { flags, env: proxyEnv(proxyUrlForContainer), proxy };
+}
+var DockerSandboxRuntime = class {
+  /** Informational only; per the contract, callers must not parse this. */
+  name = "docker";
+  onEgressDecision;
+  constructor(options = {}) {
+    this.onEgressDecision = options.onEgressDecision;
+  }
+  /**
+   * HONEST capability report for the trust gate (see SandboxCapabilities). The
+   * Docker runtime ALWAYS earns fs-isolation: the container sees only the mounted
+   * worktree + synthetic HOME, with no host path/secret/env reachable (the bytes
+   * are structurally absent), regardless of host backend.
+   *
+   * hardEgress is the honest, host-dependent part:
+   *   - network:'deny' maps to `--network none` — no interface, no route, no DNS —
+   *     a HARD container-level boundary no in-container process can defeat. So
+   *     hardEgress is TRUE for the deny posture on every backend.
+   *   - a network:{ allow } allowlist is enforced ONLY by an application-layer
+   *     proxy (HTTP_PROXY/HTTPS_PROXY). On the backend this runtime ships
+   *     (standard bridge / Colima NAT) a process can strip the proxy env or open a
+   *     raw socket and bypass it, so hardEgress is FALSE for the allow posture.
+   *
+   * A true default-DROP + allowlist (hardEgress under an `allow` spec) is the
+   * Firecracker remote-plane's network-namespace job — the deferred follow-on —
+   * NOT this Docker-local runtime. We report what we can structurally enforce, no
+   * more, so the trust gate never grants product `trusted` on a soft boundary.
+   */
+  capabilities(spec) {
+    return {
+      fsIsolated: true,
+      hardEgress: spec.network === "deny"
+    };
+  }
+  async createSandbox(spec) {
+    if (spec.network !== "deny" && spec.network.acknowledgeSoftEgress !== true) {
+      throw softEgressNotAcknowledgedError();
+    }
+    const containerName = containerNameFor(spec.runId);
+    let net;
+    if (spec.network === "deny") {
+      net = denyNetworkConfig();
+    } else {
+      signalSoftEgressPosture(this.onEgressDecision);
+      net = await allowNetworkConfig(spec.network.allow, this.onEgressDecision);
+    }
+    const npmDefaults = spec.network === "deny" ? npmOfflineEnvForDeny() : npmQuietEnvForAllow();
+    const mergedEnv = { ...npmDefaults, ...spec.env, ...net.env };
+    const runArgs = [
+      "run",
+      "-d",
+      "--rm",
+      "--name",
+      containerName,
+      "-w",
+      WORKDIR_MOUNT,
+      "-v",
+      `${spec.workdir}:${WORKDIR_MOUNT}`,
+      "-v",
+      `${spec.home}:${HOME_MOUNT}`,
+      "-e",
+      `HOME=${HOME_MOUNT}`,
+      ...envFlags(mergedEnv),
+      ...net.flags,
+      ...resourceFlags(spec.resourceLimits),
+      DEFAULT_IMAGE,
+      "sleep",
+      String(KEEPALIVE_SECONDS)
+    ];
+    const started = spawnSync("docker", runArgs, { encoding: "utf8" });
+    if (started.status !== 0) {
+      if (net.proxy) await net.proxy.close().catch(() => void 0);
+      throw new Error(
+        `DockerSandboxRuntime: failed to start container ${containerName}: ${(started.stderr ?? "").trim() || `exit ${started.status}`}`
+      );
+    }
+    let torndown = false;
+    const sandbox = {
+      spec,
+      async exec(req) {
+        if (torndown) {
+          return {
+            exitCode: SPAWN_FAIL_EXIT_CODE,
+            stdout: "",
+            stderr: "sandbox has been torn down"
+          };
+        }
+        const cwd = req.cwd ?? WORKDIR_MOUNT;
+        const args = ["exec", "-w", cwd, containerName, ...req.command];
+        const timeoutMs = req.timeoutMs ?? spec.resourceLimits?.timeoutMs;
+        return runDocker(args, timeoutMs);
+      },
+      async teardown() {
+        if (torndown) return;
+        torndown = true;
+        spawnSync("docker", ["rm", "-f", containerName], { stdio: "ignore" });
+        if (net.proxy) await net.proxy.close().catch(() => void 0);
+      }
+    };
+    return sandbox;
+  }
+};
+
+// ../spikes/p0-verifier/verifier.ts
+var WORKDIR_MOUNT2 = "/workspace";
+var DEFAULT_CHECK_TIMEOUT_MS = 12e4;
+function statusForExit(exitCode) {
+  return exitCode === 0 ? "pass" : "fail";
+}
+function checkName(command) {
+  return command.join(" ") || "(empty command)";
+}
+var MIRROR_EXCLUDE_TOPLEVEL = /* @__PURE__ */ new Set([".git"]);
+function mirrorDir(src, dest, exclude) {
+  const srcEntries = new Set(readdirSync(src).filter((e) => !exclude.has(e)));
+  for (const entry of readdirSync(dest)) {
+    if (exclude.has(entry)) continue;
+    if (!srcEntries.has(entry)) {
+      rmSync2(path3.join(dest, entry), { recursive: true, force: true });
+    }
+  }
+  for (const entry of srcEntries) {
+    const srcPath = path3.join(src, entry);
+    const destPath = path3.join(dest, entry);
+    const st = statSync2(srcPath);
+    if (st.isDirectory()) {
+      if (existsSync2(destPath) && !statSync2(destPath).isDirectory()) {
+        rmSync2(destPath, { force: true });
+      }
+      cpSync(srcPath, destPath, { recursive: true, force: true });
+      mirrorDir(srcPath, destPath, /* @__PURE__ */ new Set());
+    } else {
+      if (existsSync2(destPath) && statSync2(destPath).isDirectory()) {
+        rmSync2(destPath, { recursive: true, force: true });
+      }
+      cpSync(srcPath, destPath, { force: true });
+    }
+  }
+}
+function overlaySourceWorktree(sourceWorktree, verifierWorktree) {
+  mirrorDir(sourceWorktree, verifierWorktree, MIRROR_EXCLUDE_TOPLEVEL);
+}
+async function runVerification(input) {
+  const { repoPath, sourceWorktree, policyPath, tracePath, privateKey } = input;
+  const { policy, errors } = loadPolicy(policyPath);
+  if (!policy) {
+    throw new Error(
+      `verifier: cannot load policy at ${policyPath}: ${errors.join("; ")}`
+    );
+  }
+  const targets = policy.verify;
+  const events = readTrace(tracePath);
+  const chain = verifyChain(events);
+  const traceRootHash = chain.ok ? computeTraceRoot(events) : GENESIS_HASH;
+  const runId = newRunId();
+  const runDir = path3.join(input.runsBaseDir ?? DEFAULT_RUNS_BASE_DIR, `verifier-${runId}`);
+  const verifierWorktree = path3.join(runDir, "worktree");
+  const home = createSyntheticHome(runDir);
+  const runtime = input.runtime ?? new DockerSandboxRuntime();
+  let sandboxTorndown = false;
+  let sandbox;
+  let worktreeCreated = false;
+  const checks = [];
+  let anyFail = false;
+  let anyError = !chain.ok;
+  try {
+    createWorktree(repoPath, runId, verifierWorktree);
+    worktreeCreated = true;
+    if (sourceWorktree) {
+      if (!existsSync2(sourceWorktree)) {
+        throw new Error(`verifier: sourceWorktree does not exist: ${sourceWorktree}`);
+      }
+      overlaySourceWorktree(sourceWorktree, verifierWorktree);
+    }
+    const spec = {
+      runId,
+      workdir: verifierWorktree,
+      home,
+      env: buildInjectedEnv(),
+      network: "deny"
+    };
+    sandbox = await runtime.createSandbox(spec);
+    for (const target of targets) {
+      const command = [...target];
+      const name = checkName(command);
+      if (command.length === 0) {
+        checks.push({ name, command, status: "error" });
+        anyError = true;
+        continue;
+      }
+      const result = await sandbox.exec({
+        command,
+        cwd: WORKDIR_MOUNT2,
+        timeoutMs: DEFAULT_CHECK_TIMEOUT_MS
+      });
+      const status = statusForExit(result.exitCode);
+      if (status === "fail") anyFail = true;
+      checks.push({ name, command, status });
+    }
+  } catch (err) {
+    anyError = true;
+    checks.push({
+      name: "verifier-execution",
+      command: [],
+      status: "error"
+    });
+    void err;
+  } finally {
+    if (sandbox && !sandboxTorndown) {
+      sandboxTorndown = true;
+      await sandbox.teardown();
+    }
+    if (worktreeCreated) {
+      removeWorktree(repoPath, verifierWorktree);
+    }
+  }
+  const overallVerdict = anyError ? "error" : anyFail ? "fail" : "pass";
+  const core = { checks, overallVerdict, traceRootHash };
+  const signature = signVerdict(core, privateKey);
+  return { ...core, signature };
+}
+
+// ../spikes/p0-supervisor/verifier-runner.ts
+var INDEPENDENT_VERIFIER_ERROR_CHECK_NAME = "independent verifier \u2014 could not run (see operator log)";
+async function runIndependentVerification(input) {
+  const log = input.onOperatorLog ?? (() => {
+  });
+  try {
+    const verdict = await runVerification({
+      repoPath: input.repoPath,
+      sourceWorktree: input.sourceWorktree,
+      policyPath: input.policyPath,
+      tracePath: input.tracePath,
+      privateKey: input.privateKey,
+      ...input.runtime ? { runtime: input.runtime } : {},
+      ...input.runsBaseDir !== void 0 ? { runsBaseDir: input.runsBaseDir } : {}
+    });
+    return { verdict, ran: verdict.overallVerdict !== "error" };
+  } catch (err) {
+    const reason = err instanceof Error ? err.message : String(err);
+    log(`independent-verifier: could not run \u2014 ${reason}`);
+    return {
+      verdict: synthesizeErrorVerdict(input.tracePath, input.privateKey),
+      ran: false
+    };
+  }
+}
+function synthesizeErrorVerdict(tracePath, privateKey) {
+  let traceRootHash = GENESIS_HASH;
+  try {
+    const events = readTrace(tracePath);
+    if (events.length > 0 && verifyChain(events).ok) {
+      traceRootHash = computeTraceRoot(events);
+    }
+  } catch {
+  }
+  const checks = [
+    { name: INDEPENDENT_VERIFIER_ERROR_CHECK_NAME, command: [], status: "error" }
+  ];
+  const core = { checks, overallVerdict: "error", traceRootHash };
+  const signature = signVerdict(core, privateKey);
+  return { ...core, signature };
+}
 
 // ../spikes/p0-model-gateway/agentic-backend.ts
-import { spawn as spawn3 } from "node:child_process";
+import { spawn as spawn4 } from "node:child_process";
 import { execFile } from "node:child_process";
 import { isAbsolute as isAbsolute3 } from "node:path";
 import { promisify } from "node:util";
@@ -2706,7 +3248,7 @@ async function* runAgenticBuild(req, opts = {}) {
   const timeoutMs = opts.timeoutMs ?? DEFAULT_AGENTIC_TIMEOUT_MS;
   const args = buildAgenticArgs(req);
   const env = { ...req.env, CI: "1" };
-  const child = spawn3(codexPath, args, {
+  const child = spawn4(codexPath, args, {
     cwd: req.cwd,
     env,
     stdio: ["pipe", "pipe", "pipe"]
@@ -2758,11 +3300,11 @@ async function* runAgenticBuild(req, opts = {}) {
       }
     } else if (evt.type === "item.completed" && item?.type === "file_change") {
       for (const ch of item.changes ?? []) {
-        const path3 = asStr(ch.path);
+        const path4 = asStr(ch.path);
         const kind = asStr(ch.kind) ?? "unknown";
-        if (path3) {
-          fileChangeReports.push({ path: path3, kind });
-          push({ type: "file_change", path: path3, kind });
+        if (path4) {
+          fileChangeReports.push({ path: path4, kind });
+          push({ type: "file_change", path: path4, kind });
         }
       }
     } else if (evt.type === "turn.completed" && evt.usage) {
@@ -2971,12 +3513,12 @@ async function runGovernedAgenticBuild(opts) {
     runId = opts.existingRun.runId;
     tracePath = opts.existingRun.tracePath;
     sink = opts.sink ?? opts.existingRun.sink;
-    runDir = join5(tracePath, "..", "..");
+    runDir = join6(tracePath, "..", "..");
   } else {
     const created = createRun(opts.runsBaseDir);
     runId = created.runId;
     runDir = created.dir;
-    tracePath = join5(runSubdirPath(runDir, "trace"), "trace.jsonl");
+    tracePath = join6(runSubdirPath(runDir, "trace"), "trace.jsonl");
     sink = opts.sink ?? createTraceWriter(tracePath);
   }
   let lastTraceHash;
@@ -3090,47 +3632,89 @@ async function runGovernedAgenticBuild(opts) {
   }
   const codexOk = agentic !== void 0 && agentic.exitCode === 0 && !buildError;
   transition(codexOk ? "completed" : "failed", codexOk ? "agentic build completed" : `agentic build failed: ${buildError ?? `codex exit ${agentic?.exitCode ?? "unknown"}`}`);
-  const checks = [];
-  const verifyRan = !!(opts.verifyCommand && opts.verifyCommand.length > 0);
-  if (verifyRan) {
-    const check = await runVerifyCheck(
-      opts.verifyCommand,
-      opts.cwd,
-      governedEnv,
-      // Generous but BOUNDED: Swift/Xcode test builds are slow. We give the check a
-      // wide window (default 15 min) yet still hard-bound it, so a hung toolchain
-      // surfaces an honest "verifier timed out" rather than hanging the run. A caller
-      // may raise it further via `timeoutMs` (e.g. an even larger Xcode build).
-      opts.timeoutMs ?? VERIFY_DEFAULT_TIMEOUT_MS,
-      // CANCELLATION (sweep-47 M1): forward the SAME abort signal the actor used so a
-      // run/cancel that lands after the actor exits and the verifier started kills the
-      // verifier promptly. An aborted verify is an honest 'error' (never a green pass).
-      opts.signal
+  let verdict;
+  let verifyRan;
+  let verifierIsolation;
+  let verifyCommandSource;
+  const independentResult = opts.independentVerifier ? await runIndependentVerification({
+    repoPath: opts.independentVerifier.repoPath ?? opts.cwd,
+    // The agentic actor edits the cwd IN PLACE, so the cwd IS the actor's result
+    // worktree the independent verifier overlays onto its own fresh checkout.
+    sourceWorktree: opts.cwd,
+    policyPath: opts.independentVerifier.policyPath,
+    tracePath,
+    privateKey: verifierKey,
+    ...opts.independentVerifier.runtime ? { runtime: opts.independentVerifier.runtime } : {},
+    ...opts.independentVerifier.runsBaseDir !== void 0 ? { runsBaseDir: opts.independentVerifier.runsBaseDir } : {},
+    ...opts.onOperatorLog ? { onOperatorLog: opts.onOperatorLog } : {}
+  }) : void 0;
+  if (independentResult && independentResult.ran) {
+    verdict = independentResult.verdict;
+    verifyRan = independentResult.verdict.checks.some(
+      (c) => c.status === "pass" || c.status === "fail"
     );
-    checks.push(check);
+    verifierIsolation = "independent-sandboxed";
+    verifyCommandSource = verifyRan ? "override" : "none";
+    append(
+      "verifier_verdict",
+      {
+        overallVerdict: verdict.overallVerdict,
+        traceRootHash: verdict.traceRootHash,
+        checks: verdict.checks
+      },
+      "verifier"
+    );
   } else {
-    const changed = agentic?.changedFiles.length ?? 0;
-    checks.push({
-      name: `${NOT_VERIFIED_CHECK_NAME} (${changed} file(s) changed)`,
-      command: [],
-      status: "skipped"
-    });
+    if (independentResult && !independentResult.ran) {
+      (opts.onOperatorLog ?? (() => {
+      }))(
+        "independent verifier could not run \u2014 falling back to the inline-unsandboxed check"
+      );
+    }
+    const checks = [];
+    verifyRan = !!(opts.verifyCommand && opts.verifyCommand.length > 0);
+    if (verifyRan) {
+      const check = await runVerifyCheck(
+        opts.verifyCommand,
+        opts.cwd,
+        governedEnv,
+        // Generous but BOUNDED: Swift/Xcode test builds are slow. We give the check a
+        // wide window (default 15 min) yet still hard-bound it, so a hung toolchain
+        // surfaces an honest "verifier timed out" rather than hanging the run. A caller
+        // may raise it further via `timeoutMs` (e.g. an even larger Xcode build).
+        opts.timeoutMs ?? VERIFY_DEFAULT_TIMEOUT_MS,
+        // CANCELLATION (sweep-47 M1): forward the SAME abort signal the actor used so a
+        // run/cancel that lands after the actor exits and the verifier started kills the
+        // verifier promptly. An aborted verify is an honest 'error' (never a green pass).
+        opts.signal
+      );
+      checks.push(check);
+    } else {
+      const changed = agentic?.changedFiles.length ?? 0;
+      checks.push({
+        name: `${NOT_VERIFIED_CHECK_NAME} (${changed} file(s) changed)`,
+        command: [],
+        status: "skipped"
+      });
+    }
+    const anyFail = checks.some((c) => c.status === "fail");
+    const anyError = checks.some((c) => c.status === "error") || buildError !== void 0;
+    const overallVerdict = anyError ? "error" : anyFail ? "fail" : verifyRan ? "pass" : "fail";
+    let traceRootHash = lastTraceHash ?? GENESIS_HASH;
+    try {
+      const events = readTrace(tracePath);
+      if (events.length > 0) traceRootHash = computeTraceRoot(events);
+    } catch {
+    }
+    const core = { checks, overallVerdict, traceRootHash };
+    const signature = signVerdict(core, verifierKey);
+    verdict = { ...core, signature };
+    verifierIsolation = AGENTIC_VERIFIER_ISOLATION;
+    verifyCommandSource = verifyRan ? opts.verifyCommandSource ?? "override" : "none";
+    append("verifier_verdict", { overallVerdict, traceRootHash, checks }, "verifier");
   }
-  const anyFail = checks.some((c) => c.status === "fail");
-  const anyError = checks.some((c) => c.status === "error") || buildError !== void 0;
-  const overallVerdict = anyError ? "error" : anyFail ? "fail" : verifyRan ? "pass" : "fail";
-  let traceRootHash = lastTraceHash ?? GENESIS_HASH;
-  try {
-    const events = readTrace(tracePath);
-    if (events.length > 0) traceRootHash = computeTraceRoot(events);
-  } catch {
-  }
-  const core = { checks, overallVerdict, traceRootHash };
-  const signature = signVerdict(core, verifierKey);
-  const verdict = { ...core, signature };
-  append("verifier_verdict", { overallVerdict, traceRootHash, checks }, "verifier");
   emit({ type: "verdict", verdict });
-  emit({ type: "run_closed", runId, ok: overallVerdict === "pass" });
+  emit({ type: "run_closed", runId, ok: verdict.overallVerdict === "pass" });
   return {
     runId,
     runDir,
@@ -3140,27 +3724,27 @@ async function runGovernedAgenticBuild(opts) {
     ...agentic ? { agentic } : {},
     verdict,
     verifyRan,
-    // HONEST ISOLATION (sweep-47 M2): the check ran INLINE over the actor-modified
-    // worktree — never the independent product verifier — so this is always
-    // 'inline-unsandboxed' and the projection MUST NOT label it assurance:'full'.
-    verifierIsolation: AGENTIC_VERIFIER_ISOLATION,
-    // The verify command's provenance: the stated source when a real check ran (default
-    // 'override' for a directly-supplied command), or 'none' when no check ran.
-    verifyCommandSource: verifyRan ? opts.verifyCommandSource ?? "override" : "none"
+    // HONEST ISOLATION: 'independent-sandboxed' iff the separate-trust-domain product
+    // verifier produced the verdict; otherwise the inline-unsandboxed fallback.
+    verifierIsolation,
+    // The verify command's provenance: for the independent path, the REVIEWED policy
+    // ('override' when targets ran, 'none' when Policy.verify was empty); for the inline
+    // fallback, the stated source when a real check ran, or 'none' when no check ran.
+    verifyCommandSource
   };
 }
 
 // ../spikes/p0-model-gateway/verify-command.ts
-import { existsSync as existsSync2, readFileSync as readFileSync3, readdirSync } from "node:fs";
-import { join as join6 } from "node:path";
+import { existsSync as existsSync3, readFileSync as readFileSync3, readdirSync as readdirSync2 } from "node:fs";
+import { join as join7 } from "node:path";
 import { execFileSync as execFileSync2 } from "node:child_process";
 var VERIFY_OVERRIDE_PATH = ".glyphspek/verify.json";
 var defaultVerifyResolverDeps = {
-  fileExists: (p) => existsSync2(p),
+  fileExists: (p) => existsSync3(p),
   readFile: (p) => readFileSync3(p, "utf8"),
   listDir: (dir) => {
     try {
-      return readdirSync(dir);
+      return readdirSync2(dir);
     } catch {
       return [];
     }
@@ -3188,11 +3772,11 @@ function asStringArray(v) {
   return void 0;
 }
 function readOverride(cwd, deps) {
-  const path3 = join6(cwd, VERIFY_OVERRIDE_PATH);
-  if (!deps.fileExists(path3)) return void 0;
+  const path4 = join7(cwd, VERIFY_OVERRIDE_PATH);
+  if (!deps.fileExists(path4)) return void 0;
   let raw;
   try {
-    raw = JSON.parse(deps.readFile(path3));
+    raw = JSON.parse(deps.readFile(path4));
   } catch {
     return void 0;
   }
@@ -3245,7 +3829,7 @@ function resolveVerifyCommand(cwd, deps = defaultVerifyResolverDeps) {
     return { command: override, label: override.join(" "), source: "override" };
   }
   const entries = deps.listDir(cwd);
-  const has = (name) => deps.fileExists(join6(cwd, name));
+  const has = (name) => deps.fileExists(join7(cwd, name));
   if (has("Package.swift")) {
     return { command: ["swift", "test"], label: "swift test", source: "swiftpm" };
   }
@@ -3273,7 +3857,7 @@ function resolveVerifyCommand(cwd, deps = defaultVerifyResolverDeps) {
   }
   if (has("package.json")) {
     try {
-      const pkg = JSON.parse(deps.readFile(join6(cwd, "package.json")));
+      const pkg = JSON.parse(deps.readFile(join7(cwd, "package.json")));
       if (pkg.scripts && typeof pkg.scripts.test === "string" && pkg.scripts.test.trim()) {
         return { command: ["npm", "test"], label: "npm test", source: "npm" };
       }
@@ -3325,7 +3909,7 @@ function captureCodexBinaryIdentity(codexPath) {
   const identity = { path: codexPath };
   let sizeBytes;
   try {
-    const st = statSync2(codexPath);
+    const st = statSync3(codexPath);
     sizeBytes = st.size;
     identity.sizeBytes = st.size;
     identity.mtimeMs = st.mtimeMs;
@@ -3339,7 +3923,7 @@ function captureCodexBinaryIdentity(codexPath) {
     }
   }
   try {
-    const res = spawnSync(codexPath, ["--version"], {
+    const res = spawnSync2(codexPath, ["--version"], {
       timeout: 2500,
       encoding: "utf8",
       shell: false,
@@ -3459,7 +4043,13 @@ function projectAgenticBuildReview(runId, prompt, result) {
   const verdict = result.verdict;
   const verifierIsolation = readVerifierIsolation(result);
   const verifyCommandSource = readVerifyCommandSource(result);
-  const assurance = verifierIsolation === "independent-sandboxed" && result.verifyRan !== false ? "full" : "degraded";
+  const assurance = computeBuildAssurance({
+    verifierIsolation,
+    verifyRan: result.verifyRan === true,
+    // STRICT (sweep-55 #1): missing/omitted != ran
+    overall: verdict.overallVerdict,
+    ...verdict.signature ? { signature: verdict.signature } : {}
+  });
   return {
     runId,
     intent: prompt,
@@ -4407,7 +4997,7 @@ var BridgeServer = class {
     if (params.pendingApproval === true) {
       const approvalId = `apr-${runId}`;
       const pendingRun = createRun(this.agentic?.runsBaseDir ?? this.runsBaseDir);
-      const pendingTracePath = join7(runSubdirPath(pendingRun.dir, "trace"), "trace.jsonl");
+      const pendingTracePath = join8(runSubdirPath(pendingRun.dir, "trace"), "trace.jsonl");
       this.remoteTracePaths.set(runId, pendingTracePath);
       this.pendingBuilds.set(approvalId, {
         approvalId,
@@ -4444,7 +5034,7 @@ var BridgeServer = class {
     const abort = new AbortController();
     try {
       const buildRun = existing ? { runId, dir: existing.runDir, state: "created" } : createRun(this.agentic?.runsBaseDir ?? this.runsBaseDir);
-      const tracePath = existing ? existing.tracePath : join7(runSubdirPath(buildRun.dir, "trace"), "trace.jsonl");
+      const tracePath = existing ? existing.tracePath : join8(runSubdirPath(buildRun.dir, "trace"), "trace.jsonl");
       const sink = this.remoteTraceWriters.get(runId) ?? createTraceWriter(tracePath);
       this.remoteTraceWriters.set(runId, sink);
       this.remoteTracePaths.set(runId, tracePath);
@@ -4695,7 +5285,7 @@ var BridgeServer = class {
     let tracePath = this.remoteTracePaths.get(runId);
     if (!tracePath) {
       const created = createRun(this.agentic?.runsBaseDir ?? this.runsBaseDir);
-      tracePath = join7(runSubdirPath(created.dir, "trace"), "trace.jsonl");
+      tracePath = join8(runSubdirPath(created.dir, "trace"), "trace.jsonl");
       this.remoteTracePaths.set(runId, tracePath);
     }
     const writer = createTraceWriter(tracePath);

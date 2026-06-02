@@ -6,8 +6,68 @@
 /*
 	Keeping name short for faster parsing.
 	cdr = core decorations rendering (div)
+	cdr-wl = whole-line decoration row plane (added for GlyphSpek; see below)
 */
 .monaco-editor .lines-content .cdr {
 	position: absolute;
 	height: 100%;
+}
+
+/*---------------------------------------------------------------------------------------------
+ *  GlyphSpek Blended Workbench — whole-line PROVENANCE TINT plane (spec §5.5 / §8).
+ *
+ *  A whole-line decoration (`isWholeLine`) is a per-ROW background plane. The shipped
+ *  GlyphSpek extension already drives a calm, low-alpha row tint for line provenance —
+ *  human / claimed-amber / soft-violet / verified-blue — through a standard
+ *  `backgroundColor` whole-line decoration (extension/src/provenanceGutter.ts). The DATA
+ *  and the honesty caps live entirely in that extension; this is purely the fork-side
+ *  RENDERING fix that makes the tint show up reliably and read as calm.
+ *
+ *  WHY IT DIDN'T RENDER RELIABLY before: whole-line decoration divs shared the bare `.cdr`
+ *  rules with column-scoped decorations, so a faint full-row tint had NO defined
+ *  compositing relative to (a) the current-line highlight + selection — sibling overlays
+ *  that paint their own row backgrounds, washing out a ~6% tint on the caret's line, the
+ *  one line the reviewer is looking at — and (b) the experimental GPU glyph canvas, which
+ *  could occlude it. The `cdr-wl` hook (emitted in decorations.ts) lets us pin a
+ *  deterministic, BENEATH-text stacking for the row tint so it is steady and ambient.
+ *
+ *  CALM + A11Y (the load-bearing constraints):
+ *    - The row tint is COLOR ONLY and intentionally SUPPLEMENTARY. The non-color shape
+ *      channel that disambiguates soft-violet vs verified-blue lives in the GUTTER BAR
+ *      (soft = hollow, verified = solid) — see the extension's media/provenance/*.svg. So
+ *      this plane stays low and quiet: it must never become the primary signal, and it
+ *      must not deepen on the active line into something that competes with the gutter
+ *      shape. `isolation: isolate` keeps the tint from multiplying against the line
+ *      highlight, so soft and verified rows do not converge toward the same wash.
+ *    - The amber→blue verify FLIP / tamper REVERT is an in-place color change (the
+ *      extension swaps which decoration type owns the row). A gentle background-color
+ *      transition makes the flip read as "the same line, re-attested" rather than a jump —
+ *      the spec's "satisfying review moment." It is the only motion here and it is
+ *      DISABLED under reduce-motion (.monaco-reduce-motion), per the strict motion policy.
+ *--------------------------------------------------------------------------------------------*/
+.monaco-editor .lines-content .cdr.cdr-wl {
+	/*
+	 * Beneath the glyphs (view-lines is a later sibling of view-overlays, so text already
+	 * paints on top) and beneath the current-line highlight / selection that share this
+	 * overlay layer — a row tint is the quietest, lowest-priority background signal.
+	 */
+	z-index: 0;
+	/*
+	 * Give the row tint its own stacking context so its low-alpha background composites
+	 * predictably and does NOT blend-multiply with the line-highlight/selection backgrounds
+	 * above it. This is what keeps the calm tint visible-but-quiet on the caret's line and
+	 * stops soft-violet and verified-blue from converging into a single muddy wash there.
+	 */
+	isolation: isolate;
+	/*
+	 * The amber→blue flip / tamper revert: a calm in-place color transition, NOT a layout
+	 * or opacity animation. Trust-transition motion only (spec §3 motion policy).
+	 */
+	transition: background-color 320ms ease;
+	pointer-events: none;
+}
+
+/* Strict motion policy: reduce-motion disables the flip transition (instant color swap). */
+.monaco-reduce-motion .monaco-editor .lines-content .cdr.cdr-wl {
+	transition: none;
 }
