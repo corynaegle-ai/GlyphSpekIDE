@@ -765,7 +765,9 @@ function deriveVerdict(trace) {
   // A standalone verdict.json (e.g. the capstone bundle) takes precedence over
   // a verifier_verdict event embedded in the trace.
   if (state.standaloneVerdict) return state.standaloneVerdict;
-  const evt = trace.find((e) => e.type === 'verifier_verdict');
+  // Defensive `e &&`: a loaded bundle may contain a null/undefined array slot;
+  // an unguarded `e.type` would throw and blank the panel.
+  const evt = trace.find((e) => e && e.type === 'verifier_verdict');
   return evt ? evt.payload : null;
 }
 
@@ -832,6 +834,185 @@ function derivePolicyDecisions(trace) {
 }
 
 /* ------------------------------------------------------------------ *
+ * EVIDENCE SUMMARY (evidence-not-transcript, Slice 1).
+ *
+ * A real one-line fix produced 60 trace events (20 model_call, 24 identical
+ * allow/network policy_decision, 5 tool_start/end, …). The signal a supervisor
+ * actually needs is ~5 facts. deriveEvidenceSummary computes exactly those, all
+ * DEFENSIVELY (events may lack payload — use `e.payload || {}`), and NEVER
+ * recomputes or strengthens trust: it reuses deriveVerdict + state.sigResult +
+ * state.chainResult verbatim. renderEvidenceSummary paints them honestly, with
+ * the SAME color→assurance contract the verdict pane enforces.
+ * ------------------------------------------------------------------ */
+
+/**
+ * Infer the run's posture HONESTLY from the trace. `full` assurance requires an
+ * INDEPENDENTLY SANDBOXED + VERIFIED run; an unknown/absent posture is treated as
+ * NOT full (conservative). Mirrors live.js: only an explicit isolated/sandboxed
+ * runtime posture is full; governed-unsandboxed / soft-egress / loopback-bypass
+ * are degraded; anything unknown degrades too.
+ *
+ * Reads the first run_created / run_opened / verifier event that carries any of:
+ *   posture | verifierIsolation | credentialPosture | runtimeTrust | trust |
+ *   sandboxed | isolated. Returns { posture, verifierIsolation, credentialPosture,
+ *   full }.
+ */
+function deriveAssurancePosture(trace) {
+  const list = Array.isArray(trace) ? trace : [];
+  let posture = null;
+  let verifierIsolation = null;
+  let credentialPosture = null;
+  let sandboxed = null; // tri-state: true | false | null (unknown)
+  for (const e of list) {
+    if (!e) continue;
+    if (e.type !== 'run_created' && e.type !== 'run_opened' && e.type !== 'verifier_verdict') continue;
+    const p = e.payload || {};
+    if (posture == null && typeof p.posture === 'string') posture = p.posture;
+    if (verifierIsolation == null && typeof p.verifierIsolation === 'string') verifierIsolation = p.verifierIsolation;
+    if (credentialPosture == null && typeof p.credentialPosture === 'string') credentialPosture = p.credentialPosture;
+    // Sandbox/isolation signals (any one that is explicitly present wins, but a
+    // SOFT posture can never be upgraded to full).
+    if (typeof p.sandboxed === 'boolean') sandboxed = sandboxed === false ? false : p.sandboxed;
+    if (typeof p.isolated === 'boolean') sandboxed = sandboxed === false ? false : p.isolated;
+    const rt = p.runtimeTrust || p.trust;
+    if (typeof rt === 'string') {
+      // 'trusted' is the only product-trust-eligible posture (mirrors live.js
+      // isProductTrustEligible); every other named posture is degraded.
+      if (rt === 'trusted') { if (sandboxed == null) sandboxed = true; }
+      else { sandboxed = false; }
+    }
+    // SOFT postures are explicitly NOT full, regardless of any other field.
+    if (posture === 'governed-unsandboxed' || posture === 'sandboxed-soft-egress') sandboxed = false;
+    if (p.loopbackProxyBypass === true) sandboxed = false;
+  }
+  // HONESTY: full ONLY if we have a POSITIVE isolation signal. Unknown (null) is
+  // NOT full — never overclaim from absence of evidence.
+  const full = sandboxed === true;
+  return { posture, verifierIsolation, credentialPosture, full };
+}
+
+/**
+ * Compute the glanceable evidence summary for `trace`. Pure + defensive: every
+ * payload read is guarded, so a malformed/partial trace yields zeros, never a
+ * throw. Trust facts are read from the EXISTING gate state — sigResult /
+ * chainResult / deriveVerdict — and are never recomputed or strengthened here.
+ */
+function deriveEvidenceSummary(trace) {
+  const list = Array.isArray(trace) ? trace : [];
+
+  // ---- changed files: distinct paths from file_write activity ----
+  const changedSeen = Object.create(null);
+  const changedFiles = [];
+  function addChanged(path) {
+    if (typeof path !== 'string' || !path) return;
+    if (changedSeen[path]) return;
+    changedSeen[path] = true;
+    changedFiles.push(path);
+  }
+  for (const e of list) {
+    if (!e) continue;
+    if (e.type !== 'tool_start' && e.type !== 'tool_end') continue;
+    const p = e.payload || {};
+    const isWrite =
+      p.tool === 'file_write' ||
+      (typeof p.requestedCapability === 'string' && p.requestedCapability.indexOf('file_write:') === 0);
+    if (!isWrite) continue;
+    // Path may live under path / file / argv[last] / the capability suffix.
+    if (typeof p.path === 'string') addChanged(p.path);
+    else if (typeof p.file === 'string') addChanged(p.file);
+    else if (Array.isArray(p.argv) && p.argv.length) addChanged(String(p.argv[p.argv.length - 1]));
+    else if (typeof p.requestedCapability === 'string' && p.requestedCapability.indexOf('file_write:') === 0) {
+      addChanged(p.requestedCapability.slice('file_write:'.length));
+    }
+  }
+
+  // ---- verdict: reuse deriveVerdict — never recompute ----
+  const verdict = deriveVerdict(list);
+  const checks = (verdict && Array.isArray(verdict.checks)) ? verdict.checks : [];
+  let checksPassed = 0;
+  for (const ck of checks) if (ck && ck.status === 'pass') checksPassed += 1;
+  const assurance = deriveAssurancePosture(list);
+
+  // ---- trust: reuse the EXISTING gate state — never re-decide ----
+  const sigRes = state.sigResult;
+  const signatureValid = !!sigRes && sigRes.status === 'verified';
+  // Only a PRODUCT-tier signature is fully trusted (mirrors the verdict gate).
+  const signatureProductTier = signatureValid && sigRes.tier === 'product';
+  const chain = state.chainResult;
+  const chainOk = !!chain && chain.chainOk === true && chain.rootMatches === true;
+
+  // ---- activity: commands, model calls, egress ----
+  let commands = 0;
+  let modelCalls = 0;
+  let bytesUp = 0;
+  let bytesDown = 0;
+  let egressAllow = 0;
+  let egressDeny = 0;
+  const egressHostsSeen = Object.create(null);
+  const egressHosts = [];
+  function addEgressHost(h) {
+    if (typeof h !== 'string' || !h) return;
+    if (egressHostsSeen[h]) return;
+    egressHostsSeen[h] = true;
+    egressHosts.push(h);
+  }
+  for (const e of list) {
+    if (!e) continue;
+    const p = e.payload || {};
+    if (e.type === 'tool_end' && p.tool === 'command') {
+      commands += 1;
+    } else if (e.type === 'model_call') {
+      modelCalls += 1;
+      // model_call payloads are METADATA-ONLY — bytes counters, never content.
+      bytesUp += typeof p.bytesUp === 'number' ? p.bytesUp : 0;
+      bytesDown += typeof p.bytesDown === 'number' ? p.bytesDown : 0;
+    } else if (e.type === 'policy_decision') {
+      const cap = p.requestedCapability || p.capability || '';
+      const isNetwork = p.tool === 'network' || (typeof cap === 'string' && cap.indexOf('network') === 0);
+      if (!isNetwork) continue;
+      // A soft observe-only "allow" is NOT a real policy allow; count it as
+      // allowed but it never licenses a green chip (the chip is neutral on
+      // all-allowed regardless).
+      if (p.decision === 'deny') egressDeny += 1;
+      else egressAllow += 1;
+      addEgressHost(p.endpointHost || p.host || p.destination || (typeof cap === 'string' ? cap : null));
+    }
+  }
+
+  return {
+    changedFiles,
+    changedCount: changedFiles.length,
+    verdict: {
+      present: !!verdict,
+      overallVerdict: verdict ? verdict.overallVerdict || 'unknown' : null,
+      checkCount: checks.length,
+      checksPassed,
+      assuranceFull: assurance.full,
+      posture: assurance.posture,
+      verifierIsolation: assurance.verifierIsolation,
+    },
+    trust: {
+      signatureValid,
+      signatureProductTier,
+      chainOk,
+      posture: assurance.posture,
+    },
+    activity: {
+      commands,
+      modelCalls,
+      bytesUp,
+      bytesDown,
+    },
+    egress: {
+      allow: egressAllow,
+      deny: egressDeny,
+      hosts: egressHosts,
+    },
+    credentialPosture: assurance.credentialPosture,
+  };
+}
+
+/* ------------------------------------------------------------------ *
  * Renderers.
  * ------------------------------------------------------------------ */
 
@@ -864,40 +1045,326 @@ function metaItem(label, value) {
   return item;
 }
 
+/**
+ * Render the glanceable evidence summary as labeled chip rows. HONESTY contract
+ * (matches the verdict pane invariants — never overclaim):
+ *   - The verdict/trust chip is success-green (chip-ok) ONLY when overall is pass
+ *     AND assurance is full AND signatureValid (product tier) AND chainOk.
+ *   - soft / degraded / governed-unsandboxed / signature-unverified → AMBER
+ *     (chip-warn, the same --warn family the verdict pane uses), NEVER green/blue.
+ *   - fail / error / denied → red (chip-bad).
+ *   - No verdict present → neutral "no verdict" (chip-neutral), never green.
+ *   - Egress: any deny → amber/red with the deny count; all-allowed → neutral.
+ */
+function renderEvidenceSummary() {
+  const root = document.getElementById('evidence-summary');
+  if (!root) return;
+  clear(root);
+  const s = deriveEvidenceSummary(state.trace);
+
+  const grid = el('div', { className: 'evi-grid' });
+
+  // ---- Changed ----
+  const changed = s.changedCount
+    ? s.changedCount + (s.changedCount === 1 ? ' file' : ' files')
+    : 'no file-write events';
+  const changedRow = eviRow('Changed', changed, s.changedCount ? 'chip-neutral' : 'chip-dim');
+  // HONESTY: "no file-write events" is NOT "nothing changed" — an autonomous agent
+  // (e.g. codex) edits files directly, so its edits are captured in the build review
+  // (git diff), not as file_write broker events in this trace. Say so in the tooltip
+  // rather than implying a read-only run.
+  changedRow.title = s.changedCount
+    ? s.changedFiles.join('\n')
+    : 'This bundle traces commands + egress. An autonomous agent’s file edits are not file_write broker events; they are captured in the build review (git diff), not the trace.';
+  grid.appendChild(changedRow);
+
+  // ---- Verdict ---- (the load-bearing honesty cell)
+  // Full success requires pass + full assurance + product-tier signature + chain.
+  const fullVerified =
+    s.verdict.present &&
+    s.verdict.overallVerdict === 'pass' &&
+    s.verdict.assuranceFull &&
+    s.trust.signatureProductTier &&
+    s.trust.chainOk;
+  let verdictText;
+  let verdictClass;
+  if (!s.verdict.present) {
+    verdictText = 'no verdict (unverified)';
+    verdictClass = 'chip-neutral';
+  } else if (s.verdict.overallVerdict === 'fail' || s.verdict.overallVerdict === 'error') {
+    verdictText =
+      s.verdict.overallVerdict.toUpperCase() + ' · ' + s.verdict.checksPassed + '/' + s.verdict.checkCount + ' checks';
+    verdictClass = 'chip-bad';
+  } else if (fullVerified) {
+    verdictText = 'PASS · ' + s.verdict.checksPassed + '/' + s.verdict.checkCount + ' checks · full assurance';
+    verdictClass = 'chip-ok';
+  } else {
+    // Pass claimed, but assurance is degraded (not fully sandboxed/verified).
+    verdictText =
+      (s.verdict.overallVerdict || 'unknown').toUpperCase() +
+      ' · ' + s.verdict.checksPassed + '/' + s.verdict.checkCount + ' checks · degraded assurance';
+    verdictClass = 'chip-warn';
+  }
+  const verdictRow = eviRow('Verdict', verdictText, verdictClass);
+  if (s.verdict.posture || s.verdict.verifierIsolation) {
+    verdictRow.title =
+      (s.verdict.posture ? 'posture: ' + s.verdict.posture : '') +
+      (s.verdict.verifierIsolation ? '\nverifierIsolation: ' + s.verdict.verifierIsolation : '');
+  }
+  grid.appendChild(verdictRow);
+
+  // ---- Trust ---- signature + chain. Green only when BOTH hold by product tier.
+  const trustOk = s.trust.signatureProductTier && s.trust.chainOk;
+  let trustText;
+  let trustClass;
+  if (trustOk) {
+    trustText = 'signature ✓ · chain ✓';
+    trustClass = 'chip-ok';
+  } else {
+    const sigBit = s.trust.signatureValid
+      ? (s.trust.signatureProductTier ? 'signature ✓' : 'signature ✓ (not product key)')
+      : 'signature ✗';
+    const chainBit = s.trust.chainOk ? 'chain ✓' : 'chain ✗';
+    trustText = sigBit + ' · ' + chainBit;
+    // Amber, never red: a missing/non-product signature is "not yet trusted",
+    // consistent with the verdict pane's de-authoritative (not failure) framing.
+    trustClass = 'chip-warn';
+  }
+  const trustRow = eviRow('Trust', trustText, trustClass);
+  if (s.trust.posture) trustRow.title = 'posture: ' + s.trust.posture;
+  grid.appendChild(trustRow);
+
+  // ---- Activity ---- commands + model calls (metadata-only) + bytes ----
+  const a = s.activity;
+  const bytesBit =
+    a.bytesUp || a.bytesDown ? ' · ↑' + a.bytesUp + '/↓' + a.bytesDown + ' B' : '';
+  const activityText =
+    a.commands + (a.commands === 1 ? ' command' : ' commands') +
+    ' · ' + a.modelCalls + ' model call' + (a.modelCalls === 1 ? '' : 's') +
+    ' (metadata-only)' + bytesBit;
+  grid.appendChild(eviRow('Activity', activityText, 'chip-neutral'));
+
+  // ---- Egress ---- any deny → amber/red; all-allowed → neutral, NOT "trusted".
+  const e = s.egress;
+  const egressText =
+    e.allow + ' allowed / ' + e.deny + ' denied' +
+    (e.hosts.length ? ' · ' + e.hosts.slice(0, 3).join(', ') + (e.hosts.length > 3 ? ' …' : '') : '');
+  const egressClass = e.deny > 0 ? 'chip-warn' : 'chip-neutral';
+  const egressRow = eviRow('Egress', egressText, egressClass);
+  if (e.hosts.length) egressRow.title = e.hosts.join('\n');
+  grid.appendChild(egressRow);
+
+  // ---- Credential ----
+  const credText = s.credentialPosture || 'not reported';
+  grid.appendChild(eviRow('Credential', credText, s.credentialPosture ? 'chip-neutral' : 'chip-dim'));
+
+  root.appendChild(grid);
+}
+
+/** One labeled summary cell: a dim label + a colored value chip. */
+function eviRow(label, value, chipClass) {
+  const row = el('div', { className: 'evi-cell' });
+  row.appendChild(el('span', { className: 'evi-label', text: label }));
+  row.appendChild(el('span', { className: 'evi-chip ' + (chipClass || 'chip-neutral'), text: value }));
+  return row;
+}
+
 function renderTimeline() {
   const root = document.getElementById('timeline');
   clear(root);
 
-  for (const evt of state.trace) {
-    const row = el('div', { className: 'event event-' + evt.type });
-
-    const gutter = el('div', { className: 'event-gutter' });
-    gutter.appendChild(el('span', { className: 'event-seq', text: '#' + evt.seq }));
-    gutter.appendChild(el('span', { className: 'event-time', text: fmtTime(evt.ts) }));
-    row.appendChild(gutter);
-
-    const body = el('div', { className: 'event-body' });
-
-    const head = el('div', { className: 'event-head' });
-    head.appendChild(el('span', { className: 'event-type type-' + evt.type, text: evt.type }));
-
-    // Per-type flags / summary chips.
-    const chips = el('span', { className: 'event-chips' });
-    appendEventChips(chips, evt);
-    head.appendChild(chips);
-    body.appendChild(head);
-
-    const detail = el('div', { className: 'event-detail' });
-    detail.textContent = summarizePayload(evt);
-    body.appendChild(detail);
-
-    const hashLine = el('div', { className: 'event-hash', title: 'hash placeholder (not a real chain hash)' });
-    hashLine.textContent = 'hash ' + shortHash(evt.hash) + '  ← prev ' + shortHash(evt.prevHash);
-    body.appendChild(hashLine);
-
-    row.appendChild(body);
-    root.appendChild(row);
+  // COLLAPSE consecutive runs of the same repetitive event into ONE summary row
+  // with a count + an expand affordance. This turns a 60-row transcript into a
+  // handful of glanceable rows while preserving every raw event behind a toggle.
+  // Only model_call and same-decision network policy_decision are grouped (the
+  // measured repeaters); everything else renders individually as it does today.
+  const groups = groupTimelineEvents(state.trace);
+  for (const g of groups) {
+    if (g.length > 1) {
+      root.appendChild(buildGroupedRow(g));
+    } else {
+      root.appendChild(buildEventRow(g.events[0]));
+    }
   }
+}
+
+/**
+ * Collapse the trace's high-volume repeaters into ONE foldable group each, so a real
+ * (interleaved) trace reads as a short timeline. A group is { key, length, events[] }.
+ * Grouping is GLOBAL, not just consecutive: real runs interleave model_call with
+ * policy_decision / tool events, so consecutive-only grouping barely collapsed (a
+ * measured 60→43). Each groupable key appears ONCE, at its first occurrence, holding
+ * ALL its events (seq/ts are preserved on the expanded rows, so chronology is
+ * recoverable):
+ *   - model_call → key 'model_call'
+ *   - network policy_decision → key 'policy:net:<decision>' (the host breakdown moves
+ *     to the group summary line, so all same-decision egress folds into one row).
+ * Every non-groupable event (state changes, tool runs, denials, the verdict) stays a
+ * length-1 group rendered in chronological position.
+ */
+function groupTimelineEvents(trace) {
+  const list = Array.isArray(trace) ? trace : [];
+  const out = [];
+  const byKey = Object.create(null);
+  for (const evt of list) {
+    const key = groupKeyFor(evt);
+    if (!key) {
+      out.push({ key: null, length: 1, events: [evt] });
+      continue;
+    }
+    let g = byKey[key];
+    if (!g) {
+      g = { key: key, length: 0, events: [] };
+      byKey[key] = g;
+      out.push(g);
+    }
+    g.events.push(evt);
+    g.length += 1;
+  }
+  return out;
+}
+
+/** The collapse key for an event, or null if it should NEVER be grouped. */
+function groupKeyFor(evt) {
+  if (!evt) return null;
+  const p = evt.payload || {};
+  if (evt.type === 'model_call') return 'model_call';
+  if (evt.type === 'policy_decision') {
+    const cap = p.requestedCapability || p.capability || '';
+    const isNetwork = p.tool === 'network' || (typeof cap === 'string' && cap.indexOf('network') === 0);
+    if (isNetwork) {
+      // Key by DECISION only (not host): fold all same-decision egress into one row;
+      // the distinct hosts are listed in summarizeGroup.
+      return 'policy:net:' + (p.decision || '?');
+    }
+  }
+  return null;
+}
+
+/**
+ * Build a collapsed summary row for a group of N like events, with a button that
+ * toggles the individual per-event rows (built with the unchanged buildEventRow).
+ * Accessibility mirrors the existing rows: the toggle is a real <button> with
+ * aria-expanded + aria-controls.
+ */
+let eviGroupCounter = 0;
+function buildGroupedRow(group) {
+  const evts = group.events;
+  const first = evts[0] || {};
+  const wrap = el('div', { className: 'event event-group event-' + (first.type || 'unknown') });
+
+  const gutter = el('div', { className: 'event-gutter' });
+  gutter.appendChild(el('span', { className: 'event-seq', text: '#' + (first.seq != null ? first.seq : '?') }));
+  gutter.appendChild(el('span', { className: 'event-time', text: fmtTime(first.ts) }));
+  wrap.appendChild(gutter);
+
+  const body = el('div', { className: 'event-body' });
+  const head = el('div', { className: 'event-head' });
+  head.appendChild(el('span', { className: 'event-type type-' + (first.type || 'unknown'), text: first.type || 'event' }));
+  head.appendChild(el('span', { className: 'chip chip-dim', text: '×' + group.length }));
+  body.appendChild(head);
+
+  const detail = el('div', { className: 'event-detail' });
+  detail.textContent = summarizeGroup(group);
+  body.appendChild(detail);
+
+  const panelId = 'evi-group-' + (eviGroupCounter += 1);
+  const toggle = el('button', { className: 'btn evi-expand', text: 'Show ' + group.length + ' events ▸' });
+  toggle.setAttribute('type', 'button');
+  toggle.setAttribute('aria-expanded', 'false');
+  toggle.setAttribute('aria-controls', panelId);
+  body.appendChild(toggle);
+
+  const panel = el('div', { className: 'evi-group-items' });
+  panel.id = panelId;
+  panel.hidden = true;
+  for (const e of evts) panel.appendChild(buildEventRow(e));
+  body.appendChild(panel);
+
+  toggle.addEventListener('click', function () {
+    const open = panel.hidden;
+    panel.hidden = !open;
+    toggle.setAttribute('aria-expanded', open ? 'true' : 'false');
+    toggle.textContent = (open ? 'Hide ' : 'Show ') + group.length + ' events ' + (open ? '▾' : '▸');
+  });
+
+  wrap.appendChild(body);
+  return wrap;
+}
+
+/** One-line summary for a collapsed group, honest about metadata-only egress. */
+function summarizeGroup(group) {
+  const evts = group.events;
+  const first = evts[0] || {};
+  const p = first.payload || {};
+  if (first.type === 'model_call') {
+    let up = 0;
+    let down = 0;
+    for (const e of evts) {
+      const q = (e && e.payload) || {};
+      up += typeof q.bytesUp === 'number' ? q.bytesUp : 0;
+      down += typeof q.bytesDown === 'number' ? q.bytesDown : 0;
+    }
+    const host = p.endpointHost || p.host || (p.model ? 'model ' + p.model : '?');
+    return 'model_call ×' + group.length + ' · metadata-only · ' + host +
+      (up || down ? ' · ↑Σ' + up + '/↓Σ' + down + ' B' : '');
+  }
+  if (first.type === 'policy_decision') {
+    const hostsSeen = Object.create(null);
+    const hosts = [];
+    for (const e of evts) {
+      const q = (e && e.payload) || {};
+      const h = q.endpointHost || q.host || q.destination || q.requestedCapability || q.capability;
+      if (typeof h === 'string' && h && !hostsSeen[h]) {
+        hostsSeen[h] = true;
+        hosts.push(h);
+      }
+    }
+    const hostBit = hosts.length
+      ? ' → ' + hosts.slice(0, 3).join(', ') + (hosts.length > 3 ? ' +' + (hosts.length - 3) + ' more' : '')
+      : '';
+    return 'policy: ' + (p.decision || '?') + ' network ×' + group.length + hostBit;
+  }
+  return (first.type || 'event') + ' ×' + group.length;
+}
+
+/**
+ * Build ONE per-event timeline row (the exact rendering the panel always used).
+ * Returned (not appended) so it can serve both a singleton group and the expanded
+ * items inside a collapsed group. Defensive: a missing type/payload degrades to
+ * placeholders, never throws.
+ */
+function buildEventRow(evt) {
+  const e = evt || {};
+  const type = e.type || 'unknown';
+  const row = el('div', { className: 'event event-' + type });
+
+  const gutter = el('div', { className: 'event-gutter' });
+  gutter.appendChild(el('span', { className: 'event-seq', text: '#' + (e.seq != null ? e.seq : '?') }));
+  gutter.appendChild(el('span', { className: 'event-time', text: fmtTime(e.ts) }));
+  row.appendChild(gutter);
+
+  const body = el('div', { className: 'event-body' });
+
+  const head = el('div', { className: 'event-head' });
+  head.appendChild(el('span', { className: 'event-type type-' + type, text: type }));
+
+  // Per-type flags / summary chips.
+  const chips = el('span', { className: 'event-chips' });
+  appendEventChips(chips, e);
+  head.appendChild(chips);
+  body.appendChild(head);
+
+  const detail = el('div', { className: 'event-detail' });
+  detail.textContent = summarizePayload(e);
+  body.appendChild(detail);
+
+  const hashLine = el('div', { className: 'event-hash', title: 'hash placeholder (not a real chain hash)' });
+  hashLine.textContent = 'hash ' + shortHash(e.hash) + '  ← prev ' + shortHash(e.prevHash);
+  body.appendChild(hashLine);
+
+  row.appendChild(body);
+  return row;
 }
 
 function appendEventChips(container, evt) {
@@ -1537,12 +2004,14 @@ async function verifySignatureAndRerender() {
     state.sigResult = null;
     state.chainResult = null;
     renderVerifierVerdict();
+    renderEvidenceSummary();
     return;
   }
   // Show the pending state immediately, then resolve.
   state.sigResult = null;
   state.chainResult = null;
   renderVerifierVerdict();
+  renderEvidenceSummary();
 
   // (1) signature over the verdict object, and (2) trace-chain + root binding —
   // BOTH are required before a verdict is AUTHORITATIVE. Compute them in
@@ -1555,6 +2024,11 @@ async function verifySignatureAndRerender() {
   state.sigResult = sigResult;
   state.chainResult = chainResult;
   renderVerifierVerdict();
+  // Keep the evidence-summary Trust cell in lockstep: it reads state.sigResult /
+  // state.chainResult, which only become known AFTER this async verify. Without this
+  // the Trust cell stayed stale at its pre-verify "signature ✗ · chain ✗" state even
+  // after the signature verified (caught by headless dogfood of a real bundle).
+  renderEvidenceSummary();
 }
 
 /**
@@ -2026,6 +2500,7 @@ function renderAll() {
   // already rendered, rather than letting the exception unwind the whole panel.
   try {
     renderRunHeader();
+    renderEvidenceSummary();
     renderTimeline();
     renderClaimsVsVerdict();
     renderDerivedSections();
@@ -2058,7 +2533,7 @@ function renderWorkspaceEmptyState() {
     );
     header.appendChild(box);
   }
-  ['timeline', 'actor-claims-body', 'verifier-verdict-body', 'commands-body', 'network-body', 'policy-body'].forEach(
+  ['evidence-summary', 'timeline', 'actor-claims-body', 'verifier-verdict-body', 'commands-body', 'network-body', 'policy-body'].forEach(
     function (id) {
       const n = document.getElementById(id);
       if (n) {

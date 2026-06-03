@@ -651,11 +651,93 @@ input[type="file"] {
   color: var(--verdict);
 }
 
+/* ---------- evidence summary (evidence-not-transcript, Slice 1) ----------
+ * A glanceable digest above the timeline. Chips reuse the panel's existing
+ * trust palette: chip-ok = --pass green (ONLY full+verified pass), chip-warn =
+ * --warn amber (soft/degraded/unverified), chip-bad = --fail red (fail/denied),
+ * chip-neutral = a quiet bordered chip (counts / non-trust facts). */
+.evi-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: 8px 16px;
+}
+.evi-cell {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+.evi-label {
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  color: var(--text-dim);
+  flex: 0 0 auto;
+  width: 78px;
+}
+.evi-chip {
+  font-size: 12px;
+  font-weight: 600;
+  padding: 2px 9px;
+  border-radius: var(--r-sm);
+  border: 1px solid var(--border);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  min-width: 0;
+}
+.evi-chip.chip-ok {
+  color: var(--pass);
+  border-color: var(--pass);
+  background: rgba(63, 181, 104, 0.12);
+}
+.evi-chip.chip-warn {
+  color: var(--warn);
+  border-color: var(--warn);
+  background: rgba(217, 164, 65, 0.12);
+}
+.evi-chip.chip-bad {
+  color: var(--fail);
+  border-color: var(--fail);
+  background: rgba(224, 84, 75, 0.12);
+}
+.evi-chip.chip-neutral {
+  color: var(--text);
+  border-color: var(--border);
+  background: var(--bg-elev);
+}
+.evi-chip.chip-dim {
+  color: var(--text-dim);
+  border-color: var(--border);
+  background: var(--bg-elev);
+}
+
 /* ---------- timeline ---------- */
 .timeline {
   display: flex;
   flex-direction: column;
   gap: 6px;
+}
+
+/* Collapsed group row + its expand affordance / nested raw events. */
+.event-group .event-head {
+  align-items: center;
+}
+.evi-expand {
+  margin-top: 6px;
+  padding: 3px 10px;
+  font-size: 11px;
+}
+.evi-group-items {
+  margin-top: 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding-left: 10px;
+  border-left: 2px solid var(--border);
+}
+.evi-group-items[hidden] {
+  display: none;
 }
 
 .event {

@@ -411,13 +411,29 @@
         </div>
       </section>
 
+      <!--
+        EVIDENCE SUMMARY (evidence-not-transcript, Slice 1). A glanceable ~5-fact
+        digest of the loaded run so a supervisor reads it in seconds instead of a
+        60-row transcript. Rendered in app.js renderEvidenceSummary(), BEFORE the
+        timeline. Honesty rules match the verdict pane: success-green ONLY for a
+        full+verified pass; soft/degraded/unverified is amber; fail/denied is red.
+      -->
+      <section class="card" id="evidence-summary-card">
+        <h2 class="card-title">
+          <svg class="gs-icon gs-title-icon" aria-hidden="true"><use href="#gs-verifier"></use></svg>
+          Evidence summary
+        </h2>
+        <p class="panel-caption">The ~5 facts a reviewer needs, at a glance. Colors reflect assurance honestly — not the actor's self-report.</p>
+        <div id="evidence-summary"></div>
+      </section>
+
       <!-- Trace timeline -->
       <section class="card">
         <h2 class="card-title">
           <svg class="gs-icon gs-title-icon" aria-hidden="true"><use href="#gs-trace"></use></svg>
           Trace timeline
         </h2>
-        <p class="panel-caption">Hash-chained events in order. Hashes shown are placeholders.</p>
+        <p class="panel-caption">Hash-chained events in order, collapsed by default. Hashes shown are placeholders.</p>
         <div id="timeline" class="timeline"></div>
       </section>
 
