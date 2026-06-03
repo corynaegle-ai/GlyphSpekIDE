@@ -246,12 +246,32 @@
         </p>
       </section>
 
+      <!--
+        EVIDENCE SUMMARY — LIVE (evidence-not-transcript, Slice 2). The same
+        glanceable ~6-fact digest app.js renders for loaded bundles, here for an
+        in-progress / just-finished GOVERNED run. Rendered in live.js
+        renderLiveEvidenceSummary(), BEFORE the timeline, reusing the .evi-* classes.
+        HONESTY: the chips consume live.js's OWN already-computed gate state
+        (deriveAuthority + the verdict signature/chain gate + productTrustEligible)
+        — they NEVER re-derive or re-decide trust. Success-green ONLY when
+        deriveAuthority(view) === 'verified'; soft/degraded/unverified is amber;
+        denied is red; no verdict is neutral.
+      -->
+      <section class="card" id="live-evidence-summary-card" role="region" aria-labelledby="live-evidence-summary-title">
+        <h2 class="card-title" id="live-evidence-summary-title">
+          <svg class="gs-icon gs-title-icon" aria-hidden="true"><use href="#gs-verifier"></use></svg>
+          Evidence summary
+        </h2>
+        <p class="panel-caption">The facts a reviewer needs, at a glance. Colors reflect this run's real assurance — not the actor's self-report.</p>
+        <div id="live-evidence-summary"></div>
+      </section>
+
       <section class="card" role="region" aria-labelledby="live-timeline-title">
         <h2 class="card-title" id="live-timeline-title">
           <svg class="gs-icon gs-title-icon" aria-hidden="true"><use href="#gs-trace"></use></svg>
           Live trace timeline
         </h2>
-        <p class="panel-caption">Hash-chained events streamed in order. The chain is re-verified in-browser.</p>
+        <p class="panel-caption">Hash-chained events streamed in order, collapsed by default. The chain is re-verified in-browser.</p>
         <div id="live-timeline" class="timeline"></div>
       </section>
 

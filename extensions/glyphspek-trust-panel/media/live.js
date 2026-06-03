@@ -1210,31 +1210,423 @@
     return b;
   }
 
+  /* ============================================================ *
+   * EVIDENCE SUMMARY — LIVE (evidence-not-transcript, Slice 2).
+   *
+   * Mirrors app.js's loaded-bundle slice 1 (deriveEvidenceSummary /
+   * renderEvidenceSummary), but for an IN-PROGRESS / just-finished GOVERNED run.
+   * A real one-line fix streams ~60 trace events (model_call repeaters, identical
+   * allow/network policy_decision, tool_start/end, …); the signal a supervisor
+   * actually needs is ~6 facts.
+   *
+   * CRITICAL HONESTY: this card NEVER re-derives or re-decides trust. The verdict
+   * + trust chips read live.js's OWN already-computed gate state — deriveAuthority
+   * (the assurance axis the friction surface paints), productTrustEligible (the
+   * §6.3 isolation floor), and view.sigResult / view.chainResult (the
+   * signature-before-display gate). Success-green is reachable ONLY when
+   * deriveAuthority(view) === 'verified' (i.e. eligible + product-tier signature +
+   * consistent bundle, the exact gate renderVerdict uses for green). A
+   * soft / claimed / read run is AMBER; a denied run is RED; no verdict is NEUTRAL.
+   * Everything else (changed files, activity, egress) is a count, never a trust
+   * claim, so it stays neutral/amber.
+   * ============================================================ */
+
+  /**
+   * Compute the glanceable evidence summary for a LIVE run `view`. Pure + defensive:
+   * every read is guarded so a partial/streaming view yields zeros, never a throw.
+   * The trust/verdict facts come from the EXISTING gate (deriveAuthority +
+   * sigResult/chainResult + productTrustEligible) — they are NOT recomputed here.
+   */
+  function deriveLiveEvidenceSummary(view) {
+    var v = view || {};
+    var trace = Array.isArray(v.trace) ? v.trace : [];
+
+    // ---- changed files: from the reducer's already-derived view.changedFiles ----
+    var changedFiles = Array.isArray(v.changedFiles) ? v.changedFiles : [];
+
+    // ---- verdict + assurance: reuse the EXISTING gate — never re-decide ----
+    // deriveAuthority is the SAME assurance the friction surface paints; it is the
+    // single source of "is this run verified". We read it, we never recompute it.
+    var authority = deriveAuthority(v);
+    var verdict = v.verdict || null;
+    var checks = (verdict && Array.isArray(verdict.checks)) ? verdict.checks : [];
+    var checksPassed = 0;
+    for (var c = 0; c < checks.length; c++) if (checks[c] && checks[c].status === 'pass') checksPassed += 1;
+
+    // ---- trust: signature + chain state straight off the verdict gate ----
+    var res = v.sigResult;
+    var sigVerified = !!res && res.status === 'verified';
+    var sigByProduct = sigVerified && res.tier === 'product';
+    var sigTier = sigVerified ? res.tier : null;
+    var chain = v.chainResult;
+    var bundleConsistent = !!chain && chain.chainOk === true && chain.rootMatches === true;
+
+    // ---- activity + egress: counts only, from the trace (metadata-only) ----
+    var commands = Array.isArray(v.commands) ? v.commands.length : 0;
+    var modelCalls = 0;
+    var bytesUp = 0;
+    var bytesDown = 0;
+    for (var i = 0; i < trace.length; i++) {
+      var e = trace[i];
+      if (!e || e.type !== 'model_call') continue;
+      modelCalls += 1;
+      var p = (e && e.payload) || {};
+      // model_call payloads are METADATA-ONLY — byte counters, never content.
+      bytesUp += typeof p.bytesUp === 'number' ? p.bytesUp : 0;
+      bytesDown += typeof p.bytesDown === 'number' ? p.bytesDown : 0;
+    }
+
+    // Egress from the reducer's already-derived view.policyDecisions (network only).
+    var egressAllow = 0;
+    var egressDeny = 0;
+    var egressHostsSeen = Object.create(null);
+    var egressHosts = [];
+    var pds = Array.isArray(v.policyDecisions) ? v.policyDecisions : [];
+    for (var d = 0; d < pds.length; d++) {
+      var pd = pds[d];
+      if (!pd || pd.tool !== 'network') continue;
+      if (pd.decision === 'deny' || pd.blocked) egressDeny += 1;
+      else egressAllow += 1;
+      var h = pd.requestedCapability || pd.destination;
+      if (typeof h === 'string' && h && !egressHostsSeen[h]) {
+        egressHostsSeen[h] = true;
+        egressHosts.push(h);
+      }
+    }
+
+    return {
+      changedFiles: changedFiles,
+      changedCount: changedFiles.length,
+      authority: authority,
+      verdict: {
+        present: !!verdict,
+        overallVerdict: verdict ? (verdict.overallVerdict || 'unknown') : null,
+        checkCount: checks.length,
+        checksPassed: checksPassed,
+      },
+      trust: {
+        signatureValid: sigVerified,
+        signatureProductTier: sigByProduct,
+        signatureTier: sigTier,
+        bundleConsistent: bundleConsistent,
+        productTrustEligible: v.productTrustEligible === true,
+        posture: v.badges ? v.badges.creationTrust : null,
+      },
+      activity: {
+        commands: commands,
+        modelCalls: modelCalls,
+        bytesUp: bytesUp,
+        bytesDown: bytesDown,
+      },
+      egress: {
+        allow: egressAllow,
+        deny: egressDeny,
+        hosts: egressHosts,
+      },
+      credentialPosture: v.badges ? v.badges.creationTrust : null,
+    };
+  }
+
+  /** One labeled summary cell: a dim label + a colored value chip. Mirrors app.js eviRow. */
+  function liveEviRow(label, value, chipClass) {
+    var row = el('div', { className: 'evi-cell' });
+    row.appendChild(el('span', { className: 'evi-label', text: label }));
+    row.appendChild(el('span', { className: 'evi-chip ' + (chipClass || 'chip-neutral'), text: value }));
+    return row;
+  }
+
+  /**
+   * Render the live evidence summary as labeled chip rows. HONESTY contract (matches
+   * the verdict pane invariants — never overclaim):
+   *   - Verdict/Trust chip is success-green (chip-ok) ONLY when deriveAuthority(view)
+   *     === 'verified' (eligible + product-tier signature + consistent bundle — the
+   *     SAME gate renderVerdict uses for green). We never recompute that here.
+   *   - authority 'denied' (tamper / non-isolated runtime / stale / bridge-mismatch)
+   *     → RED (chip-bad), and an explicit fail/error verdict → RED.
+   *   - authority 'soft' / 'claimed' (governed-unsandboxed / unverified) → AMBER
+   *     (chip-warn) — NEVER green/blue, even on a claimed pass.
+   *   - No verdict present → neutral "no verdict (unverified)" (chip-neutral).
+   *   - Egress: any deny → amber with the deny count; all-allowed → neutral.
+   */
+  function renderLiveEvidenceSummary(view) {
+    var root = document.getElementById('live-evidence-summary');
+    if (!root) return;
+    clear(root);
+    var s = deriveLiveEvidenceSummary(view);
+
+    var grid = el('div', { className: 'evi-grid' });
+
+    // ---- Changed ----
+    var changedText = s.changedCount
+      ? s.changedCount + (s.changedCount === 1 ? ' file' : ' files')
+      : 'no changed files observed';
+    var changedRow = liveEviRow('Changed', changedText, s.changedCount ? 'chip-neutral' : 'chip-dim');
+    if (s.changedCount) {
+      var paths = [];
+      for (var ci = 0; ci < s.changedFiles.length; ci++) {
+        var f = s.changedFiles[ci];
+        paths.push((f && f.change ? f.change + ' ' : '') + (f && f.path ? f.path : String(f)));
+      }
+      changedRow.title = paths.join('\n');
+    }
+    grid.appendChild(changedRow);
+
+    // ---- Verdict ---- (the load-bearing honesty cell)
+    var verified = s.authority === 'verified';
+    var denied = s.authority === 'denied';
+    var verdictText;
+    var verdictClass;
+    if (!s.verdict.present) {
+      verdictText = 'no verdict (unverified)';
+      verdictClass = 'chip-neutral';
+    } else if (s.verdict.overallVerdict === 'fail' || s.verdict.overallVerdict === 'error' || denied) {
+      verdictText =
+        (denied ? 'UNTRUSTED' : s.verdict.overallVerdict.toUpperCase()) +
+        ' · ' + s.verdict.checksPassed + '/' + s.verdict.checkCount + ' checks';
+      verdictClass = 'chip-bad';
+    } else if (verified) {
+      verdictText = 'PASS · ' + s.verdict.checksPassed + '/' + s.verdict.checkCount + ' checks · verified';
+      verdictClass = 'chip-ok';
+    } else {
+      // A verdict is present and not a fail, but the run is NOT verified (soft /
+      // claimed / degraded). Honest amber, never green.
+      verdictText =
+        (s.verdict.overallVerdict || 'unknown').toUpperCase() +
+        ' · ' + s.verdict.checksPassed + '/' + s.verdict.checkCount + ' checks · ' +
+        (s.authority === 'soft' ? 'SOFT (governed-unsandboxed)' : 'unverified');
+      verdictClass = 'chip-warn';
+    }
+    grid.appendChild(liveEviRow('Verdict', verdictText, verdictClass));
+
+    // ---- Trust ---- signature + chain. Green ONLY when the run is verified.
+    var trustText;
+    var trustClass;
+    if (verified) {
+      trustText = 'signature ✓ (product) · chain ✓';
+      trustClass = 'chip-ok';
+    } else {
+      var sigBit;
+      if (!s.trust.signatureValid) sigBit = 'signature ✗';
+      else if (s.trust.signatureProductTier) sigBit = 'signature ✓ (runtime not trusted)';
+      else sigBit = 'signature ✓ (' + (s.trust.signatureTier || 'not product') + ' key)';
+      var chainBit = s.trust.bundleConsistent ? 'chain ✓' : 'chain ✗';
+      trustText = sigBit + ' · ' + chainBit;
+      // Amber, never red: "not yet trusted" mirrors the verdict pane's
+      // de-authoritative (not failure) framing. A denied run already shows red above.
+      trustClass = denied ? 'chip-bad' : 'chip-warn';
+    }
+    var trustRow = liveEviRow('Trust', trustText, trustClass);
+    if (s.trust.posture) trustRow.title = 'posture: ' + s.trust.posture;
+    grid.appendChild(trustRow);
+
+    // ---- Activity ---- commands + model calls (metadata-only) + bytes ----
+    var a = s.activity;
+    var bytesBit = (a.bytesUp || a.bytesDown) ? ' · ↑' + a.bytesUp + '/↓' + a.bytesDown + ' B' : '';
+    var activityText =
+      a.commands + (a.commands === 1 ? ' command' : ' commands') +
+      ' · ' + a.modelCalls + ' model call' + (a.modelCalls === 1 ? '' : 's') +
+      ' (metadata-only)' + bytesBit;
+    grid.appendChild(liveEviRow('Activity', activityText, 'chip-neutral'));
+
+    // ---- Egress ---- any deny → amber; all-allowed → neutral, NOT "trusted".
+    var eg = s.egress;
+    var egressText =
+      eg.allow + ' allowed / ' + eg.deny + ' denied' +
+      (eg.hosts.length ? ' · ' + eg.hosts.slice(0, 3).join(', ') + (eg.hosts.length > 3 ? ' …' : '') : '');
+    var egressClass = eg.deny > 0 ? 'chip-warn' : 'chip-neutral';
+    var egressRow = liveEviRow('Egress', egressText, egressClass);
+    if (eg.hosts.length) egressRow.title = eg.hosts.join('\n');
+    grid.appendChild(egressRow);
+
+    // ---- Credential / posture ----
+    var credText = s.credentialPosture || 'not reported';
+    grid.appendChild(liveEviRow('Credential', credText, s.credentialPosture ? 'chip-neutral' : 'chip-dim'));
+
+    root.appendChild(grid);
+  }
+
   /* ---- timeline + derived sections ---- */
+
+  /**
+   * Render the LIVE timeline, COLLAPSING the high-volume repeaters of a real
+   * (interleaved) trace into ONE foldable group each, so a ~60-event run reads as a
+   * short timeline. Mirrors app.js's groupTimelineEvents: grouping is GLOBAL (not
+   * just consecutive) because real runs interleave model_call with policy_decision /
+   * tool events. Each groupable key appears ONCE, at its first occurrence, holding
+   * ALL its events (seq/ts preserved on the expanded rows, so chronology is
+   * recoverable). Non-groupable events (state changes, tool runs, denials, the
+   * verdict) stay length-1, in chronological position.
+   */
   function renderTimeline(view) {
     var root = document.getElementById('live-timeline');
     if (!root) return;
     clear(root);
-    for (var i = 0; i < view.trace.length; i++) {
-      var evt = view.trace[i];
-      var row = el('div', { className: 'event event-' + evt.type });
-      var gutter = el('div', { className: 'event-gutter' });
-      gutter.appendChild(el('span', { className: 'event-seq', text: '#' + evt.seq }));
-      gutter.appendChild(el('span', { className: 'event-time', text: fmtTime(evt.ts) }));
-      row.appendChild(gutter);
-      var body = el('div', { className: 'event-body' });
-      var head = el('div', { className: 'event-head' });
-      head.appendChild(el('span', { className: 'event-type type-' + evt.type, text: evt.type }));
-      body.appendChild(head);
-      var detail = el('div', { className: 'event-detail' });
-      detail.textContent = summarizeLive(evt);
-      body.appendChild(detail);
-      var hashLine = el('div', { className: 'event-hash' });
-      hashLine.textContent = 'hash ' + shortHash(evt.hash) + '  ← prev ' + shortHash(evt.prevHash);
-      body.appendChild(hashLine);
-      row.appendChild(body);
-      root.appendChild(row);
+    var groups = groupLiveTimelineEvents(view.trace);
+    for (var i = 0; i < groups.length; i++) {
+      var g = groups[i];
+      if (g.length > 1) {
+        root.appendChild(buildLiveGroupedRow(g));
+      } else {
+        root.appendChild(buildLiveEventRow(g.events[0]));
+      }
     }
+  }
+
+  /**
+   * Collapse the trace's high-volume repeaters into ONE foldable group each.
+   * A group is { key, length, events[] }. Groupable keys:
+   *   - model_call → key 'model_call'
+   *   - network policy_decision → key 'policy:net:<decision>' (all same-decision
+   *     egress folds into one row; the host breakdown moves to the summary line).
+   * Every non-groupable event is a length-1 group in chronological position.
+   */
+  function groupLiveTimelineEvents(trace) {
+    var list = Array.isArray(trace) ? trace : [];
+    var out = [];
+    var byKey = Object.create(null);
+    for (var i = 0; i < list.length; i++) {
+      var evt = list[i];
+      var key = liveGroupKeyFor(evt);
+      if (!key) {
+        out.push({ key: null, length: 1, events: [evt] });
+        continue;
+      }
+      var g = byKey[key];
+      if (!g) {
+        g = { key: key, length: 0, events: [] };
+        byKey[key] = g;
+        out.push(g);
+      }
+      g.events.push(evt);
+      g.length += 1;
+    }
+    return out;
+  }
+
+  /** The collapse key for an event, or null if it should NEVER be grouped. */
+  function liveGroupKeyFor(evt) {
+    if (!evt) return null;
+    var p = evt.payload || {};
+    if (evt.type === 'model_call') return 'model_call';
+    if (evt.type === 'policy_decision' && p.tool === 'network') {
+      // Key by DECISION only (not host): fold all same-decision egress into one row.
+      return 'policy:net:' + (p.decision || '?');
+    }
+    return null;
+  }
+
+  /** One-line summary for a collapsed group, honest about metadata-only egress. */
+  function summarizeLiveGroup(group) {
+    var evts = group.events;
+    var first = evts[0] || {};
+    var p = first.payload || {};
+    if (first.type === 'model_call') {
+      var up = 0;
+      var down = 0;
+      for (var i = 0; i < evts.length; i++) {
+        var q = (evts[i] && evts[i].payload) || {};
+        up += typeof q.bytesUp === 'number' ? q.bytesUp : 0;
+        down += typeof q.bytesDown === 'number' ? q.bytesDown : 0;
+      }
+      var model = p.model ? 'model ' + p.model : '?';
+      return 'model_call ×' + group.length + ' · metadata-only · ' + model +
+        ((up || down) ? ' · ↑Σ' + up + '/↓Σ' + down + ' B' : '');
+    }
+    if (first.type === 'policy_decision') {
+      var hostsSeen = Object.create(null);
+      var hosts = [];
+      for (var j = 0; j < evts.length; j++) {
+        var r = (evts[j] && evts[j].payload) || {};
+        var h = r.destination || r.requestedCapability;
+        if (typeof h === 'string' && h && !hostsSeen[h]) {
+          hostsSeen[h] = true;
+          hosts.push(h);
+        }
+      }
+      var hostBit = hosts.length
+        ? ' → ' + hosts.slice(0, 3).join(', ') + (hosts.length > 3 ? ' +' + (hosts.length - 3) + ' more' : '')
+        : '';
+      return 'policy: ' + (p.decision || '?') + ' network ×' + group.length + hostBit;
+    }
+    return (first.type || 'event') + ' ×' + group.length;
+  }
+
+  /**
+   * Build ONE per-event timeline row (the exact rendering the live panel always
+   * used). Returned (not appended) so it serves both a singleton group and the
+   * expanded items inside a collapsed group. Defensive: a missing type/payload
+   * degrades to placeholders, never throws.
+   */
+  function buildLiveEventRow(evt) {
+    var e = evt || {};
+    var type = e.type || 'unknown';
+    var row = el('div', { className: 'event event-' + type });
+    var gutter = el('div', { className: 'event-gutter' });
+    gutter.appendChild(el('span', { className: 'event-seq', text: '#' + (e.seq != null ? e.seq : '?') }));
+    gutter.appendChild(el('span', { className: 'event-time', text: fmtTime(e.ts) }));
+    row.appendChild(gutter);
+    var body = el('div', { className: 'event-body' });
+    var head = el('div', { className: 'event-head' });
+    head.appendChild(el('span', { className: 'event-type type-' + type, text: type }));
+    body.appendChild(head);
+    var detail = el('div', { className: 'event-detail' });
+    detail.textContent = summarizeLive(e);
+    body.appendChild(detail);
+    var hashLine = el('div', { className: 'event-hash' });
+    hashLine.textContent = 'hash ' + shortHash(e.hash) + '  ← prev ' + shortHash(e.prevHash);
+    body.appendChild(hashLine);
+    row.appendChild(body);
+    return row;
+  }
+
+  /**
+   * Build a collapsed summary row for a group of N like events, with a real <button>
+   * that toggles the individual per-event rows. Accessibility mirrors the existing
+   * rows + the ladder: a real <button> with aria-expanded + aria-controls.
+   */
+  var liveGroupCounter = 0;
+  function buildLiveGroupedRow(group) {
+    var evts = group.events;
+    var first = evts[0] || {};
+    var wrap = el('div', { className: 'event event-group event-' + (first.type || 'unknown') });
+
+    var gutter = el('div', { className: 'event-gutter' });
+    gutter.appendChild(el('span', { className: 'event-seq', text: '#' + (first.seq != null ? first.seq : '?') }));
+    gutter.appendChild(el('span', { className: 'event-time', text: fmtTime(first.ts) }));
+    wrap.appendChild(gutter);
+
+    var body = el('div', { className: 'event-body' });
+    var head = el('div', { className: 'event-head' });
+    head.appendChild(el('span', { className: 'event-type type-' + (first.type || 'unknown'), text: first.type || 'event' }));
+    head.appendChild(el('span', { className: 'chip chip-dim', text: '×' + group.length }));
+    body.appendChild(head);
+
+    var detail = el('div', { className: 'event-detail' });
+    detail.textContent = summarizeLiveGroup(group);
+    body.appendChild(detail);
+
+    var panelId = 'live-evi-group-' + (liveGroupCounter += 1);
+    var toggle = el('button', { className: 'btn evi-expand', text: 'Show ' + group.length + ' events ▸' });
+    toggle.setAttribute('type', 'button');
+    toggle.setAttribute('aria-expanded', 'false');
+    toggle.setAttribute('aria-controls', panelId);
+    body.appendChild(toggle);
+
+    var panel = el('div', { className: 'evi-group-items' });
+    panel.id = panelId;
+    panel.hidden = true;
+    for (var i = 0; i < evts.length; i++) panel.appendChild(buildLiveEventRow(evts[i]));
+    body.appendChild(panel);
+
+    toggle.addEventListener('click', function () {
+      var open = panel.hidden;
+      panel.hidden = !open;
+      toggle.setAttribute('aria-expanded', open ? 'true' : 'false');
+      toggle.textContent = (open ? 'Hide ' : 'Show ') + group.length + ' events ' + (open ? '▾' : '▸');
+    });
+
+    wrap.appendChild(body);
+    return wrap;
   }
   function summarizeLive(evt) {
     var p = evt.payload || {};
@@ -1380,6 +1772,7 @@
     renderFailures(view);
     renderClaims(view);
     renderVerdict(view);
+    renderLiveEvidenceSummary(view);
     renderTimeline(view);
     renderFiles(view);
     renderCommands(view);
@@ -2065,6 +2458,17 @@
       // REDUCED-MOTION toggle (§14.3) — exposed so a test can assert the webview's
       // Settings-toggle path adds/removes the `glyphspek-reduce-motion` class.
       applyReduceMotion: applyReduceMotion,
+      // EVIDENCE SUMMARY — LIVE (evidence-not-transcript, Slice 2). Exposed PURE so
+      // test/liveEvidenceSummary.test.mjs asserts the derive + render on the REAL
+      // panel code: the chip color→honesty mapping (verified→green, soft/degraded→
+      // amber, denied→red, no-verdict→neutral, egress-deny→amber) reuses live.js's
+      // OWN deriveAuthority + verdict gate (no trust re-decision), and the timeline
+      // collapse folds model_call + same-decision egress.
+      deriveLiveEvidenceSummary: deriveLiveEvidenceSummary,
+      renderLiveEvidenceSummary: renderLiveEvidenceSummary,
+      renderTimeline: renderTimeline,
+      groupLiveTimelineEvents: groupLiveTimelineEvents,
+      summarizeLiveGroup: summarizeLiveGroup,
     };
   }
 
