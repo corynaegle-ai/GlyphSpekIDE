@@ -138,6 +138,25 @@
       </section>
 
       <!--
+        EVIDENCE RIBBON — M5 §M5 (compact, ALWAYS-VISIBLE status strip). A one-line
+        row of chips for routine work — Runtime, Policy, Trace, Verifier, Extension
+        posture, and the run's current Authority — so a user can "see authority/
+        evidence without living in the Trust Panel". live.js renderEvidenceRibbon()
+        fills it from already-computed HONEST state (deriveAuthority + the verdict
+        signature/chain gate + the run badges); it NEVER re-decides trust. The
+        Authority + Verifier chips are success-green ONLY when deriveAuthority(view)
+        === 'verified'; soft/degraded is amber; denied is red; no-run is neutral.
+      -->
+      <section
+        class="evidence-ribbon-strip"
+        id="live-evidence-ribbon"
+        role="region"
+        aria-label="Evidence ribbon — runtime, policy, trace, verifier, extension posture, and authority at a glance"
+        data-has-run="false"
+        data-authority="read"
+      ></section>
+
+      <!--
         SLICE 2 — ASK-TIER SURFACE (§1.7, §5.5.1). Shown ONLY at data-tier="ask" (CSS).
         The editor-recede overlay is fork-only, so in the panel this is the Ask surface:
         a kicker asserting NO EXECUTION AUTHORITY, the honest one-line reason (answers

@@ -64,14 +64,44 @@
     NonIsolatedRuntime: 'non_isolated_runtime',
     BoundaryOnlyCli: 'boundary_only_cli',
     BridgeMismatch: 'bridge_mismatch',
+    // M5 §14 — the remaining required DISTINCT failure states. The webview can
+    // DERIVE untrusted_verifier_key itself (the signature gate already distinguishes
+    // a cryptographically-valid signature by a NON-trusted/bundle key — tier
+    // 'untrusted-key'); the other four are HOST-detected (a `failure` run-event of
+    // that kind), so they are RENDER-READY here but their host EMISSION is a separate
+    // follow-up (src is out of scope for this change).
+    UntrustedVerifierKey: 'untrusted_verifier_key',
+    AmbientExtensionsDevMode: 'ambient_extensions_dev_mode',
+    SupervisorHashMismatch: 'supervisor_hash_mismatch',
+    BridgeAuthFailure: 'bridge_auth_failure',
+    IncompatibleSupervisor: 'incompatible_supervisor',
   };
-  // Severity order for the headline failure (most severe first).
+  // Severity order for the headline failure (MOST SEVERE FIRST). The headline is the
+  // single strongest claim the panel makes, so the de-authoritating, integrity-/
+  // identity-breaking states lead:
+  //   - non_isolated_runtime / tampered_trace / supervisor_hash_mismatch /
+  //     bridge_auth_failure — the run's substrate or identity is compromised/unproven,
+  //   - untrusted_verifier_key / missing_verifier_signature — the verdict cannot be
+  //     trusted as authoritative (HIGH, but the run substrate may be intact),
+  //   - stale_verifier / bridge_mismatch / incompatible_supervisor — consistency /
+  //     compatibility breaks that de-authoritate the verdict,
+  //   - ambient_extensions_dev_mode — a posture WARNING (Developer mode allows
+  //     ambient extensions), above the lowest posture-note,
+  //   - boundary_only_cli — a posture NOTE (coarser evidence), the lowest.
+  // The ORIGINAL six states keep their relative order (so the TS-reducer golden
+  // conformance — test/liveReducerGolden.test.mjs — cannot drift); the five new §14
+  // states are interleaved at their honest severity.
   var FAILURE_SEVERITY = [
     'non_isolated_runtime',
     'tampered_trace',
+    'supervisor_hash_mismatch',
+    'bridge_auth_failure',
     'stale_verifier',
     'bridge_mismatch',
+    'incompatible_supervisor',
+    'untrusted_verifier_key',
     'missing_verifier_signature',
+    'ambient_extensions_dev_mode',
     'boundary_only_cli',
   ];
 
@@ -141,6 +171,15 @@
       case FAILURE_KIND.NonIsolatedRuntime: return 'non_isolated_runtime';
       case FAILURE_KIND.BoundaryOnlyCli: return 'boundary_only_cli';
       case FAILURE_KIND.BridgeMismatch: return 'bridge_mismatch';
+      // M5 §14 — render-ready states. untrusted_verifier_key is also derived
+      // webview-side from the signature gate (see surfaceUntrustedKeyFailure); the
+      // other four arrive as HOST-emitted `failure` run-events (host emission is a
+      // separate follow-up — src is out of scope here).
+      case FAILURE_KIND.UntrustedVerifierKey: return 'untrusted_verifier_key';
+      case FAILURE_KIND.AmbientExtensionsDevMode: return 'ambient_extensions_dev_mode';
+      case FAILURE_KIND.SupervisorHashMismatch: return 'supervisor_hash_mismatch';
+      case FAILURE_KIND.BridgeAuthFailure: return 'bridge_auth_failure';
+      case FAILURE_KIND.IncompatibleSupervisor: return 'incompatible_supervisor';
       default: return 'none';
     }
   }
@@ -312,10 +351,18 @@
           staleRootHash: event.staleRootHash,
           brokenIndex: event.brokenIndex,
         });
+        // De-authoritate on any failure that breaks the run's substrate, identity, or
+        // the verdict's binding/authority. boundary_only_cli + ambient_extensions_dev_mode
+        // are posture warnings/notes that do NOT by themselves drop a run off eligibility
+        // (the eligibility floor is decided at RunOpened by isProductTrustEligible).
         if (event.failure === FAILURE_KIND.NonIsolatedRuntime ||
             event.failure === FAILURE_KIND.TamperedTrace ||
             event.failure === FAILURE_KIND.StaleVerifier ||
-            event.failure === FAILURE_KIND.BridgeMismatch) {
+            event.failure === FAILURE_KIND.BridgeMismatch ||
+            event.failure === FAILURE_KIND.SupervisorHashMismatch ||
+            event.failure === FAILURE_KIND.BridgeAuthFailure ||
+            event.failure === FAILURE_KIND.IncompatibleSupervisor ||
+            event.failure === FAILURE_KIND.UntrustedVerifierKey) {
           view.productTrustEligible = false;
         }
         return view;
@@ -342,6 +389,12 @@
     ]).then(function (pair) {
       view.sigResult = pair[0];
       view.chainResult = pair[1];
+      // M5 §14 — the webview DERIVES the untrusted_verifier_key state itself from the
+      // gate result (the one §14 state the panel can detect without the host): a
+      // signature that VERIFIES cryptographically but only against a key NOT in the
+      // pinned trusted set (gate tier 'untrusted-key') is surfaced as the DISTINCT
+      // untrusted_verifier_key failure — never a plain "unverified", never success.
+      surfaceUntrustedKeyFailure(view);
       renderIfSelected(view.runId);
     }).catch(function () {
       // The gate never throws by contract; on any unexpected error, leave the
@@ -349,6 +402,28 @@
       view.sigResult = { status: 'error', detail: 'gate error', trusted: false, tier: null };
       renderIfSelected(view.runId);
     });
+  }
+
+  /**
+   * DERIVE the untrusted_verifier_key §14 failure from THIS run's signature-gate
+   * result (view.sigResult). The gate (verifyVerdictSignature) already distinguishes a
+   * cryptographically-valid signature by a TRUSTED out-of-band key (tier 'product' /
+   * 'demo') from a valid signature by a key SUPPLIED BY THE BUNDLE (tier
+   * 'untrusted-key'). A valid signature by an untrusted key is NOT authority, so we
+   * surface it as the DISTINCT untrusted_verifier_key failure (and de-authoritate the
+   * run) rather than letting it read as plain "unverified" or — never — success. This
+   * does NOT weaken the gate: it only reads the gate's existing verdict. Pure on the
+   * view; idempotent via appendFailure's de-dupe.
+   */
+  function surfaceUntrustedKeyFailure(view) {
+    var res = view.sigResult;
+    if (res && res.status === 'verified' && res.tier === 'untrusted-key') {
+      view.failures = appendFailure(view.failures, {
+        state: 'untrusted_verifier_key',
+        message: FAILURE_DEFAULT_MESSAGE.untrusted_verifier_key,
+      });
+      view.productTrustEligible = false; // fail closed — an untrusted key is not trust
+    }
   }
 
   /* --------------------------- ingest --------------------------- */
@@ -511,9 +586,25 @@
   function deriveAuthority(view) {
     if (!view) return 'read';
     var summary = deriveTrustSummary(view);
-    // DENIED: any de-authoritative failure (tamper / non-isolated runtime / stale /
-    // bridge mismatch) flips the halo red — the panel's strongest signal.
-    var denied = ['tampered_trace', 'non_isolated_runtime', 'stale_verifier', 'bridge_mismatch'];
+    // DENIED: any de-authoritative failure flips the halo red — the panel's strongest
+    // signal. This is the integrity/identity/authority-breaking set: a tampered or
+    // stale trace, a non-isolated runtime, a bridge schema/auth break, a supervisor
+    // hash mismatch or incompatible supervisor, OR a verdict signed only by an
+    // UNTRUSTED key (untrusted_verifier_key — a cryptographically-valid signature is
+    // NOT trust, so it can never read as verified/success). missing_verifier_signature
+    // and the posture notes (boundary_only_cli / ambient_extensions_dev_mode) are NOT
+    // 'denied' here — they cap the run below 'verified' via the gate below, but they
+    // are not the panel's red strongest-signal state.
+    var denied = [
+      'tampered_trace',
+      'non_isolated_runtime',
+      'stale_verifier',
+      'bridge_mismatch',
+      'supervisor_hash_mismatch',
+      'bridge_auth_failure',
+      'incompatible_supervisor',
+      'untrusted_verifier_key',
+    ];
     for (var i = 0; i < view.failures.length; i++) {
       if (denied.indexOf(view.failures[i].state) !== -1) return 'denied';
     }
@@ -964,6 +1055,36 @@
     non_isolated_runtime: 'NOT TRUSTED — dev runtime',
     boundary_only_cli: 'BOUNDARY-ONLY CLI — coarser evidence',
     bridge_mismatch: 'BRIDGE HASH / VERSION MISMATCH',
+    // M5 §14 — the remaining required DISTINCT states (each its own label + accent).
+    untrusted_verifier_key: 'UNTRUSTED VERIFIER KEY — signed by a non-pinned key',
+    ambient_extensions_dev_mode: 'AMBIENT EXTENSIONS ENABLED — Developer mode',
+    supervisor_hash_mismatch: 'SUPERVISOR HASH MISMATCH — binary not the pinned build',
+    bridge_auth_failure: 'BRIDGE AUTHENTICATION FAILURE — unauthenticated stream',
+    incompatible_supervisor: 'INCOMPATIBLE SUPERVISOR — unsupported protocol/version',
+  };
+  // Per-state honest message for the cases the webview derives or expects from the
+  // host but for which no event-carried message is present (host emission supplies its
+  // own `message` when available; this is the fail-safe default per state). Keeping
+  // these here ensures every §14 state renders with a distinct, honest message even
+  // before the host-side emission lands.
+  var FAILURE_DEFAULT_MESSAGE = {
+    untrusted_verifier_key:
+      'the verdict signature is cryptographically VALID, but only for a key that is NOT in the ' +
+      'pinned out-of-band trusted set (it was supplied with the bundle). A valid signature by an ' +
+      'untrusted key is NOT authority — this verdict is shown UNTRUSTED, never as success.',
+    ambient_extensions_dev_mode:
+      'this run executed with the workbench in Developer posture, where AMBIENT (non-curated) ' +
+      'extensions are enabled. Extension surfaces outside the per-run envelope are NOT governed, ' +
+      'so this run cannot be product-trusted.',
+    supervisor_hash_mismatch:
+      'the supervisor binary hash does NOT match the pinned build. The stream cannot be attributed ' +
+      'to the trusted supervisor — refusing to treat its events as authoritative.',
+    bridge_auth_failure:
+      'the run-event bridge could not authenticate the stream (nonce/handshake failure). An ' +
+      'unauthenticated stream is never rendered as a current, trusted run.',
+    incompatible_supervisor:
+      'the supervisor reports a protocol/version this panel does not support. Refusing to interpret ' +
+      'a possibly-incompatible stream as current — the run is de-authoritated.',
   };
 
   function renderFailures(view) {
@@ -981,7 +1102,11 @@
       head.appendChild(el('span', { className: 'failure-icon', text: '⚠' }));
       head.appendChild(el('strong', { text: FAILURE_LABELS[f.state] || f.state }));
       card.appendChild(head);
-      card.appendChild(el('div', { className: 'failure-msg', text: f.message }));
+      // Honest message: prefer the event-carried message (host emission supplies one),
+      // else the per-state default so every §14 state reads distinctly even before the
+      // host-side emission of that kind lands.
+      var msg = f.message || FAILURE_DEFAULT_MESSAGE[f.state] || '';
+      card.appendChild(el('div', { className: 'failure-msg', text: msg }));
       if (f.state === 'stale_verifier' && f.staleRootHash) {
         card.appendChild(el('div', { className: 'failure-detail mono', text: 'stale trace_root: ' + shortHash(f.staleRootHash) }));
       }
@@ -1333,6 +1458,178 @@
     row.appendChild(el('span', { className: 'evi-label', text: label }));
     row.appendChild(el('span', { className: 'evi-chip ' + (chipClass || 'chip-neutral'), text: value }));
     return row;
+  }
+
+  /* ============================================================ *
+   * EVIDENCE RIBBON — M5 §M5 (compact, ALWAYS-VISIBLE status strip).
+   *
+   * A one-line strip near the top of #live-view that lets a user "see authority/
+   * evidence without living in the Trust Panel". It surfaces SIX facts as compact
+   * chips — Runtime, Policy, Trace, Verifier, Extension posture, and the current
+   * Authority — all DERIVED from the live `view` + the EXISTING gates. It NEVER
+   * recomputes or re-decides trust:
+   *   - Authority + the Verifier chip's HONEST COLOR come straight from
+   *     deriveAuthority(view): green (chip-ok) ONLY when deriveAuthority === 'verified';
+   *     soft/claimed (degraded) → amber (chip-warn); denied → red (chip-bad);
+   *     read / no-run → neutral.
+   *   - Trace chain-ok/✗ reads view.chainResult (the same chain gate the verdict pane
+   *     uses); Verifier signature state reads view.sigResult.
+   *   - Runtime / Policy / Extension posture read the run's badges (the RunOpened
+   *     envelope) — facts, not trust re-decisions.
+   * With NO run, every chip shows a quiet neutral empty posture (no fabrication).
+   * ============================================================ */
+
+  /**
+   * Compute the six ribbon facts for a run `view` (or null/empty for no run). Pure +
+   * defensive. Each fact is { label, text, chipClass } where chipClass is honest:
+   * the Verifier + Authority chips are chip-ok ONLY when deriveAuthority === 'verified'.
+   */
+  function deriveEvidenceRibbon(view) {
+    // No run yet → quiet neutral posture; never fabricate runtime/policy/trust facts.
+    if (!view || !view.badges) {
+      return {
+        hasRun: false,
+        authority: 'read',
+        facts: [
+          { label: 'Runtime', text: 'no run', chipClass: 'chip-dim' },
+          { label: 'Policy', text: 'no run', chipClass: 'chip-dim' },
+          { label: 'Trace', text: 'no run', chipClass: 'chip-dim' },
+          { label: 'Verifier', text: 'no run', chipClass: 'chip-dim' },
+          { label: 'Extension', text: 'no run', chipClass: 'chip-dim' },
+          { label: 'Authority', text: 'read · no run', chipClass: 'chip-neutral' },
+        ],
+      };
+    }
+
+    var b = view.badges;
+    var authority = deriveAuthority(view);
+    var denied = authority === 'denied';
+
+    // ---- Runtime: profile + isolated/not. Isolated trusted runtime is the only
+    // posture that is honestly "ok"; a dev runtime is a red fact. ----
+    var isolated = b.runtimeTrust === 'trusted';
+    var runtimeText = (b.runtimeProfile || 'unknown') + (isolated ? ' · isolated' : ' · NOT isolated');
+    var runtimeChip = isolated ? 'chip-ok' : 'chip-bad';
+
+    // ---- Policy: posture / allow-trace. We do NOT recompute enforcement; we report
+    // whether any egress was actually BLOCKED (an enforced deny) vs all observed/
+    // allowed. Soft observe-only is NOT a hard allow, so "trace" is the honest framing.
+    var pds = Array.isArray(view.policyDecisions) ? view.policyDecisions : [];
+    var enforcedDeny = false;
+    for (var p = 0; p < pds.length; p++) {
+      if (pds[p] && pds[p].enforcement !== 'observe-only' && pds[p].blocked) { enforcedDeny = true; break; }
+    }
+    var policyText = pds.length
+      ? (enforcedDeny ? pds.length + ' decisions · deny enforced' : pds.length + ' decisions · all traced/allowed')
+      : 'policy on · no decisions yet';
+    var policyChip = enforcedDeny ? 'chip-warn' : 'chip-neutral';
+
+    // ---- Trace: N traced events + chain-ok/✗ from the SAME chain gate. ----
+    var trace = Array.isArray(view.trace) ? view.trace : [];
+    var chain = view.chainResult;
+    var chainText;
+    var traceChip;
+    if (!trace.length) {
+      chainText = 'no events yet';
+      traceChip = 'chip-dim';
+    } else if (!chain) {
+      chainText = trace.length + ' events · chain pending';
+      traceChip = 'chip-neutral';
+    } else if (chain.chainOk === true) {
+      chainText = trace.length + ' events · chain ✓';
+      traceChip = 'chip-ok';
+    } else {
+      chainText = trace.length + ' events · chain ✗';
+      traceChip = 'chip-bad';
+    }
+
+    // ---- Verifier: verdict + signature state. HONEST COLOR keyed to deriveAuthority:
+    // green ONLY when the run is verified; denied → red; soft/claimed/missing → amber;
+    // no verdict → neutral. We read the gate, never re-decide it. ----
+    var res = view.sigResult;
+    var verifierText;
+    var verifierChip;
+    if (!view.verdict) {
+      verifierText = 'no verdict';
+      verifierChip = denied ? 'chip-bad' : 'chip-neutral';
+    } else if (authority === 'verified') {
+      verifierText = 'verdict · signature ✓ (product)';
+      verifierChip = 'chip-ok';
+    } else if (res && res.status === 'verified' && res.tier === 'untrusted-key') {
+      verifierText = 'verdict · UNTRUSTED key';
+      verifierChip = 'chip-bad';
+    } else if (res && res.status === 'verified' && res.tier === 'demo') {
+      verifierText = 'verdict · signature ✓ (demo — not product)';
+      verifierChip = 'chip-warn';
+    } else if (res && res.status === 'verified') {
+      // Valid product signature but the run is not verified (e.g. dev runtime floor).
+      verifierText = 'verdict · signature ✓ (not product-trusted)';
+      verifierChip = denied ? 'chip-bad' : 'chip-warn';
+    } else {
+      verifierText = 'verdict · signature ✗';
+      verifierChip = denied ? 'chip-bad' : 'chip-warn';
+    }
+
+    // ---- Extension posture: Sovereign (curated) vs Developer (ambient allowed). ----
+    var sovereign = b.extensionPosture === 'sovereign';
+    var extText = sovereign ? 'Sovereign (curated)' : 'Developer (ambient)';
+    var extChip = sovereign ? 'chip-neutral' : 'chip-warn';
+
+    // ---- Authority: the run's REAL assurance straight from deriveAuthority. This is
+    // the load-bearing honesty chip — green ONLY at 'verified'. ----
+    var authChip = authorityToChipClass(authority);
+
+    return {
+      hasRun: true,
+      authority: authority,
+      facts: [
+        { label: 'Runtime', text: runtimeText, chipClass: runtimeChip },
+        { label: 'Policy', text: policyText, chipClass: policyChip },
+        { label: 'Trace', text: chainText, chipClass: traceChip },
+        { label: 'Verifier', text: verifierText, chipClass: verifierChip },
+        { label: 'Extension', text: extText, chipClass: extChip },
+        { label: 'Authority', text: authorityRibbonText(authority), chipClass: authChip },
+      ],
+    };
+  }
+
+  /** Honest color for the authority chip: green ONLY at 'verified'; never overclaim. */
+  function authorityToChipClass(authority) {
+    if (authority === 'verified') return 'chip-ok';
+    if (authority === 'denied') return 'chip-bad';
+    if (authority === 'soft' || authority === 'claimed') return 'chip-warn';
+    return 'chip-neutral'; // read / unknown
+  }
+  /** Short authority label for the ribbon (mirrors the AUTHORITY_CHIP wording). */
+  function authorityRibbonText(authority) {
+    var a = AUTHORITY_CHIP[authority];
+    return a ? a.label : 'read · no authority yet';
+  }
+
+  /**
+   * Render the evidence ribbon into #live-evidence-ribbon as a row of compact chips.
+   * DOM-only via el() (no innerHTML); safe with no DOM. Reuses the .evi-chip / chip-*
+   * palette and the .evi-label styling. Never re-decides trust — it paints
+   * deriveEvidenceRibbon(view)'s already-honest facts.
+   */
+  function renderEvidenceRibbon(view) {
+    var root = document.getElementById('live-evidence-ribbon');
+    if (!root) return;
+    clear(root);
+    var ribbon = deriveEvidenceRibbon(view);
+    // Reflect the run's authority on the container so the strip can borrow the halo
+    // (CSS-only). View-only; the chip colors are already honest per fact.
+    root.setAttribute('data-authority', ribbon.authority);
+    root.setAttribute('data-has-run', ribbon.hasRun ? 'true' : 'false');
+    var rowEl = el('div', { className: 'evi-ribbon' });
+    for (var i = 0; i < ribbon.facts.length; i++) {
+      var f = ribbon.facts[i];
+      var cell = el('span', { className: 'evi-ribbon-cell' });
+      cell.appendChild(el('span', { className: 'evi-label', text: f.label }));
+      cell.appendChild(el('span', { className: 'evi-chip ' + f.chipClass, text: f.text }));
+      rowEl.appendChild(cell);
+    }
+    root.appendChild(rowEl);
   }
 
   /**
@@ -1765,8 +2062,14 @@
   }
 
   function renderSelectedRun() {
-    if (!selectedRunId || !runs[selectedRunId]) return;
+    if (!selectedRunId || !runs[selectedRunId]) {
+      // No run selected: keep the always-visible ribbon in a quiet neutral posture
+      // (no fabrication) rather than leaving stale chips from a prior run.
+      renderEvidenceRibbon(null);
+      return;
+    }
     var view = runs[selectedRunId];
+    renderEvidenceRibbon(view);
     setFrictionSurface(view);
     renderBadges(view);
     renderFailures(view);
@@ -2289,6 +2592,9 @@
     if (typeof window !== 'undefined' && typeof window.GLYPHSPEK_REDUCE_MOTION !== 'undefined') {
       applyReduceMotion(window.GLYPHSPEK_REDUCE_MOTION === true);
     }
+    // M5 — seed the always-visible evidence ribbon with its quiet neutral posture so
+    // it reads as present-but-empty before any run streams (no fabrication).
+    renderEvidenceRibbon(null);
     // Host → webview run-event stream. The real supervisor stream and the mock
     // driver both arrive here, so the real stream slots in with NO renderer change.
     window.addEventListener('message', function (event) {
@@ -2469,6 +2775,20 @@
       renderTimeline: renderTimeline,
       groupLiveTimelineEvents: groupLiveTimelineEvents,
       summarizeLiveGroup: summarizeLiveGroup,
+      // EVIDENCE RIBBON — M5 §M5 (compact always-visible status strip). Exposed PURE
+      // so test/liveEvidenceRibbon.test.mjs asserts the six facts + the authority
+      // color mapping (green ONLY at deriveAuthority==='verified', amber for soft/
+      // degraded, neutral when no run) on the REAL panel code — never a re-decision.
+      deriveEvidenceRibbon: deriveEvidenceRibbon,
+      renderEvidenceRibbon: renderEvidenceRibbon,
+      // FAILURE STATES (M5 §14) — the kind/label/severity tables + the renderer +
+      // the webview-derived untrusted_verifier_key surfacer, exposed so the failure-
+      // states test asserts each of the NINE renders DISTINCTLY (never as success).
+      FAILURE_KIND: FAILURE_KIND,
+      FAILURE_SEVERITY: FAILURE_SEVERITY.slice(),
+      FAILURE_LABELS: FAILURE_LABELS,
+      renderFailures: renderFailures,
+      surfaceUntrustedKeyFailure: surfaceUntrustedKeyFailure,
     };
   }
 

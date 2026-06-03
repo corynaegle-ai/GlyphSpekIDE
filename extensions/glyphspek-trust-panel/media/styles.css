@@ -712,6 +712,35 @@ input[type="file"] {
   background: var(--bg-elev);
 }
 
+/* ---------- evidence ribbon (M5 §M5) ---------- *
+ * A compact, ALWAYS-VISIBLE one-line strip near the top of #live-view: Runtime,
+ * Policy, Trace, Verifier, Extension posture, Authority. Reuses the .evi-chip /
+ * chip-* palette + .evi-label styling; the chip colors are decided in live.js
+ * (honest per-fact), so this is layout only. */
+.evidence-ribbon-strip {
+  margin: 0 0 4px;
+  padding: 6px 4px;
+}
+.evi-ribbon {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px 14px;
+}
+.evi-ribbon-cell {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+/* The ribbon's labels sit inline (not the fixed-width column of the summary grid). */
+.evi-ribbon-cell .evi-label {
+  width: auto;
+}
+.evi-ribbon-cell .evi-chip {
+  max-width: 36ch;
+}
+
 /* ---------- timeline ---------- */
 .timeline {
   display: flex;
@@ -1116,6 +1145,37 @@ input[type="file"] {
 }
 .failure-missing_verifier_signature {
   border-color: var(--fail);
+}
+/* M5 §14 — the remaining required DISTINCT states. Each gets its own accent so it is
+   visually distinguishable; NONE is ever green (a failure never reads as success). */
+.failure-untrusted_verifier_key {
+  border-color: var(--fail);
+  background: rgba(224, 84, 75, 0.1);
+}
+.failure-untrusted_verifier_key .failure-head {
+  color: var(--fail);
+}
+.failure-supervisor_hash_mismatch {
+  border-color: var(--fail);
+  background: rgba(224, 84, 75, 0.12);
+}
+.failure-bridge_auth_failure {
+  border-color: var(--fail);
+  background: rgba(224, 84, 75, 0.12);
+}
+.failure-incompatible_supervisor {
+  border-color: #c98fe0;
+  background: rgba(201, 143, 224, 0.1);
+}
+.failure-incompatible_supervisor .failure-head {
+  color: #c98fe0;
+}
+.failure-ambient_extensions_dev_mode {
+  border-color: var(--warn);
+  background: rgba(217, 164, 65, 0.08);
+}
+.failure-ambient_extensions_dev_mode .failure-head {
+  color: var(--warn);
 }
 
 /* ---- diff / changed files ---- */
