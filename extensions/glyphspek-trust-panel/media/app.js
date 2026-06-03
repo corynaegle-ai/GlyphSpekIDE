@@ -2544,6 +2544,21 @@ function renderWorkspaceEmptyState() {
 }
 
 function wireControls() {
+  // PROJECT-SCOPING (panel honesty). The three demo buttons — "Reload signed
+  // sample", "Tamper sample (demo)", and "Demo live run" — are scaffolding for the
+  // standalone zero-install demo page only. In a customer's in-IDE Trust Panel
+  // (IS_WORKSPACE_PANEL) they are alarming/confusing and surface synthetic demo
+  // evidence, contradicting the project-scoping work, so hide them. "Load run
+  // bundle…" and "Download bundle" are real and stay visible in both contexts.
+  // The standalone demo page does not set GLYPHSPEK_PANEL_CONTEXT, so it still
+  // shows all five buttons.
+  if (IS_WORKSPACE_PANEL) {
+    ['sample-btn', 'tamper-btn', 'demo-live-btn'].forEach((id) => {
+      const el = document.getElementById(id);
+      if (el) el.hidden = true;
+    });
+  }
+
   const picker = document.getElementById('file-input');
   if (picker) {
     picker.addEventListener('change', function (e) {

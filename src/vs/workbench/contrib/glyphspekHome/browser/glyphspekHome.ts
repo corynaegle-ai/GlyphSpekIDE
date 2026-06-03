@@ -141,7 +141,8 @@ export class GlyphspekHomePage extends EditorPane {
 	/**
 	 * The center COMPOSER container (Slice 3), so a selection change can swap it between the
 	 * editable untitled-draft and the selected-run read-only intent/status WITHOUT a full
-	 * rebuild. The governance-surfaces list below it is unaffected and is not re-rendered.
+	 * rebuild. The governance-surfaces band (rendered into `inner`, below the panes) is
+	 * unaffected and is not re-rendered.
 	 */
 	private composerBody: HTMLElement | undefined;
 	/**
@@ -225,7 +226,8 @@ export class GlyphspekHomePage extends EditorPane {
 		this.renderHeader(inner);
 
 		// Slice 1: grow Home toward the §3 three-pane Agent View. LEFT = Runs list (full),
-		// CENTER = today's composer + governance surfaces, RIGHT = Evidence (Slice-1 STUB).
+		// CENTER = today's composer, RIGHT = Evidence (Slice-1 STUB). The governance surfaces
+		// are NOT a pane — they render as a full-width band below the grid (see renderCommands).
 		const panes = append(inner, $('.gsh-panes'));
 		this.panesEl = panes;
 		const left = append(panes, $('.gsh-pane.gsh-pane-runs'));
@@ -235,12 +237,19 @@ export class GlyphspekHomePage extends EditorPane {
 		this.renderRunsList(left);
 
 		// CENTER: the Slice-3 composer host. It swaps between the editable untitled draft and
-		// the selected-run read-only intent/status; the governance-surfaces list below is fixed.
+		// the selected-run read-only intent/status. The governance-surfaces list is NOT here —
+		// it renders as a full-width band BELOW the panes so it never sits trapped in the narrow
+		// center column with empty gutters either side.
 		this.composerBody = append(center, $('.gsh-composer-host'));
 		this.renderComposer();
-		this.renderCommands(center);
 
 		this.renderEvidencePane(right);
+
+		// Governance surfaces render into `inner` (NOT the center pane) so the section spans the
+		// full inner width as its own band below the three panes. DOM order: header → panes →
+		// governance band. renderCommands appends `.gsh-section` to its parent; passing `inner`
+		// makes it full-bleed and lets the command list lay out as a responsive card grid.
+		this.renderCommands(inner);
 
 		// Slice 4: paint the Authority-Halo edge tint for the current selection (neutral when none).
 		this.applyAuthorityTint();
@@ -430,7 +439,9 @@ export class GlyphspekHomePage extends EditorPane {
 	}
 
 	private renderCommands(parent: HTMLElement): void {
-		const section = append(parent, $('.gsh-section'));
+		// `.gsh-commands` marks this as the full-width governance BAND (rendered into `inner`,
+		// below the panes) — the CSS keys the band separation + responsive card grid off it.
+		const section = append(parent, $('.gsh-section.gsh-commands'));
 		const sectionHead = append(section, $('.gsh-section-head'));
 		sectionHead.textContent = localize('glyphspekHome.commandsTitle', "Governance surfaces");
 

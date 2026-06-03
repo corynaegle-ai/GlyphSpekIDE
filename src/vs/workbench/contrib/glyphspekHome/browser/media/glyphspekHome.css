@@ -315,17 +315,33 @@
 	font-weight: 700;
 }
 
-/* ---------- governance command rows ---------- */
+/* ---------- governance surfaces: full-width band below the panes ----------
+ * The Governance-surfaces section renders into `.glyphspek-home-inner` (NOT the center
+ * pane), so it spans the full inner width as its own band beneath the three-pane grid.
+ * Its command list is a responsive card grid (not a vertical stack) so the rows fan out
+ * across the full width instead of stacking in the narrow center column. */
+.glyphspek-home .gsh-section.gsh-commands {
+	/* A little extra separation so the band reads as its own section below the panes
+	 * (the inner flex `gap:26px` already spaces it; this top margin makes the break
+	 * unmistakable without re-introducing a heavy divider). */
+	margin-top: 10px;
+}
 .glyphspek-home .gsh-command-list {
-	display: flex;
-	flex-direction: column;
-	gap: 7px;
+	display: grid;
+	/* Responsive card grid: as many ~280px cells as fit, each sharing the leftover space.
+	 * `min` of 280px keeps a card readable; `1fr` lets them grow to fill the full width.
+	 * On a narrow pane the inner is narrower than 280px so this naturally collapses to one
+	 * column (and .gsh-narrow forces a single column explicitly below). */
+	grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+	gap: 10px;
 }
 .glyphspek-home .gsh-command-row {
 	display: flex;
 	align-items: center;
 	gap: 12px;
+	/* A grid CELL now — fill its track (the grid sizes the column), not the whole band. */
 	width: 100%;
+	min-width: 0;
 	text-align: left;
 	cursor: pointer;
 	border: 1px solid var(--gsh-border);
@@ -399,6 +415,12 @@
 	position: relative;
 }
 .glyphspek-home.gsh-narrow .gsh-panes {
+	grid-template-columns: 1fr;
+}
+/* On a narrow pane the governance band collapses to a single column too — one card per
+ * row, matching the stacked panes (auto-fit would already do this since the inner is
+ * narrower than the 280px min, but pin it explicitly so the intent is unambiguous). */
+.glyphspek-home.gsh-narrow .gsh-command-list {
 	grid-template-columns: 1fr;
 }
 
