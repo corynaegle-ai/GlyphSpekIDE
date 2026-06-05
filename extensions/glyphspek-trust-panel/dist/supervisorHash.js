@@ -13,5 +13,5 @@ exports.BUNDLED_BRIDGE_SERVER_SHA256 = exports.BUNDLED_SUPERVISOR_SHA256 = void 
  * the bundle must be re-built (re-running this script regenerates the hashes).
  */
 exports.BUNDLED_SUPERVISOR_SHA256 = '9dd52d7c8e870085d3b5767b76d8529c97023e2595da71252a163503606a8123';
-exports.BUNDLED_BRIDGE_SERVER_SHA256 = '62cdad96a8f5d5303f94c612b8b1b9825341c8ebde1cc20271be544cb5f555c2';
+exports.BUNDLED_BRIDGE_SERVER_SHA256 = '936146edbaa318004505110b186039306a3c8d637ed9a7bffcf91df059aad74a';
 //# sourceMappingURL=supervisorHash.js.map

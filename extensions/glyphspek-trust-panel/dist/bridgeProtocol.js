@@ -43,7 +43,7 @@
  * caller-identity boundary (bridge.ts); this module is the message grammar.
  */
 Object.defineProperty(exports, "__esModule", { value: true });
-exports.TERMINAL_VERDICT_ASSURANCES = exports.TERMINAL_ENV_POSTURES = exports.MODEL_CREDENTIAL_FIELD_RE = exports.RUN_TRUSTS = exports.AUTONOMY_TIERS = exports.EXTENSION_POSTURES = exports.ACTOR_TYPES = exports.BridgeErrorCode = exports.BridgeNotification = exports.BridgeMethod = exports.BRIDGE_JSONRPC = exports.BRIDGE_PROTOCOL_VERSION = void 0;
+exports.TERMINAL_VERDICT_ASSURANCES = exports.TERMINAL_ENV_POSTURES = exports.MODEL_CREDENTIAL_FIELD_RE = exports.INDEX_PROGRESS_PHASES = exports.RUN_TRUSTS = exports.AUTONOMY_TIERS = exports.EXTENSION_POSTURES = exports.ACTOR_TYPES = exports.BridgeErrorCode = exports.BridgeNotification = exports.BridgeMethod = exports.BRIDGE_JSONRPC = exports.BRIDGE_PROTOCOL_VERSION = void 0;
 exports.isHandshakeCompatible = isHandshakeCompatible;
 exports.findCredentialField = findCredentialField;
 exports.validateModelCallParams = validateModelCallParams;
@@ -142,6 +142,12 @@ exports.BridgeMethod = {
      */
     ChatSend: 'chat/send',
     /**
+     * Fetch one explicit http(s) URL for `@Web` chat context. Synchronous
+     * request/result, handled supervisor-side only: the extension never fetches web
+     * content directly. Mirrors the canonical spikes/p0-contracts/bridge.ts.
+     */
+    WebFetch: 'web/fetch',
+    /**
      * Start a GOVERNED AGENTIC BUILD (Phase C — the chat→ACTOR promotion). Unlike
      * {@link ChatSend} (Ask-only, read-only), a build crosses from assistant to ACTOR:
      * it edits files and runs commands under `cwd`. Per the developer trust doctrine
@@ -173,6 +179,32 @@ exports.BridgeMethod = {
      * `deny` discards it (no codex, terminal error). Additive; mirrors the canonical contract.
      */
     ApprovalRespond: 'approval/respond',
+    /**
+     * Retrieve top-k chunks from the workspace's LOCAL code index (@Codebase repo-aware
+     * retrieval). SYNCHRONOUS request/result (NOT ack-then-stream): the supervisor lazily
+     * builds the on-device index for `workspaceRoot` on first use (local embedder +
+     * brute-force store, memory-only residency), embeds `query`, and returns the top-k
+     * cosine-similar chunks. Everything is LOCAL — nothing in the index path egresses
+     * code. The result carries non-secret repo SNIPPETS only, NEVER a credential.
+     * Best-effort: on ANY error the result is `{ ok:false, hits:[] }` so chat degrades to
+     * NO repo context. MIRRORS the canonical spikes/p0-contracts/bridge.ts.
+     */
+    IndexRetrieve: 'index/retrieve',
+    /**
+     * BUILD (or rebuild) the workspace's LOCAL code index on demand (the no-CLI "Index
+     * Workspace" command). SYNCHRONOUS request/result: the supervisor builds (or
+     * incrementally rebuilds) the SESSION'S OWN on-device index for `workspaceRoot` and
+     * returns the {@link IndexBuildStats} (files / chunks / embedded / reused / embedMs /
+     * totalMs). Session-bound EXACTLY like {@link IndexRetrieve} (completed-handshake gate
+     * + the same session-root binding) and shares the SAME per-workspace server-side index
+     * the chat retrieval + repo-aware FIM use (never a parallel index). `persist` opts the
+     * build into the 'workspace-encrypted' residency (an encrypted, workspace-local
+     * snapshot that survives session restarts) instead of the memory-only default.
+     * Everything is LOCAL — nothing egresses code. Best-effort: on ANY error the result is
+     * `{ ok:false }` with a short non-secret `error`. MIRRORS the canonical
+     * spikes/p0-contracts/bridge.ts.
+     */
+    IndexBuild: 'index/build',
 };
 /** Server→client notification methods (no response expected). */
 exports.BridgeNotification = {
@@ -201,6 +233,17 @@ exports.BridgeNotification = {
      * never a credential.
      */
     AgenticBuildEvent: 'build/event',
+    /**
+     * One `index/build` PROGRESS event (the "Index Workspace" command). After an
+     * {@link BridgeMethod.IndexBuild} request is accepted, the supervisor STREAMS a
+     * sequence of these (one per phase/batch) carrying the {@link IndexProgressEvent}
+     * counts, then resolves the request with the final {@link IndexBuildResult}. The
+     * client routes each event to a per-request `onProgress` callback AND resets the
+     * request's inactivity timeout on every event — so a long, progressing build never
+     * times out. Carries non-secret build COUNTS only (done/total/phase), never a
+     * credential and never any code/chunk text.
+     */
+    IndexProgress: 'index/progress',
 };
 /* ============================================================== *
  * ERROR CODES
@@ -272,6 +315,12 @@ exports.RUN_TRUSTS = [
     'untrusted',
     'refused',
 ];
+/**
+ * The discrete BUILD PHASES an `index/build` streams progress for (MIRROR of the
+ * canonical contract). A coarse `discover` → `chunk` → `embed` sequence; the embed
+ * phase (the long pole) carries the meaningful percent and is streamed per BATCH.
+ */
+exports.INDEX_PROGRESS_PHASES = ['discover', 'chunk', 'embed'];
 /* ============================================================== *
  * MODEL RPC RUNTIME VALIDATORS (MIRROR of spikes/p0-contracts/model.ts).
  *

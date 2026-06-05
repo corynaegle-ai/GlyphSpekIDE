@@ -70,6 +70,12 @@ const ptyHost_1 = require("./ptyHost");
 const nodePtyBaseDirs_1 = require("./nodePtyBaseDirs");
 const inlineScript_1 = require("./inlineScript");
 const chatParticipant_1 = require("./chatParticipant");
+const inlineEdit_1 = require("./inlineEdit");
+const indexStatusBar_1 = require("./indexStatusBar");
+const indexProgress_1 = require("./indexProgress");
+const inlineCompletion_1 = require("./inlineCompletion");
+const ungovernedTerminalNotice_1 = require("./ungovernedTerminalNotice");
+const autoImport_1 = require("./autoImport");
 const bridgeProtocol_1 = require("./bridgeProtocol");
 const policyHash_1 = require("./policyHash");
 const runEventProtocol_1 = require("./runEventProtocol");
@@ -87,6 +93,7 @@ const haloChrome_1 = require("./haloChrome");
 const provenanceGutter_1 = require("./provenanceGutter");
 const governedRunsCardView_1 = require("./governedRunsCardView");
 const surfaces_1 = require("./surfaces");
+const verifyAutoTest_1 = require("./verifyAutoTest");
 /** The file names that make up a run bundle, in load order. */
 const BUNDLE_FILE_NAMES = [
     'trace.jsonl',
@@ -2276,27 +2283,10 @@ function activate(context) {
             getTierController().set(tier, { syncWebview: true });
         }
     }));
-    // Inline edit (Cmd-K-style, DEMO). Takes the active editor selection + an
-    // instruction and previews it through the stub gateway. This is still the demo
-    // preview surface (not yet brokered or diff-gated); only the primary Chat command
-    // was repurposed onto the governed terminal.
-    context.subscriptions.push(vscode.commands.registerCommand('glyphspek.inlineEdit', async () => {
-        const sel = activeEditorSelection();
-        if (!sel) {
-            void vscode.window.showWarningMessage('GlyphSpek: open a file (and optionally select a region) to use inline edit.');
-            return;
-        }
-        const instruction = await vscode.window.showInputBox({
-            prompt: `GlyphSpek inline edit — instruction for ${sel.ref}`,
-            placeHolder: 'e.g. "add input validation" — demo preview, not yet brokered or diff-gated',
-        });
-        if (instruction === undefined)
-            return; // cancelled
-        const panel = ChatPanel.createOrShow(context.extensionUri, stubModelGateway());
-        panel.reveal();
-        panel.setRunId(`inline-${Date.now().toString(36)}`);
-        panel.seedInlineEdit(sel.ref, sel.text, instruction);
-    }));
+    // Inline edit (Cmd-K-style) is now a REAL governed gateway edit, registered via
+    // registerInlineEdit(...) further below (alongside the chat agent) so it can REUSE the
+    // SAME governed Codex session factory the chat participant is wired with. The former
+    // stub-gateway demo preview has been removed.
     context.subscriptions.push(vscode.commands.registerCommand('glyphspek.loadRunBundle', async () => {
         const picked = await vscode.window.showOpenDialog({
             canSelectFiles: false,
@@ -2351,6 +2341,16 @@ function activate(context) {
         panel.reveal();
         panel.postAgenticBuildReview((0, agenticBuildReview_1.previewAgenticBuildReviewFixture)(), true);
     }));
+    // VERIFY (Auto Test) — the EXECUTABLE-verify layer (catches LOGIC bugs the
+    // structural compile gate cannot). Highlight a function → right-click → generate
+    // edge-case tests FROM THE SPEC (doc+signature, not the body, so AI expectations
+    // don't inherit the implementation's bug) → run them in a v1 local timed sandbox
+    // (child Node process, minimal env, hard timeout) → show an honest CHARACTERIZATION
+    // evidence card. The HarnessRunner seam routes execution through the governed run
+    // envelope in a later version.
+    for (const disposable of (0, verifyAutoTest_1.registerVerifyAutoTest)(context)) {
+        context.subscriptions.push(disposable);
+    }
     // GOVERNED AGENTIC BUILD — THE CHAT→ACTOR PROMOTION (Phase C-UI capstone).
     // "GlyphSpek: Build This (Governed Run)". This is the EXPLICIT authority boundary
     // (docs/developer-trust-model.md): chat stays Ask (lightweight); promoting a task into
@@ -2389,6 +2389,41 @@ function activate(context) {
     // is NOT routed through the trusted-run gesture gate below (there is no product-
     // trust lever to protect). The command opens the governed terminal directly.
     context.subscriptions.push(vscode.commands.registerCommand('glyphspek.openGovernedTerminal', () => openGovernedTerminal(context, supervisorOutput)));
+    // GOVERNANCE-BOUNDARY LEGIBILITY (A1, Part 2 — honesty about STOCK terminals). A
+    // "GlyphSpek IDE" still exposes ungoverned stock terminals (the integrated terminal,
+    // task/debug shells — full host env, untraced egress) that look almost identical to a
+    // Governed Terminal. When a terminal GlyphSpek did NOT create opens, show a one-time
+    // (dismissible) honest warning that it is NOT governed/traced and offer to open a
+    // governed one. Best-effort + non-fatal: a state-store/UI failure must never break
+    // opening a terminal. The disposable is registered in context.subscriptions (no leak);
+    // ownership is read from the WeakSet the governed createTerminal site populates.
+    // Guarded on the API's presence so a minimal host/test stub without
+    // onDidOpenTerminal degrades to no notice (the same defensive shape used elsewhere,
+    // e.g. the ThemeColor guard) rather than throwing during activation.
+    if (typeof vscode.window.onDidOpenTerminal === 'function') {
+        context.subscriptions.push(vscode.window.onDidOpenTerminal((terminal) => {
+            try {
+                const isGlyphSpekOwned = glyphSpekOwnedTerminals.has(terminal);
+                const dismissed = Boolean(context.globalState.get(ungovernedTerminalNotice_1.UNGOVERNED_TERMINAL_NOTICE_KEY));
+                if (!(0, ungovernedTerminalNotice_1.shouldAnnounceUngovernedTerminal)({ isGlyphSpekOwned, dismissed })) {
+                    return;
+                }
+                void vscode.window
+                    .showWarningMessage(ungovernedTerminalNotice_1.UNGOVERNED_TERMINAL_NOTICE, 'New Governed Terminal', "Don't show again")
+                    .then((choice) => {
+                    if (choice === 'New Governed Terminal') {
+                        void vscode.commands.executeCommand('glyphspek.openGovernedTerminal');
+                    }
+                    else if (choice === "Don't show again") {
+                        void context.globalState.update(ungovernedTerminalNotice_1.UNGOVERNED_TERMINAL_NOTICE_KEY, true);
+                    }
+                });
+            }
+            catch {
+                /* best-effort: the honest boundary notice must never break opening a terminal */
+            }
+        }));
+    }
     // GlyphSpek CHAT (M7). Chat = a governed terminal running INTERACTIVE Claude Code.
     // The interactive TUI IS the chat: it runs on the user's OWN subscription (auth from
     // ~/.claude; GlyphSpek injects no credential), governed (egress via the supervisor's
@@ -2398,6 +2433,22 @@ function activate(context) {
     // ChatPanel/stubModelGateway — that fake gateway is retired as the chat path. The
     // API-key model broker is a separate, secondary path (parked).
     context.subscriptions.push(vscode.commands.registerCommand('glyphspek.openChat', () => openGovernedChat(context, supervisorOutput)));
+    // INTERNAL/TEST-ONLY demo door for the RETIRED stub ChatPanel + stubModelGateway
+    // surface. The legacy stub chat webview (chat.html sprite injection + the stub
+    // gateway's model-selection/broker logic) is no longer reachable from a user-facing
+    // command (openChat runs a governed terminal; inlineEdit is now the REAL governed
+    // gateway edit). This command is deliberately NOT contributed in package.json#commands
+    // (it does not appear in the palette) — it exists ONLY so the surviving stub-panel
+    // unit tests (iconSpriteInjection / chatModelSelection) can still open and assert that
+    // retired surface. Remove it when the stub ChatPanel itself is deleted.
+    context.subscriptions.push(vscode.commands.registerCommand('glyphspek.openStubChatPanel', () => {
+        const panel = ChatPanel.createOrShow(context.extensionUri, stubModelGateway());
+        panel.reveal();
+        // Seed a demo run id so the stub gateway's broker path has an active run to call
+        // against (the send path refuses with "no active run" otherwise) — matching what
+        // the retired demo-inlineEdit door used to do.
+        panel.setRunId(`stub-${Date.now().toString(36)}`);
+    }));
     // GlyphSpek NATIVE CHAT (M7). The "normal chat window": a webview where the user
     // types a message and sees the assistant reply, GOVERNED through our gateway —
     // bridge chat/send → the GlyphSpek model gateway's CODEX backend on the user's own
@@ -2424,6 +2475,13 @@ function activate(context) {
     // ChatGPT subscription (governed, UNSANDBOXED, never product-trusted); no credential
     // is injected. The separate command-palette webview above is the legacy surface.
     context.subscriptions.push((0, chatParticipant_1.registerGlyphSpekChatAgent)(buildNativeChatSessionFactory(context, chatOutput), chatOutput));
+    // INLINE EDIT (Cmd-K-style) — a REAL governed, gateway-backed edit. Reuses the EXACT
+    // SAME governed Codex session factory the chat participant above is wired with
+    // (buildNativeChatSessionFactory → openChatSession → chat/send → Codex gateway), so an
+    // inline rewrite shares chat's governed posture: a brokered, metadata-TRACED model call
+    // on the user's own ChatGPT subscription (governed, UNSANDBOXED, never product-trusted;
+    // no credential injected). The rewrite is applied as an UNDOABLE WorkspaceEdit (⌘Z).
+    (0, inlineEdit_1.registerInlineEdit)(context, buildNativeChatSessionFactory(context, chatOutput), chatOutput);
     // FIRST-PARTY WEBVIEW GESTURE GATE (sweep-20 High #3 — rework of sweep-19).
     //
     // ALL THREE trusted-run paths (governed / bridge / live) are PRODUCT-TRUSTED:
@@ -2460,6 +2518,800 @@ function activate(context) {
     context.subscriptions.push(vscode.commands.registerCommand('glyphspek.startLiveRun', () => {
         offerTrustedRun('live');
     }));
+    // INDEX WORKSPACE (the no-CLI "Index Workspace" experience). A command + status-bar
+    // item that build/rebuild the workspace's LOCAL, on-device code index ON DEMAND, with
+    // visible progress, so the index that powers repo-aware chat + completion is warm before
+    // the first chat message (cold builds are slow). The build runs over the SAME bridge
+    // session-bound index the chat retrieval + repo-aware FIM use (never a parallel index);
+    // `glyphspek.index.persist` carries the encrypted-persist opt-in to the bridge. Honest,
+    // best-effort, never throws.
+    setupIndexWorkspace(context, supervisorOutput);
+    // TAB COMPLETION (UNGOVERNED, on-device LOCAL assist — OPT-IN).
+    // A VS Code InlineCompletionItemProvider that fills code at the cursor using the
+    // user's OWN local Ollama daemon's fill-in-the-middle endpoint (inlineCompletion.ts
+    // / ollamaFimClient.ts). LOCAL-only: loopback, NO egress, NO credential, works
+    // OFFLINE / air-gapped. Best-effort — a down daemon returns undefined and never
+    // breaks typing. HONESTY: this is a STOCK-SURFACE local assist that sits OUTSIDE the
+    // governed envelope — it calls Ollama DIRECTLY and is NOT routed through the GlyphSpek
+    // Model broker, so it does NOT appear in the governed Model-Calls trace (broker routing
+    // is intentionally PARKED until completion goes remote). So nothing default-on implies
+    // governance, it is OFF by default: gated on glyphspek.inlineCompletion.enabled
+    // (default FALSE — opt in); model from glyphspek.inlineCompletion.model. Registered for
+    // all documents (pattern '**'). When the setting is false we register NO provider, so
+    // the feature fully no-ops. Guarded so a minimal host / test stub without the
+    // inline-completion API degrades gracefully (it simply registers no provider).
+    if (typeof vscode.languages?.registerInlineCompletionItemProvider === 'function' &&
+        vscode.workspace
+            .getConfiguration('glyphspek')
+            .get('inlineCompletion.enabled', false) &&
+        // Respect workspace trust: don't run the local assist in an untrusted workspace.
+        // Guarded so a stub host without the trust API still works (treats it as trusted).
+        (typeof vscode.workspace.isTrusted !== 'boolean' || vscode.workspace.isTrusted)) {
+        const inlineOutput = vscode.window.createOutputChannel('GlyphSpek Tab Completion');
+        context.subscriptions.push(inlineOutput);
+        inlineOutput.appendLine('[inlineCompletion] UNGOVERNED local assist enabled — loopback Ollama FIM model, ' +
+            'on-device (no egress); NOT routed through the GlyphSpek Model broker and NOT in ' +
+            'the governed Model-Calls trace.');
+        // REPO-AWARE (index-aware FIM) — PROTOTYPE, default-OFF. When
+        // glyphspek.inlineCompletion.repoAware is ON we build a long-lived per-workspace
+        // COMPLETION bridge session (openChatSession → index/retrieve, the SAME warm
+        // session-bound index the chat surface uses) and inject the top-k repo chunks into
+        // the FIM prompt under a HARD timeout — falling back to plain FIM on cold/timeout/
+        // error. The retriever is constructed only when a workspace folder is open; with no
+        // folder there is no index to bind and the provider stays plain-FIM. Best-effort: a
+        // failed session yields a not-warm retriever that always falls back.
+        const workspaceRoot = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+        const repoRetriever = workspaceRoot
+            ? buildCompletionRepoRetriever(context, inlineOutput, workspaceRoot)
+            : undefined;
+        // COMPILE-CHECK GATE INDICATOR. A spinning status-bar item shown ONLY while the gate is
+        // searching for a compiling completion (the primary failed the structural gate and the
+        // provider is regenerating). Created guarded so a minimal host without the status-bar API
+        // degrades to no indicator. The provider's onGateSearch(active) hook toggles it; the
+        // show/hide is balanced in the provider's finally so it never sticks.
+        const onGateSearch = buildGateSearchIndicator(context);
+        // "GENERATING CODE" CURSOR INDICATOR. A faded, animated braille spinner shown AT THE
+        // CURSOR while the provider is generating (especially during multi-chunk auto-chunk), and
+        // hidden the instant the suggestion is ready / the loop ends / it's cancelled. Distinct
+        // surface from the gate's STATUS-BAR "finding a compiling completion…" spinner above (this
+        // is the everyday "the model is thinking" signal at the cursor; the gate's is the rarer
+        // "first draft didn't compile, regenerating" signal). The provider toggles it via the bound
+        // onGenerating(active) hook; the show/hide is balanced in the provider's finally so it never
+        // sticks. Gated on glyphspek.inlineCompletion.generatingIndicator (default true) — when off
+        // we pass no hook so the provider never toggles it. Disposed on deactivate (clears any timer
+        // + decoration). Guarded so a minimal host without the decoration API degrades to no-op.
+        const generatingIndicatorOn = vscode.workspace
+            .getConfiguration('glyphspek')
+            .get('inlineCompletion.generatingIndicator', true);
+        let onGenerating;
+        if (generatingIndicatorOn) {
+            const decorationManager = new inlineCompletion_1.DecorationManager();
+            context.subscriptions.push({ dispose: () => decorationManager.dispose() });
+            onGenerating = decorationManager.onGenerating;
+        }
+        const inlineProvider = new inlineCompletion_1.GlyphSpekInlineCompletionProvider(() => vscode.workspace
+            .getConfiguration('glyphspek')
+            .get('inlineCompletion.model', 'qwen2.5-coder:3b-base'), inlineOutput, undefined, 
+        // ONE-TIME HONEST NOTICE: the FIRST time the (opted-in) local assist actually
+        // activates on this machine, show a single non-blocking info message stating its
+        // ungoverned-local posture. shouldAnnounceUngovernedCompletion gates it to once per
+        // machine via globalState and is best-effort/non-fatal, so a state failure (or a
+        // host without showInformationMessage) never breaks typing.
+        () => {
+            try {
+                if ((0, inlineCompletion_1.shouldAnnounceUngovernedCompletion)(context.globalState)) {
+                    void vscode.window.showInformationMessage(inlineCompletion_1.UNGOVERNED_COMPLETION_NOTICE);
+                }
+            }
+            catch {
+                /* best-effort: the honest notice must never break the local assist */
+            }
+        }, 
+        // Live repo-aware config (read fresh per request). Default OFF.
+        () => readRepoAwareConfig(), repoRetriever, 
+        // LSP-DIRECTED query strategy seam: a thin guarded wrapper over
+        // vscode.executeDefinitionProvider. Used by the 'lsp'/'auto' strategies to inject the
+        // cursor symbol's cross-file DEFINITION index-free. Resolve-never-reject.
+        buildCompletionDefinitionProvider(), 
+        // LEVER 1 (keep the model hot): live reader of keep_alive (default '30m'), passed to
+        // every FIM call so Ollama keeps the model resident across keystrokes.
+        () => vscode.workspace
+            .getConfiguration('glyphspek')
+            .get('inlineCompletion.keepAlive', '30m'), 
+        // AUTO-IMPORT ON ACCEPT — live toggle reader (glyphspek.inlineCompletion.autoImport,
+        // default true). When ON we hand the provider the command id to attach to each item's
+        // on-accept command; when OFF we return undefined so NO command is attached and the
+        // completion behaves exactly as before. Read live so the toggle takes effect without a
+        // reload. The handler (registered below) reads the toggle again before doing any work,
+        // so even a stale-attached command no-ops when the toggle is flipped off mid-session.
+        () => vscode.workspace
+            .getConfiguration('glyphspek')
+            .get('inlineCompletion.autoImport', true)
+            ? inlineCompletion_1.AUTO_IMPORT_AFTER_ACCEPT_COMMAND
+            : undefined, 
+        // TWO-TIER COMPLETIONS — live reader of the cyclable-alternates knobs
+        // (glyphspek.inlineCompletion.alternatives / alternativesCount / alternativesTemperature).
+        // Read fresh per request so every lever is independently toggleable without a reload.
+        // When enabled with a positive count, the provider ADDITIONALLY generates that many
+        // moderate-temperature alternates in the BACKGROUND and returns [primary, ...alternates]
+        // so the native inline-suggest controls (Alt+] / Alt+[) cycle "1/N".
+        () => readAlternativesConfig(), 
+        // LATENCY LEVER — live reader of the PRIMARY sampling temperature
+        // (glyphspek.inlineCompletion.temperature, default 0.1 = today's confident guess). A
+        // VARIETY dial, not a quality dial; >0.7 degrades code.
+        () => vscode.workspace
+            .getConfiguration('glyphspek')
+            .get('inlineCompletion.temperature', 0.1), 
+        // INLINE-SUGGEST REFRESH — after background alternates land, ask VS Code to re-trigger
+        // inline suggestions so the provider is re-invoked and now returns the full cyclable list.
+        // GUARDED so it NEVER disrupts active typing: we only fire when the editor's active
+        // document + cursor are UNCHANGED since the request. Best-effort; a missing command API
+        // or a moved cursor just defers the alternates to the next natural provide.
+        (document, position) => {
+            try {
+                const active = vscode.window.activeTextEditor;
+                if (!active)
+                    return;
+                if (active.document.uri.toString() !== document.uri.toString())
+                    return;
+                const sel = active.selection?.active;
+                if (!sel ||
+                    sel.line !== position.line ||
+                    sel.character !== position.character) {
+                    return;
+                }
+                void vscode.commands.executeCommand('editor.action.inlineSuggest.trigger');
+            }
+            catch {
+                /* best-effort: a failing refresh just defers alternates to the next provide */
+            }
+        }, 
+        // COMPILE-CHECK GATE — live reader of the gate knobs
+        // (glyphspek.inlineCompletion.compileGate / compileGateMaxAttempts, default ON / 3). When
+        // ON and the primary completion is NOT structurally valid when inserted, the provider
+        // searches (regenerates at a raised temperature) for one that is; when OFF the provider is
+        // byte-for-byte the pre-gate behavior. Read fresh per request so the gate is toggleable
+        // without a reload.
+        () => readCompileGateConfig(), 
+        // COMPILE-CHECK GATE — the status-bar "searching" indicator hook.
+        onGateSearch, 
+        // AUTO-CHUNK — live reader of the auto-chunk knobs
+        // (glyphspek.inlineCompletion.autoChunk / autoChunkMaxChunks, default ON / 5). When ON the
+        // primary is built as a sequence of small, self-grounding chunks (generate → re-read what
+        // it wrote → continue), gated + de-duplicated each step, until the block is complete; when
+        // OFF the primary is a single one-shot completion (byte-for-byte today's behavior). Read
+        // fresh per request so it's toggleable without a reload.
+        () => readAutoChunkConfig(), 
+        // "GENERATING CODE" CURSOR INDICATOR — the faded, animated spinner-at-cursor hook (or
+        // undefined when the indicator setting is off, so the provider never toggles it).
+        onGenerating, 
+        // SINGLE-SHOT TOKEN BUDGET — live reader of the single-shot generation budget
+        // (glyphspek.inlineCompletion.maxTokens, default 256). num_predict is a CEILING: short/line
+        // completions still stop early and are unaffected; the extra room lets a typical function
+        // body finish in ONE single-shot Tab (so the background auto-chunk loop only runs for the
+        // long tail). The loop's OWN per-chunk budget stays at the smaller client default (128).
+        () => vscode.workspace
+            .getConfiguration('glyphspek')
+            .get('inlineCompletion.maxTokens', 256));
+        context.subscriptions.push(vscode.languages.registerInlineCompletionItemProvider({ pattern: '**' }, inlineProvider));
+        // AUTO-IMPORT-AFTER-ACCEPT COMMAND. VS Code runs an InlineCompletionItem.command after the
+        // item is accepted; this handler adds any workspace import the accepted snippet references
+        // but the file does not yet import, via the language server's OWN add-import code action
+        // (autoImport.ts). It reads the toggle LIVE (so it no-ops if flipped off after an item was
+        // offered), computes the inserted range, and is best-effort — it never throws.
+        registerAutoImportAfterAcceptCommand(context, inlineOutput);
+        registerAddMissingImportsCommand(context, inlineOutput);
+    }
+}
+/**
+ * Register the {@link AUTO_IMPORT_AFTER_ACCEPT_COMMAND} handler. It reads the live toggle
+ * (glyphspek.inlineCompletion.autoImport, default true), resolves the accepting document,
+ * computes the inserted range from the accepted text + insertion position, and delegates to
+ * {@link applyAutoImports}. Best-effort: an invalid arg / missing document / disabled toggle is
+ * a no-op, and the handler never throws (applyAutoImports itself never throws either).
+ */
+function registerAutoImportAfterAcceptCommand(context, output) {
+    context.subscriptions.push(vscode.commands.registerCommand(inlineCompletion_1.AUTO_IMPORT_AFTER_ACCEPT_COMMAND, async (rawArgs) => {
+        try {
+            // LIVE toggle re-read: even if an item was offered while ON, honor a flip to OFF.
+            const enabled = vscode.workspace
+                .getConfiguration('glyphspek')
+                .get('inlineCompletion.autoImport', true);
+            if (!enabled)
+                return;
+            const args = rawArgs;
+            if (!args ||
+                typeof args.uri !== 'string' ||
+                typeof args.insertedText !== 'string' ||
+                typeof args.line !== 'number' ||
+                typeof args.character !== 'number' ||
+                args.insertedText.length === 0) {
+                return;
+            }
+            // Resolve the document the completion was inserted into. Prefer the active editor's
+            // document when its URI matches (it is the live, post-insert buffer); else open it.
+            const targetUri = vscode.Uri.parse(args.uri);
+            const active = vscode.window.activeTextEditor?.document;
+            const document = active && active.uri.toString() === targetUri.toString()
+                ? active
+                : await vscode.workspace.openTextDocument(targetUri);
+            // The inserted range: from the insertion position to that position advanced by the
+            // accepted text. Computed via offsetAt/positionAt so multi-line inserts are exact.
+            const startPos = new vscode.Position(args.line, args.character);
+            const startOffset = document.offsetAt(startPos);
+            const endPos = document.positionAt(startOffset + args.insertedText.length);
+            const insertedRange = new vscode.Range(startPos, endPos);
+            await (0, autoImport_1.applyAutoImports)(document, insertedRange, {
+                enabled: true,
+                insertedText: args.insertedText,
+                output,
+            });
+        }
+        catch {
+            // Best-effort: an accepted completion must never surface an error to the user.
+        }
+    }));
+}
+/**
+ * Register `glyphspek.inlineCompletion.addMissingImports` — the USER-INVOKED add-import pass
+ * over the active editor's EXISTING code (the on-accept hook only covers symbols a completion
+ * just inserted; this covers code already on the page — typed, pasted, or chunk-written). It
+ * reuses the same conservative on-device logic and reports how many imports it added.
+ */
+function registerAddMissingImportsCommand(context, output) {
+    context.subscriptions.push(vscode.commands.registerCommand('glyphspek.inlineCompletion.addMissingImports', async () => {
+        const editor = vscode.window.activeTextEditor;
+        if (!editor) {
+            void vscode.window.showInformationMessage('Add Missing Imports: no active editor.');
+            return;
+        }
+        const applied = await (0, autoImport_1.addMissingImportsForDocument)(editor.document, { output });
+        if (applied > 0) {
+            void vscode.window.setStatusBarMessage(`$(check) Added ${applied} missing import${applied === 1 ? '' : 's'}.`, 4000);
+        }
+        else {
+            void vscode.window.setStatusBarMessage('$(info) No unambiguous missing imports to add — try Quick Fix (⌘.) for ambiguous ones.', 4000);
+        }
+    }));
+}
+/** The no-CLI "Index Workspace" command id (registered in package.json#commands). */
+const INDEX_WORKSPACE_COMMAND = 'glyphspek.indexWorkspace';
+/**
+ * Set up the no-CLI "Index Workspace" experience: the {@link INDEX_WORKSPACE_COMMAND}
+ * command, a status-bar item reflecting the index state (idle / `$(sync~spin) Indexing…`
+ * / `$(database) Indexed N files` / `$(warning) Index error`), and the optional
+ * auto-index-on-open. The build runs through a LONG-LIVED per-workspace bridge session
+ * (the SAME openChatSession the repo-aware FIM uses, so they SHARE the one session-bound
+ * server-side index), inside a Notification progress, and ends with an info toast.
+ *
+ * No workspace folder open → no index to build: the command surfaces an honest message
+ * and no status-bar item is shown. Honest + best-effort: every failure is caught and
+ * rendered (toast + status-bar error state); the command never throws.
+ */
+/**
+ * Resolve the `glyphspek.index.vectorStore` setting to a valid {@link VectorStoreKind},
+ * falling back to the default ('flat' — the exact, fast store) for any unrecognized
+ * value. Returned undefined is never produced; the supervisor also defaults defensively.
+ */
+function resolveVectorStoreSetting() {
+    const raw = vscode.workspace
+        .getConfiguration('glyphspek')
+        .get('index.vectorStore', 'flat');
+    return raw === 'brute' || raw === 'flat' || raw === 'ann' ? raw : 'flat';
+}
+function setupIndexWorkspace(context, output) {
+    const workspaceRoot = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+    // The status-bar item (when the host supports it). Created left of center so it sits
+    // with the other GlyphSpek surface affordances; clicking it runs the command (reindex).
+    let statusItem;
+    if (typeof vscode.window.createStatusBarItem === 'function') {
+        const align = vscode.StatusBarAlignment?.Left ?? 1;
+        statusItem = vscode.window.createStatusBarItem(align, 40);
+        statusItem.command = INDEX_WORKSPACE_COMMAND;
+        context.subscriptions.push(statusItem);
+    }
+    const setStatus = (state) => {
+        if (!statusItem)
+            return;
+        const p = (0, indexStatusBar_1.indexStatusPresentation)(state);
+        statusItem.text = p.text;
+        statusItem.tooltip = p.tooltip;
+        statusItem.show();
+    };
+    // Show the idle state up front (only when there is a workspace to index).
+    if (workspaceRoot)
+        setStatus({ kind: 'idle' });
+    // A LONG-LIVED completion-style bridge session, opened lazily on the first build and
+    // reused for every reindex. Disposed on deactivate via context.subscriptions.
+    let sessionPromise;
+    let disposed = false;
+    const openSession = () => {
+        if (!workspaceRoot)
+            return Promise.resolve(undefined);
+        if (!sessionPromise) {
+            sessionPromise = (0, supervisorBridgeRunner_1.openChatSession)({
+                bridgeServerPath: resolveBundledBridgeServerPath(context),
+                extensionVersion: resolveExtensionVersion(context),
+                runsBase: resolveRunsBase(),
+                workspaceRoot,
+                output,
+            })
+                .then((res) => (res.connected ? res.session : undefined))
+                .catch(() => undefined);
+        }
+        return sessionPromise;
+    };
+    context.subscriptions.push({
+        dispose: () => {
+            disposed = true;
+            void sessionPromise?.then((s) => {
+                try {
+                    s?.dispose();
+                }
+                catch {
+                    /* best-effort teardown */
+                }
+            });
+        },
+    });
+    // Serialize builds: a click while a build runs should not start a second concurrent one.
+    let building = false;
+    const runIndexWorkspace = async () => {
+        if (disposed)
+            return;
+        if (!workspaceRoot) {
+            void vscode.window.showInformationMessage('GlyphSpek: open a folder to index its workspace.');
+            return;
+        }
+        if (building) {
+            void vscode.window.showInformationMessage('GlyphSpek: indexing is already in progress…');
+            return;
+        }
+        building = true;
+        setStatus({ kind: 'indexing' });
+        // The encrypted-persist opt-in (default OFF) flows to the bridge in the build params.
+        const persist = vscode.workspace
+            .getConfiguration('glyphspek')
+            .get('index.persist', false);
+        // Which LOCAL vector store backs the index ('flat' exact default | 'brute' fallback |
+        // 'ann' approximate). Flows to the bridge so the build picks the store; default-safe.
+        const vectorStore = resolveVectorStoreSetting();
+        // The inactivity BACKSTOP for the streaming index/build request. The reset-on-
+        // progress (each index/progress event re-arms the timer) is the real mechanism;
+        // this cap only fires if the build STALLS with no progress for the whole window.
+        // Default 30 min — a cold build of a real repo is tens of seconds to minutes.
+        const buildTimeoutMs = vscode.workspace
+            .getConfiguration('glyphspek')
+            .get('index.buildTimeoutMs', 1_800_000);
+        const withProgress = typeof vscode.window.withProgress === 'function'
+            ? vscode.window.withProgress.bind(vscode.window)
+            : // Minimal-host fallback: just run the task with no progress UI. A no-op
+                // progress reporter is passed so the task's progress.report calls are safe.
+                ((_o, task) => task({ report: () => undefined }));
+        try {
+            await withProgress({
+                location: vscode.ProgressLocation?.Notification ?? 15,
+                title: 'GlyphSpek: indexing workspace…',
+                cancellable: false,
+            }, async (progress) => {
+                const session = await openSession();
+                if (!session) {
+                    setStatus({ kind: 'error', reason: 'bridge unavailable' });
+                    void vscode.window.showWarningMessage('GlyphSpek: could not start the indexer (bridge unavailable).');
+                    return;
+                }
+                // PERCENT IN THE NOTIFICATION (the fix). vscode increments are CUMULATIVE
+                // to 100, so each report carries the DELTA percent since the last (computed
+                // by indexProgressIncrement). The embed phase drives the bar; discover/chunk
+                // just update the message. Best-effort: a throwing report never fails the build.
+                let lastPercent = 0;
+                const onProgress = (event) => {
+                    try {
+                        const { increment, percent } = (0, indexProgress_1.indexProgressIncrement)(event, lastPercent);
+                        lastPercent = percent;
+                        progress.report({ increment, message: (0, indexProgress_1.indexProgressMessage)(event) });
+                    }
+                    catch {
+                        /* progress is best-effort: never let a report break the build */
+                    }
+                };
+                const result = await session.indexBuild({ workspaceRoot, persist, vectorStore }, { timeoutMs: buildTimeoutMs, onProgress });
+                if (!result.ok || !result.stats) {
+                    setStatus({ kind: 'error', reason: result.error });
+                    void vscode.window.showWarningMessage(`GlyphSpek: indexing failed${result.error ? ` (${result.error})` : ''}.`);
+                    return;
+                }
+                const { files, chunks, totalMs } = result.stats;
+                setStatus({ kind: 'indexed', files, chunks });
+                const secs = (totalMs / 1000).toFixed(1);
+                void vscode.window.showInformationMessage(`Indexed ${files} ${files === 1 ? 'file' : 'files'} · ${chunks} chunks · ${secs}s`);
+            });
+        }
+        catch (err) {
+            // withProgress should not throw (the task catches), but be defensive: never let the
+            // command reject. Render the error state honestly.
+            const reason = String(err?.message ?? err);
+            setStatus({ kind: 'error', reason });
+            output.appendLine(`[indexWorkspace] unexpected error (non-fatal): ${reason}`);
+        }
+        finally {
+            building = false;
+        }
+    };
+    context.subscriptions.push(vscode.commands.registerCommand(INDEX_WORKSPACE_COMMAND, () => {
+        void runIndexWorkspace();
+    }));
+    // AUTO INDEX (glyphspek.index.autoIndex, default ON). When enabled, build the code index
+    // in the BACKGROUND on activation — i.e. when a folder/workspace is opened — so repo-aware
+    // chat and Tab are warm before first use. Non-blocking; reuses the exact command build path.
+    // No workspace → no-op. Falls back to the legacy `index.autoIndexOnOpen` key for older configs.
+    const indexCfg = vscode.workspace.getConfiguration('glyphspek');
+    const autoIndex = indexCfg.get('index.autoIndex', indexCfg.get('index.autoIndexOnOpen', true));
+    if (autoIndex && workspaceRoot) {
+        output.appendLine('[indexWorkspace] Auto Index enabled — building the index in the background.');
+        void runIndexWorkspace();
+    }
+}
+/**
+ * Read the live repo-aware inline-completion config from settings. Default OFF so the
+ * shipped plain-FIM Tab is never affected unless the operator opts in.
+ */
+function readRepoAwareConfig() {
+    const cfg = vscode.workspace.getConfiguration('glyphspek');
+    return {
+        enabled: cfg.get('inlineCompletion.repoAware', false),
+        topK: cfg.get('inlineCompletion.repoAwareTopK', inlineCompletion_1.DEFAULT_REPO_AWARE_TOP_K),
+        timeoutMs: cfg.get('inlineCompletion.repoAwareTimeoutMs', inlineCompletion_1.DEFAULT_REPO_AWARE_TIMEOUT_MS),
+        maxContextChars: cfg.get('inlineCompletion.repoAwareMaxContextChars', inlineCompletion_1.DEFAULT_REPO_AWARE_MAX_CONTEXT_CHARS),
+        // The query-tuning strategy (default 'auto': LSP → symbol → window → plain). Narrowed
+        // through asQueryStrategy so a stray setting value degrades to 'auto', never throws.
+        queryStrategy: (0, inlineCompletion_1.asQueryStrategy)(cfg.get('inlineCompletion.queryStrategy', 'auto')),
+    };
+}
+/**
+ * Read the live TWO-TIER (cyclable alternates) inline-completion config from settings.
+ * Defaults: alternates ON, count 2, temperature 0.4 (moderate = varied but mostly-correct).
+ * Each lever is read fresh per request so the user can toggle any of them off without a
+ * reload. The provider only does background-alternate work when `enabled` AND `count > 0`.
+ */
+function readAlternativesConfig() {
+    const cfg = vscode.workspace.getConfiguration('glyphspek');
+    return {
+        enabled: cfg.get('inlineCompletion.alternatives', true),
+        count: cfg.get('inlineCompletion.alternativesCount', 2),
+        temperature: cfg.get('inlineCompletion.alternativesTemperature', 0.4),
+    };
+}
+/**
+ * Read the live COMPILE-CHECK GATE config from settings. Defaults: gate ON, 3 max regenerate
+ * attempts. Read fresh per request so the gate (and its retry budget) is toggleable without a
+ * reload. When `enabled` is false the provider is byte-for-byte the pre-gate behavior.
+ */
+function readCompileGateConfig() {
+    const cfg = vscode.workspace.getConfiguration('glyphspek');
+    return {
+        enabled: cfg.get('inlineCompletion.compileGate', true),
+        maxAttempts: cfg.get('inlineCompletion.compileGateMaxAttempts', inlineCompletion_1.DEFAULT_COMPILE_GATE_MAX_ATTEMPTS),
+    };
+}
+/**
+ * Read the live AUTO-CHUNK config from settings. Defaults: auto-chunk ON, 5 max chunks. Read
+ * fresh per request so it's toggleable without a reload. When `enabled` is false the provider
+ * builds the primary as a SINGLE one-shot completion — byte-for-byte today's behavior.
+ */
+function readAutoChunkConfig() {
+    const cfg = vscode.workspace.getConfiguration('glyphspek');
+    return {
+        enabled: cfg.get('inlineCompletion.autoChunk', true),
+        maxChunks: cfg.get('inlineCompletion.autoChunkMaxChunks', inlineCompletion_1.DEFAULT_AUTO_CHUNK_MAX_CHUNKS),
+    };
+}
+/**
+ * Build the COMPILE-CHECK GATE "searching" indicator: a right-aligned, spinning status-bar item
+ * shown ONLY while the provider is searching for a compiling completion (the primary failed the
+ * structural gate and it is regenerating). Returns the `onGateSearch(active)` toggle wired into
+ * the inline-completion provider — `true` shows it, `false` hides it. Pushed to
+ * context.subscriptions so it is disposed with the extension. Guarded: a minimal host without
+ * the status-bar API yields a no-op toggle (no indicator, no crash). A small min-visible window
+ * avoids a flicker when a search resolves almost instantly.
+ */
+function buildGateSearchIndicator(context) {
+    if (typeof vscode.window.createStatusBarItem !== 'function') {
+        // No status-bar API (minimal host) → a no-op toggle; the gate still works, just silently.
+        return () => undefined;
+    }
+    const align = vscode.StatusBarAlignment?.Right ?? 2;
+    const gateStatus = vscode.window.createStatusBarItem(align, 40);
+    gateStatus.text = '$(sync~spin) GlyphSpek: finding a compiling completion…';
+    gateStatus.tooltip =
+        'GlyphSpek is regenerating: the first Tab draft was not structurally valid when inserted ' +
+            '(unbalanced delimiters/quotes, truncation, or garbage). Searching for one that compiles.';
+    context.subscriptions.push(gateStatus);
+    // A small min-visible window so a sub-flicker search doesn't strobe the status bar.
+    const MIN_VISIBLE_MS = 250;
+    let shownAt = 0;
+    let hideTimer;
+    return (active) => {
+        try {
+            if (active) {
+                if (hideTimer) {
+                    clearTimeout(hideTimer);
+                    hideTimer = undefined;
+                }
+                shownAt = Date.now();
+                gateStatus.show();
+            }
+            else {
+                const elapsed = Date.now() - shownAt;
+                if (elapsed >= MIN_VISIBLE_MS) {
+                    gateStatus.hide();
+                }
+                else if (!hideTimer) {
+                    // Keep it visible for the remainder of the min window, then hide.
+                    hideTimer = setTimeout(() => {
+                        hideTimer = undefined;
+                        try {
+                            gateStatus.hide();
+                        }
+                        catch {
+                            /* best-effort */
+                        }
+                    }, MIN_VISIBLE_MS - elapsed);
+                }
+            }
+        }
+        catch {
+            /* best-effort: a failing indicator toggle must never break inline completion */
+        }
+    };
+}
+/**
+ * Build the production {@link DefinitionProvider} for the LSP-directed query strategy: a
+ * thin, GUARDED wrapper over `vscode.executeDefinitionProvider` (+ a hover fallback for the
+ * signature). It identifies the cursor symbol via {@link extractCursorSymbol}, asks the
+ * editor's language server for the symbol's DEFINITION location, reads the defining
+ * line(s) from that document (capped to `maxChars`), and returns the text + the symbol +
+ * the definition's workspace-relative path. This is the ONE place the live-editor LSP call
+ * lives — the strategy ladder around it is unit-tested with a fake. Resolve-never-reject:
+ * every failure (no symbol, no definition, an unavailable language server, a read error)
+ * resolves to `undefined` so the provider falls back to the next strategy.
+ */
+function buildCompletionDefinitionProvider() {
+    return {
+        async resolveDefinition(document, offset, maxChars) {
+            try {
+                // The cursor symbol (the identifier being referenced/completed). No symbol → the
+                // LSP strategy has nothing to look up; fall back to the index strategies.
+                const symbol = (0, inlineCompletion_1.extractCursorSymbol)(document.getText(), offset);
+                if (!symbol)
+                    return undefined;
+                if (typeof vscode.commands?.executeCommand !== 'function')
+                    return undefined;
+                const position = document.positionAt(offset);
+                // Ask the language server for the definition LOCATION(s). The result shape varies
+                // (Location | Location[] | LocationLink[]); normalize to {uri, range}.
+                const raw = await vscode.commands.executeCommand('vscode.executeDefinitionProvider', document.uri, position);
+                const target = firstDefinitionTarget(raw);
+                if (!target)
+                    return undefined;
+                // SESSION-ROOT SCOPING (security): `executeDefinitionProvider` can resolve a symbol
+                // to a file ANYWHERE — a package/SDK cache, node_modules, or another open folder —
+                // so reading + injecting that definition would pull source from OUTSIDE the
+                // first-party session workspace into the FIM prompt (same class as index/retrieve).
+                // Drop any target NOT inside a workspace folder: belt (the live
+                // getWorkspaceFolder(uri) must resolve) AND suspenders (the canonical fsPath must
+                // sit UNDER a workspace-folder root, collapsing `..`). Either failing → no
+                // definition (the strategy ladder falls back to symbol/window/plain).
+                if (!definitionTargetInWorkspace(target.uri))
+                    return undefined;
+                // Read the defining text from the target document. Open it (cached by VS Code) and
+                // slice from the definition line, capped to a handful of lines / maxChars so a huge
+                // definition can't blow the budget.
+                const defDoc = target.uri.toString() === document.uri.toString()
+                    ? document
+                    : await vscode.workspace.openTextDocument(target.uri);
+                const definitionText = readDefinitionText(defDoc, target.startLine, maxChars);
+                if (!definitionText)
+                    return undefined;
+                const defPath = workspaceRelativePosix(target.uri);
+                return defPath
+                    ? { symbol, defPath, definitionText }
+                    : { symbol, definitionText };
+            }
+            catch {
+                // Resolve-never-reject: any LSP/read failure → no definition (fall back).
+                return undefined;
+            }
+        },
+    };
+}
+/**
+ * Normalize the polymorphic `executeDefinitionProvider` result to the FIRST target's
+ * `{ uri, startLine }`. Handles a single Location, a Location[], and a LocationLink[]
+ * (`targetUri`/`targetRange` or `targetSelectionRange`). Returns undefined for an empty /
+ * unrecognized result.
+ */
+function firstDefinitionTarget(raw) {
+    const first = Array.isArray(raw) ? raw[0] : raw;
+    if (!first || typeof first !== 'object')
+        return undefined;
+    const anyFirst = first;
+    // LocationLink: { targetUri, targetRange|targetSelectionRange }.
+    if (anyFirst.targetUri) {
+        const uri = anyFirst.targetUri;
+        const range = (anyFirst.targetSelectionRange ??
+            anyFirst.targetRange);
+        return uri && range ? { uri, startLine: range.start.line } : undefined;
+    }
+    // Location: { uri, range }.
+    if (anyFirst.uri && anyFirst.range) {
+        const uri = anyFirst.uri;
+        const range = anyFirst.range;
+        return { uri, startLine: range.start.line };
+    }
+    return undefined;
+}
+/**
+ * Read up to a few lines of definition text starting at `startLine` from `doc`, capped to
+ * `maxChars`. We take the definition line plus a small window (so a multi-line signature /
+ * interface head is captured) and stop at the char cap. Returns '' when the line is out of
+ * range. Best-effort; the caller treats '' as "no definition".
+ */
+function readDefinitionText(doc, startLine, maxChars) {
+    try {
+        const lineCount = doc.lineCount;
+        if (startLine < 0 || startLine >= lineCount)
+            return '';
+        // A modest window — enough to capture a signature / small block without dragging in a
+        // whole function body. The char cap is the real bound.
+        const endLine = Math.min(lineCount - 1, startLine + 12);
+        const lines = [];
+        let used = 0;
+        for (let i = startLine; i <= endLine; i++) {
+            const text = doc.lineAt(i).text;
+            if (used + text.length + 1 > maxChars && lines.length > 0)
+                break;
+            lines.push(text);
+            used += text.length + 1;
+        }
+        return lines.join('\n').trim();
+    }
+    catch {
+        return '';
+    }
+}
+/**
+ * Workspace-relative POSIX path of a definition target URI (for the preamble's `// path`
+ * comment). Best-effort: undefined when there is no workspace / the API is unavailable.
+ */
+function workspaceRelativePosix(uri) {
+    try {
+        if (typeof vscode.workspace?.asRelativePath !== 'function')
+            return undefined;
+        const rel = vscode.workspace.asRelativePath(uri, false);
+        if (typeof rel !== 'string' || rel.length === 0)
+            return undefined;
+        return rel.split('\\').join('/');
+    }
+    catch {
+        return undefined;
+    }
+}
+/**
+ * SESSION-ROOT SCOPING for the LSP-directed completion strategy: is `targetUri` (a resolved
+ * definition location) INSIDE the first-party session workspace? Only an in-workspace
+ * definition may have its source read + injected into the FIM prompt. A target in a
+ * package/SDK cache, node_modules, or another open-but-out-of-session root is REJECTED.
+ *
+ * Two complementary checks, both must hold (fail-closed — when in doubt, drop it):
+ *   - BELT: `vscode.workspace.getWorkspaceFolder(uri)` must resolve to a folder (VS Code's
+ *     own "which workspace folder owns this uri" — undefined for files outside every root,
+ *     and it accounts for the live folder set).
+ *   - SUSPENDERS: the pure {@link isUriInWorkspace} canonical-path check (collapses `..`,
+ *     sibling-prefix safe) against the workspace-folder fsPaths — catches a path-escape /
+ *     symlinked target that a name-only check might miss.
+ *
+ * Only file-scheme targets are eligible (an untitled/in-memory/remote-scheme target has no
+ * meaningful on-disk root to scope). Best-effort and NEVER throws; any failure → false.
+ */
+function definitionTargetInWorkspace(targetUri) {
+    try {
+        // Only on-disk (file://) targets can be scoped to a workspace-folder root.
+        if (targetUri.scheme !== 'file')
+            return false;
+        // BELT: VS Code's own owning-folder lookup must resolve (undefined → outside all roots).
+        const owning = typeof vscode.workspace?.getWorkspaceFolder === 'function'
+            ? vscode.workspace.getWorkspaceFolder(targetUri)
+            : undefined;
+        if (!owning)
+            return false;
+        // SUSPENDERS: canonical-path containment against the live workspace-folder roots.
+        const roots = (vscode.workspace.workspaceFolders ?? [])
+            .map((f) => f.uri.fsPath)
+            .filter((p) => typeof p === 'string' && p.length > 0);
+        return (0, inlineCompletion_1.isUriInWorkspace)(targetUri.fsPath, roots);
+    }
+    catch {
+        return false;
+    }
+}
+/**
+ * Build the production {@link RepoContextRetriever} for repo-aware Tab completion: a
+ * LONG-LIVED per-workspace COMPLETION bridge session (openChatSession), reused across
+ * keystrokes. The session is opened LAZILY on the first retrieve (so an enabled-but-idle
+ * editor pays nothing), bound to `workspaceRoot` via the handshake trusted channel, and
+ * kept alive for the editor's lifetime (disposed on deactivate via context.subscriptions).
+ *
+ * WARMTH: `isWarm()` reports whether the FIRST retrieve has completed — i.e. the
+ * supervisor's lazy per-workspace index build is done and subsequent retrieves are fast.
+ * Until then the provider falls back to plain FIM; the provider's background warm-up
+ * kick triggers that first (slow) build OFF the typing path.
+ *
+ * BEST-EFFORT: every failure (session open failed, retrieve rejected, bridge down)
+ * resolves to `{ ok:false, hits:[] }` and leaves `isWarm()` false — the provider then
+ * always falls back to plain FIM. Nothing here egresses code (the index is local).
+ */
+function buildCompletionRepoRetriever(context, output, workspaceRoot) {
+    let sessionPromise;
+    let warm = false;
+    let disposed = false;
+    const openSession = () => {
+        if (!sessionPromise) {
+            sessionPromise = (0, supervisorBridgeRunner_1.openChatSession)({
+                bridgeServerPath: resolveBundledBridgeServerPath(context),
+                extensionVersion: resolveExtensionVersion(context),
+                runsBase: resolveRunsBase(),
+                workspaceRoot,
+                output,
+            })
+                .then((res) => (res.connected ? res.session : undefined))
+                .catch(() => undefined);
+        }
+        return sessionPromise;
+    };
+    // Dispose the long-lived completion session when the extension deactivates.
+    context.subscriptions.push({
+        dispose: () => {
+            disposed = true;
+            void sessionPromise?.then((s) => {
+                try {
+                    s?.dispose();
+                }
+                catch {
+                    /* best-effort teardown */
+                }
+            });
+        },
+    });
+    return {
+        isWarm: () => warm,
+        async retrieve(query, k) {
+            if (disposed)
+                return { ok: false, hits: [] };
+            try {
+                const session = await openSession();
+                if (!session)
+                    return { ok: false, hits: [] };
+                const result = await session.indexRetrieve({
+                    workspaceRoot,
+                    query,
+                    k,
+                    vectorStore: resolveVectorStoreSetting(),
+                });
+                // The first successful query means the index finished building → warm.
+                if (result.ok)
+                    warm = true;
+                const hits = result.hits.map((h) => ({
+                    path: h.path,
+                    text: h.text,
+                }));
+                return { ok: result.ok, hits };
+            }
+            catch {
+                return { ok: false, hits: [] };
+            }
+        },
+    };
 }
 /**
  * Resolve the source-commit provenance anchor for a run request: the workspace's
@@ -2758,6 +3610,46 @@ async function bridgeCreateRun(context, output, gestures, gestureToken) {
     }
 }
 /**
+ * M5 §14 — wrap a run-event sink so that, when the extension host is in the
+ * trust-degrading AMBIENT posture (vscode.ExtensionMode.Development — ambient,
+ * non-curated extensions enabled; governed surfaces outside a curated/sovereign set),
+ * each REAL run that OPENS in this host ALSO gets a distinct `ambient_extensions_dev_mode`
+ * §14 failure card. We anchor it to the supervisor-minted runId from the `run_opened`
+ * envelope (so it attaches to the actual run, never a phantom), emit it ONCE per run
+ * (after run_opened, before the rest of the stream is forwarded), and forward every
+ * envelope onward unchanged. In Production / Test mode the predicate is false and the
+ * wrapper is a transparent pass-through — a normal install never sees this card.
+ *
+ * Detection is delegated to the PURE, vscode-free predicate ambientExtensionsDevModeFailureEvent
+ * (runEventProtocol.ts) so it is unit-testable headlessly; this wrapper only supplies
+ * the numeric extension mode + the run identity.
+ */
+function withAmbientDevModePosture(context, onRunEvent) {
+    const inputs = {
+        extensionMode: context.extensionMode,
+        developmentMode: vscode.ExtensionMode.Development,
+    };
+    // Emit the posture warning at most once per runId (de-dup is also enforced
+    // webview-side by appendFailure, but emitting once keeps the stream clean).
+    const flagged = new Set();
+    return (raw) => {
+        onRunEvent(raw);
+        if (!raw || typeof raw !== 'object')
+            return;
+        const e = raw;
+        if (e.kind !== runEventProtocol_1.RunEventKind.RunOpened)
+            return;
+        if (typeof e.runId !== 'string' || e.runId.length === 0)
+            return;
+        if (flagged.has(e.runId))
+            return;
+        flagged.add(e.runId);
+        const ambient = (0, runEventProtocol_1.ambientExtensionsDevModeFailureEvent)(e.runId, inputs);
+        if (ambient)
+            onRunEvent(ambient);
+    };
+}
+/**
  * Spawn the PACKAGED bridge-server, create a REAL run, KEEP THE CHILD ALIVE, and
  * DRIVE it so the supervisor streams the LIVE `run/event` sequence into the Trust
  * Panel — a real run streaming in, not the embedded sample. The panel's
@@ -2796,7 +3688,9 @@ async function startLiveRun(context, output, gestures, gestureToken) {
         output,
         // The supervisor's streamed envelopes flow straight into the panel's
         // validated feed. postRunEvent fail-closes on a schema-version mismatch.
-        onRunEvent: (raw) => panel.postRunEvent(raw),
+        // The §14 ambient-dev-mode wrapper additively flags the run's posture when
+        // the host is in Development mode (transparent pass-through otherwise).
+        onRunEvent: withAmbientDevModePosture(context, (raw) => panel.postRunEvent(raw)),
     }));
     if (!result.connected) {
         void vscode.window.showErrorMessage(`GlyphSpek: live run not started — ${result.message}`);
@@ -2816,6 +3710,15 @@ async function startLiveRun(context, output, gestures, gestureToken) {
         void vscode.window.showWarningMessage(`GlyphSpek: streamed a LIVE ${trustLabel} run (${result.runId})${finalState} into the Trust Panel — ${result.message}`);
     }
 }
+/**
+ * GOVERNANCE-BOUNDARY LEGIBILITY (A1). The set of terminals GlyphSpek ITSELF created
+ * (the Governed Terminal / Chat surfaces). A just-opened terminal NOT in this set is a
+ * stock/ungoverned shell (integrated terminal, task/debug shells — full host env,
+ * untraced egress); the {@link activate} `onDidOpenTerminal` listener uses membership
+ * here to decide whether to show the honest ungoverned-terminal notice. A WeakSet so a
+ * closed terminal is garbage-collected without us tracking close events (no leak).
+ */
+const glyphSpekOwnedTerminals = new WeakSet();
 /* ================================================================== *
  * GOVERNED TERMINAL (M7 — the in-IDE Governed Terminal surface).
  *
@@ -2978,7 +3881,7 @@ async function openGovernedTerminalSurface(context, output, surface, detected) {
         runsBase: resolveRunsBase(),
         request,
         output,
-        onRunEvent: (raw) => panel.postRunEvent(raw),
+        onRunEvent: withAmbientDevModePosture(context, (raw) => panel.postRunEvent(raw)),
     }));
     const surfaceLabel = surface === 'chat' ? 'governed chat' : 'governed terminal';
     if (!start.started || !start.session || !start.proxyUrl || !start.runId) {
@@ -3007,12 +3910,32 @@ async function openGovernedTerminalSurface(context, output, surface, detected) {
     // terminal; the user opens a fresh one that is wired to the LIVE proxy from
     // terminal/start. (Applies to both `surface === 'chat'` and the governed terminal —
     // both inject the supervisor-bound proxy env.)
-    const terminal = vscode.window.createTerminal({
+    // GOVERNANCE-BOUNDARY LEGIBILITY (A1, visual-only). Badge the governed surface so it is
+    // UNMISTAKABLE next to a stock/ungoverned terminal (which carries no icon/color). The
+    // `shield` codicon is the same glyph the authority status-bar segment uses for
+    // "governed"; `terminal.ansiGreen` is a registered terminal theme color that reads as
+    // trusted/traced. Visual only — env/strictEnv/isTransient and all governance behavior
+    // are untouched. The icon/color are added ONLY when the ThemeIcon/ThemeColor
+    // constructors exist (mirroring the ThemeColor guard used for the status bar) so a
+    // minimal host/test stub without them degrades to an unbadged terminal instead of
+    // throwing.
+    const terminalOptions = {
         name: surface === 'chat' ? 'GlyphSpek Chat' : 'GlyphSpek Governed Terminal',
         env: terminalEnv,
         strictEnv,
         isTransient: true,
-    });
+    };
+    if (typeof vscode.ThemeIcon === 'function') {
+        terminalOptions.iconPath = new vscode.ThemeIcon('shield');
+    }
+    if (typeof vscode.ThemeColor === 'function') {
+        terminalOptions.color = new vscode.ThemeColor('terminal.ansiGreen');
+    }
+    const terminal = vscode.window.createTerminal(terminalOptions);
+    // Record this terminal as GlyphSpek-OWNED so the onDidOpenTerminal honesty listener
+    // (A1, Part 2) never warns about a surface GlyphSpek itself governs + badged. The set
+    // is a WeakSet so a closed terminal is collected without us tracking close events.
+    glyphSpekOwnedTerminals.add(terminal);
     // Tie the supervised session's lifetime to the terminal: when the operator closes
     // it, FINALIZE the run (terminal/stop → signed verdict incl. assurance) and surface
     // the finalized posture. A `degraded` verdict is shown as lower-assurance and is
@@ -3174,12 +4097,19 @@ async function openGovernedChat(context, output) {
  */
 function buildNativeChatSessionFactory(context, output) {
     return {
-        open: () => (0, supervisorBridgeRunner_1.openChatSession)({
-            bridgeServerPath: resolveBundledBridgeServerPath(context),
-            extensionVersion: resolveExtensionVersion(context),
-            runsBase: resolveRunsBase(),
-            output,
-        }),
+        open: () => {
+            // The open workspace folder is the TRUSTED session root the supervisor binds
+            // index/retrieve to (the same source the chat participant passes per-call). When
+            // no folder is open, omit it — the supervisor pins the root from the first retrieve.
+            const workspaceRoot = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+            return (0, supervisorBridgeRunner_1.openChatSession)({
+                bridgeServerPath: resolveBundledBridgeServerPath(context),
+                extensionVersion: resolveExtensionVersion(context),
+                runsBase: resolveRunsBase(),
+                ...(workspaceRoot ? { workspaceRoot } : {}),
+                output,
+            });
+        },
     };
 }
 /* ================================================================== *
@@ -3293,7 +4223,7 @@ function buildChatTerminalDeps(context, output) {
                 runsBase: resolveRunsBase(),
                 request,
                 output,
-                onRunEvent: (raw) => panel.postRunEvent(raw),
+                onRunEvent: withAmbientDevModePosture(context, (raw) => panel.postRunEvent(raw)),
             });
             if (!start.started || !start.session || !start.proxyUrl || !start.runId) {
                 void vscode.window.showErrorMessage(`GlyphSpek Chat: could not start a governed session — ${start.message}`);

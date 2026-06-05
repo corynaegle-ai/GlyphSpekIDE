@@ -32,6 +32,10 @@ Object.defineProperty(exports, "__esModule", { value: true });
 exports.RUN_FAILURE_KINDS = exports.RunFailureKind = exports.RunEventKind = exports.CLI_FIDELITY_VALUES = exports.STREAM_EXTENSION_POSTURES = exports.RUNTIME_TRUST_VALUES = exports.RUN_EVENT_PROTOCOL_VERSION = void 0;
 exports.validateRunEvent = validateRunEvent;
 exports.isProductTrustEligible = isProductTrustEligible;
+exports.bridgeConnectStatusToFailureKind = bridgeConnectStatusToFailureKind;
+exports.bridgeConnectFailureEvent = bridgeConnectFailureEvent;
+exports.detectAmbientExtensionsDevMode = detectAmbientExtensionsDevMode;
+exports.ambientExtensionsDevModeFailureEvent = ambientExtensionsDevModeFailureEvent;
 const bridgeProtocol_1 = require("./bridgeProtocol");
 /* ============================================================== *
  * VERSIONING
@@ -118,6 +122,43 @@ exports.RunFailureKind = {
     BoundaryOnlyCli: 'boundary_only_cli',
     /** Bridge supervisor-binary hash OR protocol-version mismatch. */
     BridgeMismatch: 'bridge_mismatch',
+    /*
+     * M5 §14 — the four HOST-DETECTED states the panel renders distinctly but only
+     * the host can detect. The webview (media/live.js) is already render-ready for all
+     * of them (FAILURE_LABELS / FAILURE_SEVERITY / failureKindToState); these strings
+     * MUST match the webview's verbatim. (untrusted_verifier_key is the fifth §14 state
+     * but is DERIVED webview-side from the signature gate — it is NOT host-emitted, so
+     * it is intentionally absent from RUN_FAILURE_KINDS.)
+     */
+    /**
+     * The supervisor binary's on-disk hash did NOT match the pinned build, so the
+     * bridge client REFUSED to spawn (bridge connect status 'hash-mismatch',
+     * {@link import('./bridgeProtocol').BridgeErrorCode.HashMismatch}). The stream
+     * cannot be attributed to the trusted supervisor → the run is de-authoritated.
+     */
+    SupervisorHashMismatch: 'supervisor_hash_mismatch',
+    /**
+     * The bridge handshake could not AUTHENTICATE/establish the channel (connect
+     * status 'handshake-failed': the handshake RPC errored, closed early, or returned
+     * a malformed result before the channel reached `ready`). An unauthenticated
+     * stream is never rendered as a current, trusted run.
+     */
+    BridgeAuthFailure: 'bridge_auth_failure',
+    /**
+     * The handshake reported an INCOMPATIBLE bridge/supervisor protocol version
+     * (connect status 'version-incompatible',
+     * {@link import('./bridgeProtocol').BridgeErrorCode.VersionIncompatible}). The
+     * supervisor speaks a protocol this panel does not support → de-authoritated.
+     */
+    IncompatibleSupervisor: 'incompatible_supervisor',
+    /**
+     * The extension host activated in a TRUST-DEGRADING ambient posture (Developer
+     * extension mode), where ambient/non-curated extensions are enabled and the
+     * governed surfaces sit outside a curated, sovereign extension set. A posture
+     * WARNING — it does not by itself tamper a run, but no run created in this host
+     * can be product-trusted. Detected at activation by {@link detectAmbientExtensionsDevMode}.
+     */
+    AmbientExtensionsDevMode: 'ambient_extensions_dev_mode',
 };
 /** The full set, for validation. */
 exports.RUN_FAILURE_KINDS = [
@@ -127,6 +168,11 @@ exports.RUN_FAILURE_KINDS = [
     exports.RunFailureKind.NonIsolatedRuntime,
     exports.RunFailureKind.BoundaryOnlyCli,
     exports.RunFailureKind.BridgeMismatch,
+    // M5 §14 — the four host-detected states (see above).
+    exports.RunFailureKind.SupervisorHashMismatch,
+    exports.RunFailureKind.BridgeAuthFailure,
+    exports.RunFailureKind.IncompatibleSupervisor,
+    exports.RunFailureKind.AmbientExtensionsDevMode,
 ];
 const RUN_EVENT_KINDS = [
     exports.RunEventKind.RunOpened,
@@ -259,5 +305,80 @@ function validateRunEvent(input) {
  */
 function isProductTrustEligible(opened) {
     return opened.runtimeTrust === 'trusted' && opened.trust === 'trusted';
+}
+function bridgeConnectStatusToFailureKind(status) {
+    switch (status) {
+        // The supervisor binary failed the pinned-hash gate — the client refused to spawn.
+        case 'hash-mismatch':
+            return exports.RunFailureKind.SupervisorHashMismatch;
+        // The handshake reported incompatible bridge/supervisor protocol versions.
+        case 'version-incompatible':
+            return exports.RunFailureKind.IncompatibleSupervisor;
+        // The handshake (the channel's only authentication: it BINDS the stream to a
+        // hash-pinned supervisor over the spawned stdio) errored / closed early / was
+        // malformed before the channel reached `ready` — the stream is unauthenticated.
+        case 'handshake-failed':
+            return exports.RunFailureKind.BridgeAuthFailure;
+        case 'connected':
+        case 'spawn-failed':
+        default:
+            return null;
+    }
+}
+/**
+ * Construct a well-formed §14 {@link FailureEvent} for a non-connected bridge
+ * connect (or `null` when the status has no distinct §14 state). The returned event
+ * passes {@link validateRunEvent} verbatim and the webview renders it as the matching
+ * distinct card. The host emits it into the run-event sink (TrustPanel.postRunEvent)
+ * exactly like any other failure.
+ */
+function bridgeConnectFailureEvent(runId, status, message) {
+    const failure = bridgeConnectStatusToFailureKind(status);
+    if (failure === null)
+        return null;
+    return {
+        rev: exports.RUN_EVENT_PROTOCOL_VERSION,
+        runId: nonEmptyString(runId) ? runId : 'unknown-run',
+        kind: exports.RunEventKind.Failure,
+        failure,
+        message: nonEmptyString(message) ? message : `bridge connect failed: ${status}`,
+    };
+}
+/**
+ * M5 §14 — detect the `ambient_extensions_dev_mode` trust-degrading posture at
+ * activation. CONSERVATIVE by construction: it fires ONLY when the extension host is
+ * in Development mode (vscode.ExtensionMode.Development) — i.e. the extension is being
+ * run from source / an unpacked dev host (Extension Development Host, `--extensionDevelopmentPath`).
+ * A normal user install runs as Production (and `npm test`/integration runs as Test);
+ * NEITHER fires this, so a real install never sees a false ambient-extensions card.
+ *
+ * Why this heuristic: in a Development host the workbench enables AMBIENT, non-curated
+ * extensions and the governed surfaces sit OUTSIDE a sovereign/curated set, so a run
+ * created there cannot be product-trusted — the per-run envelope is not the whole host
+ * (per-run-envelope-not-whole-IDE). We do NOT try to enumerate third-party extensions
+ * (vscode.extensions.all) here: that is noisy (every install has bundled extensions),
+ * non-deterministic, and would over-fire. Development mode is the single, robust,
+ * conservative signal. Returns `true` iff the posture is degrading.
+ */
+function detectAmbientExtensionsDevMode(inputs) {
+    return inputs.extensionMode === inputs.developmentMode;
+}
+/**
+ * Construct the §14 `ambient_extensions_dev_mode` {@link FailureEvent} for a run
+ * (or `null` when the posture is NOT degrading, per {@link detectAmbientExtensionsDevMode}).
+ * The returned event passes {@link validateRunEvent} verbatim.
+ */
+function ambientExtensionsDevModeFailureEvent(runId, inputs) {
+    if (!detectAmbientExtensionsDevMode(inputs))
+        return null;
+    return {
+        rev: exports.RUN_EVENT_PROTOCOL_VERSION,
+        runId: nonEmptyString(runId) ? runId : 'unknown-run',
+        kind: exports.RunEventKind.Failure,
+        failure: exports.RunFailureKind.AmbientExtensionsDevMode,
+        message: 'this run executed with the workbench in Developer posture, where AMBIENT ' +
+            '(non-curated) extensions are enabled. Extension surfaces outside the per-run ' +
+            'envelope are NOT governed, so this run cannot be product-trusted.',
+    };
 }
 //# sourceMappingURL=runEventProtocol.js.map

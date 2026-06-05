@@ -1,8 +1,335 @@
+var __defProp = Object.defineProperty;
+var __getOwnPropNames = Object.getOwnPropertyNames;
+var __esm = (fn, res) => function __init() {
+  return fn && (res = (0, fn[__getOwnPropNames(fn)[0]])(fn = 0)), res;
+};
+var __export = (target, all) => {
+  for (var name in all)
+    __defProp(target, name, { get: all[name], enumerable: true });
+};
+
+// ../spikes/p0-supervisor/code-index/discover.ts
+var discover_exports = {};
+__export(discover_exports, {
+  discoverFiles: () => discoverFiles
+});
+import { promises as fs2 } from "node:fs";
+import * as path3 from "node:path";
+function isBackupSegment(seg) {
+  return /\.(bak|backup|old|orig)$/i.test(seg) || // trailing: app.bak, src.backup, x.old, m.orig
+  /\.(bak|backup)[.-]/i.test(seg) || // infix: VSCode-darwin-arm64.bak-pre-slice1, db.backup.2026
+  seg.endsWith("~");
+}
+function parseIgnoreFile(body) {
+  const patterns = [];
+  for (const rawLine of body.split(/\r?\n/)) {
+    const line = rawLine.trim();
+    if (line.length === 0 || line.startsWith("#")) continue;
+    if (line.startsWith("!")) continue;
+    if (line.startsWith("*.")) {
+      patterns.push({ kind: "ext", value: line.slice(2).toLowerCase() });
+      continue;
+    }
+    if (line.endsWith("/")) {
+      const value = line.replace(/^\/+/, "").replace(/\/+$/, "");
+      if (value.length > 0) patterns.push({ kind: "dir", value });
+      continue;
+    }
+    if (line.includes("/")) {
+      patterns.push({ kind: "prefix", value: line.replace(/^\/+/, "") });
+      continue;
+    }
+    patterns.push({ kind: "name", value: line });
+  }
+  return patterns;
+}
+function compileExtraIgnore(globs) {
+  if (!globs || globs.length === 0) return [];
+  return parseIgnoreFile(globs.join("\n"));
+}
+function matchesIgnore(relPath, segments, patterns) {
+  if (patterns.length === 0) return false;
+  const basename = segments[segments.length - 1] ?? "";
+  const lowerBasename = basename.toLowerCase();
+  for (const p of patterns) {
+    switch (p.kind) {
+      case "ext":
+        if (lowerBasename.endsWith(`.${p.value}`)) return true;
+        break;
+      case "dir":
+        if (segments.includes(p.value)) return true;
+        break;
+      case "prefix":
+        if (relPath === p.value || relPath.startsWith(`${p.value}/`)) return true;
+        break;
+      case "name":
+        if (basename === p.value || segments.includes(p.value)) return true;
+        break;
+    }
+  }
+  return false;
+}
+function isHardDenied(segments) {
+  for (const seg of segments) {
+    if (DENY_SEGMENTS.has(seg)) return true;
+    if (isBackupSegment(seg)) return true;
+  }
+  const basename = segments[segments.length - 1] ?? "";
+  for (const predicate of DENY_FILENAME_PREDICATES) {
+    if (predicate(basename)) return true;
+  }
+  for (const predicate of GENERATED_FILENAME_PREDICATES) {
+    if (predicate(basename)) return true;
+  }
+  return false;
+}
+function isAllowedTextFile(basename) {
+  const dot2 = basename.lastIndexOf(".");
+  if (dot2 <= 0) return false;
+  const ext = basename.slice(dot2 + 1).toLowerCase();
+  return TEXT_EXTENSIONS.has(ext);
+}
+async function looksBinary(absPath) {
+  let handle;
+  try {
+    handle = await fs2.open(absPath, "r");
+    const buf = Buffer.alloc(BINARY_SNIFF_BYTES);
+    const { bytesRead } = await handle.read(buf, 0, BINARY_SNIFF_BYTES, 0);
+    return buf.subarray(0, bytesRead).includes(0);
+  } finally {
+    await handle?.close();
+  }
+}
+async function readRootIgnore(workspaceRoot, name) {
+  try {
+    const body = await fs2.readFile(path3.join(workspaceRoot, name), "utf8");
+    return parseIgnoreFile(body);
+  } catch {
+    return [];
+  }
+}
+async function discoverFiles(opts) {
+  const root = await fs2.realpath(path3.resolve(opts.workspaceRoot));
+  const ignorePatterns = [
+    ...await readRootIgnore(root, ".gitignore"),
+    ...await readRootIgnore(root, ".glyphspekignore"),
+    ...compileExtraIgnore(opts.extraIgnore)
+  ];
+  const results = [];
+  async function walk(absDir, relDir) {
+    let entries;
+    try {
+      entries = await fs2.readdir(absDir, { withFileTypes: true });
+    } catch {
+      return;
+    }
+    for (const entry of entries) {
+      const name = entry.name;
+      const relPath = relDir.length === 0 ? name : `${relDir}/${name}`;
+      const segments = relPath.split("/");
+      if (isHardDenied(segments)) continue;
+      if (entry.isSymbolicLink()) continue;
+      if (entry.isDirectory()) {
+        if (matchesIgnore(relPath, segments, ignorePatterns)) continue;
+        await walk(path3.join(absDir, name), relPath);
+        continue;
+      }
+      if (!entry.isFile()) continue;
+      if (matchesIgnore(relPath, segments, ignorePatterns)) continue;
+      if (!isAllowedTextFile(name)) continue;
+      const absPath = path3.join(absDir, name);
+      if (absPath !== root && !absPath.startsWith(root + path3.sep)) continue;
+      let size;
+      try {
+        const st = await fs2.stat(absPath);
+        size = st.size;
+      } catch {
+        continue;
+      }
+      if (size > MAX_FILE_BYTES) continue;
+      try {
+        if (await looksBinary(absPath)) continue;
+      } catch {
+        continue;
+      }
+      results.push({ path: relPath, absPath });
+    }
+  }
+  await walk(root, "");
+  results.sort((a, b) => a.path < b.path ? -1 : a.path > b.path ? 1 : 0);
+  return results;
+}
+var DENY_SEGMENTS, DENY_FILENAME_PREDICATES, GENERATED_FILENAME_PREDICATES, TEXT_EXTENSIONS, MAX_FILE_BYTES, BINARY_SNIFF_BYTES;
+var init_discover = __esm({
+  "../spikes/p0-supervisor/code-index/discover.ts"() {
+    DENY_SEGMENTS = /* @__PURE__ */ new Set([
+      ".git",
+      // VCS internals (config can hold credentials/remotes)
+      "node_modules",
+      // vendored dependencies — never index
+      "dist",
+      // build output
+      "dist-supervisor",
+      // supervisor bundle output
+      "out",
+      // build output
+      "out-build",
+      // build output
+      "out-vscode",
+      // build output
+      "bin",
+      // .NET build output (generated/build noise) — segment match only
+      "obj",
+      // .NET build output: holds generated AssemblyInfo.cs etc. (build noise)
+      ".glyphspek",
+      // the index's OWN home — never index ourselves
+      ".vscode-test",
+      // VS Code integration-test scratch
+      ".ssh"
+      // SSH key directory — anything under it is a secret
+    ]);
+    DENY_FILENAME_PREDICATES = [
+      // Dotenv: exactly `.env`, or `.env.<anything>` (`.env.local`, `.env.production`).
+      (name) => name === ".env" || name.startsWith(".env."),
+      // Private-key / certificate extensions.
+      (name) => /\.(pem|key|p12|pfx)$/i.test(name),
+      // Default SSH private/public key files regardless of directory.
+      (name) => /^id_rsa/i.test(name),
+      // Substring secrets — deliberately broad. Any of these tokens anywhere in the
+      // basename denies the file (e.g. `mySecret.ts`, `password.txt`).
+      (name) => {
+        const lower = name.toLowerCase();
+        return lower.includes("secret") || lower.includes("credential") || lower.includes("password");
+      }
+    ];
+    GENERATED_FILENAME_PREDICATES = [
+      // .NET generated assembly-attributes file (commonly under obj/, also seen at root).
+      (name) => /^assemblyinfo\.cs$/i.test(name),
+      // Generated C# partials: *.Designer.cs, *.generated.cs, *.g.cs, *.g.i.cs.
+      (name) => /\.(designer|generated|g|g\.i)\.cs$/i.test(name),
+      // Minified web bundles + source maps.
+      (name) => /\.min\.(js|css)$/i.test(name),
+      (name) => /\.map$/i.test(name),
+      // .NET restore lockfile.
+      (name) => name.toLowerCase() === "packages.lock.json"
+    ];
+    TEXT_EXTENSIONS = /* @__PURE__ */ new Set([
+      "ts",
+      "tsx",
+      "js",
+      "jsx",
+      "mjs",
+      "cjs",
+      "md",
+      "mdx",
+      "json",
+      "jsonc",
+      "css",
+      "scss",
+      "html",
+      "sh",
+      "bash",
+      "zsh",
+      "py",
+      "go",
+      "rs",
+      "java",
+      "kt",
+      "c",
+      "h",
+      "cc",
+      "cpp",
+      "hpp",
+      "cs",
+      "rb",
+      "php",
+      "swift",
+      "sql",
+      "yml",
+      "yaml",
+      "toml",
+      "ini",
+      "txt"
+    ]);
+    MAX_FILE_BYTES = 1024 * 1024;
+    BINARY_SNIFF_BYTES = 4096;
+  }
+});
+
+// ../spikes/p0-supervisor/code-index/chunk.ts
+var chunk_exports = {};
+__export(chunk_exports, {
+  chunkFile: () => chunkFile
+});
+import { createHash as createHash4 } from "node:crypto";
+function sha256Hex(text) {
+  return createHash4("sha256").update(text, "utf8").digest("hex");
+}
+function makeChunk(relPath, startLine, endLine, text) {
+  return {
+    id: `${relPath}:${startLine}-${endLine}`,
+    path: relPath,
+    startLine,
+    endLine,
+    text,
+    hash: sha256Hex(text)
+  };
+}
+function chunkFile(relPath, text, opts) {
+  const chunkLines = Math.max(1, opts?.chunkLines ?? DEFAULT_CHUNK_LINES);
+  const overlap = Math.max(0, opts?.overlap ?? DEFAULT_OVERLAP);
+  const maxChars = Math.max(1, opts?.maxChars ?? DEFAULT_MAX_CHARS);
+  const step = Math.max(1, chunkLines - overlap);
+  const lines = text.split(/\r?\n/);
+  if (lines.length === 1 && lines[0] === "") return [];
+  const chunks = [];
+  for (let start = 0; start < lines.length; start += step) {
+    const end = Math.min(start + chunkLines, lines.length);
+    const windowText = lines.slice(start, end).join("\n");
+    const startLine = start + 1;
+    const endLine = end;
+    if (windowText.length <= maxChars) {
+      const trimmed = windowText.trim();
+      if (trimmed.length > 0) {
+        chunks.push(makeChunk(relPath, startLine, endLine, trimmed));
+      }
+    } else {
+      const pieces = [];
+      for (let i = 0; i < windowText.length; i += maxChars) {
+        pieces.push(windowText.slice(i, i + maxChars));
+      }
+      const kept = [];
+      for (const piece of pieces) {
+        const trimmed = piece.trim();
+        if (trimmed.length > 0) kept.push(trimmed);
+      }
+      if (kept.length === 1) {
+        chunks.push(makeChunk(relPath, startLine, endLine, kept[0]));
+      } else {
+        kept.forEach((pieceText, idx) => {
+          const base = makeChunk(relPath, startLine, endLine, pieceText);
+          chunks.push({ ...base, id: `${base.id}#${idx}` });
+        });
+      }
+    }
+    if (end >= lines.length) break;
+  }
+  return chunks;
+}
+var DEFAULT_CHUNK_LINES, DEFAULT_OVERLAP, DEFAULT_MAX_CHARS;
+var init_chunk = __esm({
+  "../spikes/p0-supervisor/code-index/chunk.ts"() {
+    DEFAULT_CHUNK_LINES = 40;
+    DEFAULT_OVERLAP = 8;
+    DEFAULT_MAX_CHARS = 2e3;
+  }
+});
+
 // ../spikes/p0-supervisor/bridge-server.ts
-import { createHash as createHash3 } from "node:crypto";
-import { readFileSync as readFileSync4, statSync as statSync3 } from "node:fs";
+import { createHash as createHash7 } from "node:crypto";
+import { readFileSync as readFileSync5, statSync as statSync3, realpathSync } from "node:fs";
 import { spawnSync as spawnSync2 } from "node:child_process";
-import { join as join8 } from "node:path";
+import { join as join11, resolve as resolve4 } from "node:path";
 
 // ../spikes/p0-supervisor/run.ts
 import { randomUUID } from "node:crypto";
@@ -65,10 +392,10 @@ function isStringArray(v) {
 function isStringMatrix(v) {
   return Array.isArray(v) && v.every((row) => isStringArray(row));
 }
-function validateDefaultVerb(value, path4, errors) {
+function validateDefaultVerb(value, path5, errors) {
   if (typeof value !== "string" || !POLICY_DEFAULT_VERBS.includes(value)) {
     errors.push(
-      `${path4} must be one of ${POLICY_DEFAULT_VERBS.join(" | ")}, got ${describe(value)}`
+      `${path5} must be one of ${POLICY_DEFAULT_VERBS.join(" | ")}, got ${describe(value)}`
     );
   }
 }
@@ -242,6 +569,15 @@ var BridgeMethod = {
    */
   ChatSend: "chat/send",
   /**
+   * Fetch one explicit http(s) URL for `@Web` chat context. Synchronous
+   * request/result, handled supervisor-side only: the extension never fetches web
+   * content directly. The supervisor refuses unless a governed chat session already
+   * exists, then fetches through that session's governed egress proxy and appends
+   * metadata + content hash to the run trace. Result text is untrusted context data;
+   * raw body is never persisted to trace.
+   */
+  WebFetch: "web/fetch",
+  /**
    * Start a GOVERNED AGENTIC BUILD (Phase B — the chat→ACTOR promotion). Unlike
    * {@link ChatSend} (Ask-only, read-only), a build crosses from assistant to ACTOR:
    * it edits files and runs commands under `cwd`. Per the developer trust doctrine
@@ -280,7 +616,36 @@ var BridgeMethod = {
    * codex). The result is only the ACK ({ approvalId, decision, runId? }). Additive:
    * a direct `build/start {approved:true}` still starts immediately as today.
    */
-  ApprovalRespond: "approval/respond"
+  ApprovalRespond: "approval/respond",
+  /**
+   * Retrieve top-k chunks from the workspace's LOCAL code index (@Codebase repo-aware
+   * retrieval). SYNCHRONOUS request/result (NOT ack-then-stream): the supervisor
+   * lazily builds the on-device index for `workspaceRoot` on first use (Ollama/ONNX
+   * embedder + brute-force store, memory-only residency), embeds `query`, and returns
+   * the top-k cosine-similar chunks ({path,startLine,endLine,text,score}). Everything
+   * is LOCAL by construction — nothing in the index path egresses code (contrast
+   * Cursor's server-side embedding). The result carries non-secret repo SNIPPETS
+   * (already secret-redacted at chunk time), NEVER a credential. Retrieval MUST be
+   * best-effort and NON-fatal: on ANY error (e.g. embedder daemon down, build failure)
+   * the result is `{ ok:false, hits:[] }` so chat falls back to NO repo context rather
+   * than failing the turn.
+   */
+  IndexRetrieve: "index/retrieve",
+  /**
+   * BUILD (or rebuild) the workspace's LOCAL code index on demand (the no-CLI "Index
+   * Workspace" experience). SYNCHRONOUS request/result: the supervisor builds (or
+   * incrementally rebuilds) the SESSION'S OWN on-device index for `workspaceRoot` and
+   * returns the {@link IndexStats} (files / chunks / embedded / reused / embedMs /
+   * totalMs). Session-bound EXACTLY like {@link IndexRetrieve}: it refuses before a
+   * completed handshake and refuses any `workspaceRoot` that does not resolve to the
+   * session's bound root — it shares the SAME per-workspace server-side index the chat
+   * retrieval + repo-aware FIM use (never a parallel index). `persist` opts the build
+   * into the 'workspace-encrypted' residency (an encrypted, workspace-local snapshot
+   * that survives session restarts) instead of the memory-only default. Everything is
+   * LOCAL — nothing egresses code. Best-effort: on ANY error the result is
+   * `{ ok:false }` with a short non-secret `error` (the command path never throws).
+   */
+  IndexBuild: "index/build"
 };
 var BridgeNotification = {
   /** A run lifecycle/trace event streamed back to the client for the panel. */
@@ -307,7 +672,18 @@ var BridgeNotification = {
    * `runId`. Carries non-secret build EVIDENCE (summary/commands/diff/verdict),
    * never a credential.
    */
-  AgenticBuildEvent: "build/event"
+  AgenticBuildEvent: "build/event",
+  /**
+   * One `index/build` PROGRESS event (the "Index Workspace" command). After an
+   * {@link BridgeMethod.IndexBuild} request is accepted, the supervisor STREAMS a
+   * sequence of these (one per phase/batch) carrying the {@link IndexProgressEvent}
+   * counts, then resolves the request with the final {@link IndexBuildResult}. The
+   * client routes each event to a per-request `onProgress` callback AND resets the
+   * request's inactivity timeout on every event — so a long, progressing build never
+   * times out. Carries non-secret build COUNTS only (done/total/phase), never a
+   * credential and never any code/chunk text.
+   */
+  IndexProgress: "index/progress"
 };
 var BridgeErrorCode = {
   /** Malformed envelope / JSON parse failure on the wire. */
@@ -556,9 +932,9 @@ function createTraceWriter(traceFilePath) {
   };
   return { path: traceFilePath, append };
 }
-function readTrace(path4) {
-  if (!existsSync(path4)) return [];
-  const raw = readFileSync(path4, "utf8");
+function readTrace(path5) {
+  if (!existsSync(path5)) return [];
+  const raw = readFileSync(path5, "utf8");
   const events = [];
   const lines = raw.split("\n");
   for (let i = 0; i < lines.length; i++) {
@@ -569,7 +945,7 @@ function readTrace(path4) {
       parsed = JSON.parse(line);
     } catch (err) {
       throw new Error(
-        `readTrace: invalid JSON on line ${i + 1} of ${path4}: ${err.message}`
+        `readTrace: invalid JSON on line ${i + 1} of ${path5}: ${err.message}`
       );
     }
     events.push(parsed);
@@ -635,24 +1011,24 @@ function signVerdict(core, privateKey, keyId) {
 // ../spikes/p0-supervisor/policy/load.ts
 import { readFileSync as readFileSync2 } from "node:fs";
 import { extname } from "node:path";
-function loadPolicy(path4) {
-  const ext = extname(path4).toLowerCase();
+function loadPolicy(path5) {
+  const ext = extname(path5).toLowerCase();
   if (ext === ".yml" || ext === ".yaml") {
-    throw new Error(`P0 uses JSON policy; convert ${path4}`);
+    throw new Error(`P0 uses JSON policy; convert ${path5}`);
   }
   let text;
   try {
-    text = readFileSync2(path4, "utf8");
+    text = readFileSync2(path5, "utf8");
   } catch (err) {
     const reason = err instanceof Error ? err.message : String(err);
-    return { errors: [`could not read policy file ${path4}: ${reason}`] };
+    return { errors: [`could not read policy file ${path5}: ${reason}`] };
   }
   let raw;
   try {
     raw = JSON.parse(text);
   } catch (err) {
     const reason = err instanceof Error ? err.message : String(err);
-    return { errors: [`policy file ${path4} is not valid JSON: ${reason}`] };
+    return { errors: [`policy file ${path5} is not valid JSON: ${reason}`] };
   }
   return parsePolicy(raw);
 }
@@ -853,18 +1229,18 @@ function decide(policy, request) {
 function decideRaw(policy, request) {
   switch (request.tool) {
     case "file_read": {
-      const path4 = readPath(request.payload);
-      if (path4 !== void 0) {
-        if (anyGlobMatch(policy.deny.read_paths, path4)) return "deny";
-        if (anyGlobMatch(policy.allow.read_paths, path4)) return "allow";
+      const path5 = readPath(request.payload);
+      if (path5 !== void 0) {
+        if (anyGlobMatch(policy.deny.read_paths, path5)) return "deny";
+        if (anyGlobMatch(policy.allow.read_paths, path5)) return "allow";
       }
       return verbToDecision(policy.defaults.file_read);
     }
     case "file_write": {
-      const path4 = readPath(request.payload);
-      if (path4 !== void 0) {
-        if (anyGlobMatch(policy.deny.write_paths, path4)) return "deny";
-        if (anyGlobMatch(policy.allow.write_paths, path4)) return "allow";
+      const path5 = readPath(request.payload);
+      if (path5 !== void 0) {
+        if (anyGlobMatch(policy.deny.write_paths, path5)) return "deny";
+        if (anyGlobMatch(policy.allow.write_paths, path5)) return "allow";
       }
       return verbToDecision(policy.defaults.file_write);
     }
@@ -1058,8 +1434,8 @@ async function driveScriptedRun(opts) {
 function sinkEvents(sink) {
   const maybe = sink.events;
   if (Array.isArray(maybe)) return maybe;
-  const path4 = sink.path;
-  if (typeof path4 === "string") return readTrace(path4);
+  const path5 = sink.path;
+  if (typeof path5 === "string") return readTrace(path5);
   return [];
 }
 function signEphemeral(checks, overallVerdict, traceRootHash, injectedKey) {
@@ -1426,7 +1802,7 @@ egress denied by allowlist: ${host}:${targetPort}
       socket.destroy();
     }
   });
-  return new Promise((resolve2, reject) => {
+  return new Promise((resolve5, reject) => {
     server2.once("error", reject);
     server2.listen(bindPort, bindHost, () => {
       server2.removeListener("error", reject);
@@ -1437,7 +1813,7 @@ egress denied by allowlist: ${host}:${targetPort}
       }
       const port = addr.port;
       const proxyHost = bindHost === "0.0.0.0" || bindHost === "::" ? "127.0.0.1" : bindHost;
-      resolve2({
+      resolve5({
         port,
         url: `http://${proxyHost}:${port}`,
         proxyHost,
@@ -1910,8 +2286,8 @@ function finalizeTerminalRun(opts) {
 function sinkEvents2(sink) {
   const maybe = sink.events;
   if (Array.isArray(maybe)) return maybe;
-  const path4 = sink.path;
-  if (typeof path4 === "string") return readTrace(path4);
+  const path5 = sink.path;
+  if (typeof path5 === "string") return readTrace(path5);
   return [];
 }
 function signTerminalVerdict(core, injectedKey) {
@@ -2384,6 +2760,1503 @@ ${s.content}`,
   }
 };
 
+// ../spikes/p0-supervisor/code-index/indexer.ts
+import { readFile as readFile2 } from "node:fs/promises";
+
+// ../spikes/p0-supervisor/code-index/index-crypto.ts
+import {
+  createCipheriv,
+  createDecipheriv,
+  createHash as createHash3,
+  randomBytes
+} from "node:crypto";
+import {
+  existsSync as existsSync2,
+  mkdirSync as mkdirSync4,
+  readFileSync as readFileSync3,
+  writeFileSync
+} from "node:fs";
+import { homedir } from "node:os";
+import { dirname as dirname3, join as join5, resolve as resolve2 } from "node:path";
+var ALGORITHM = "aes-256-gcm";
+var KEY_BYTES = 32;
+var IV_BYTES = 12;
+var TAG_BYTES = 16;
+function encryptBlob(key, plaintext) {
+  if (key.length !== KEY_BYTES) {
+    throw new Error(
+      `index-crypto: key must be ${KEY_BYTES} bytes (got ${key.length})`
+    );
+  }
+  const iv = randomBytes(IV_BYTES);
+  const cipher = createCipheriv(ALGORITHM, key, iv);
+  const ciphertext = Buffer.concat([cipher.update(plaintext), cipher.final()]);
+  const authTag = cipher.getAuthTag();
+  return Buffer.concat([iv, authTag, ciphertext]);
+}
+function decryptBlob(key, blob) {
+  if (key.length !== KEY_BYTES) {
+    throw new Error(
+      `index-crypto: key must be ${KEY_BYTES} bytes (got ${key.length})`
+    );
+  }
+  if (blob.length < IV_BYTES + TAG_BYTES) {
+    throw new Error("index-crypto: ciphertext blob too short (missing iv/tag)");
+  }
+  const iv = blob.subarray(0, IV_BYTES);
+  const authTag = blob.subarray(IV_BYTES, IV_BYTES + TAG_BYTES);
+  const ciphertext = blob.subarray(IV_BYTES + TAG_BYTES);
+  const decipher = createDecipheriv(ALGORITHM, key, iv);
+  decipher.setAuthTag(authTag);
+  return Buffer.concat([decipher.update(ciphertext), decipher.final()]);
+}
+function defaultKeyDir() {
+  return join5(homedir(), ".glyphspek", "index-keys");
+}
+function keyFileFor(keyDir, workspaceRoot) {
+  const canonical = resolve2(workspaceRoot);
+  const digest = createHash3("sha256").update(canonical).digest("hex");
+  return join5(keyDir, `${digest}.key`);
+}
+function getWorkspaceKey(workspaceRoot, keyDir) {
+  const dir = keyDir ?? defaultKeyDir();
+  const keyFile = keyFileFor(dir, workspaceRoot);
+  if (existsSync2(keyFile)) {
+    const existing = readFileSync3(keyFile);
+    if (existing.length !== KEY_BYTES) {
+      throw new Error(
+        `index-crypto: key file ${keyFile} is ${existing.length} bytes, expected ${KEY_BYTES}`
+      );
+    }
+    return existing;
+  }
+  mkdirSync4(dirname3(keyFile), { recursive: true, mode: 448 });
+  const key = randomBytes(KEY_BYTES);
+  writeFileSync(keyFile, key, { mode: 384 });
+  return key;
+}
+
+// ../spikes/p0-supervisor/code-index/persisted-store.ts
+import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { existsSync as existsSync3 } from "node:fs";
+import { join as join6 } from "node:path";
+var INDEX_FILE = "index.enc";
+var MAGIC = Buffer.from("GSI2", "ascii");
+var MAGIC_LEGACY = Buffer.from("GSI1", "ascii");
+function isSnapshotable(store) {
+  return !Array.isArray(store) && typeof store.snapshot === "function";
+}
+function chunksOf(store) {
+  if (Array.isArray(store)) {
+    return store;
+  }
+  if (isSnapshotable(store)) {
+    return store.snapshot();
+  }
+  throw new Error(
+    "persisted-store: a VectorStore must expose snapshot() to be persisted; pass the EmbeddedChunk[] directly instead"
+  );
+}
+function serializeChunks(chunks, embedderId) {
+  const dims = chunks.length > 0 ? chunks[0].vector.length : 0;
+  const embedderIdBuf = Buffer.from(embedderId, "utf8");
+  const parts = [];
+  const header = Buffer.allocUnsafe(4 + 4 + embedderIdBuf.length + 4 + 4);
+  let h = 0;
+  MAGIC.copy(header, h);
+  h += 4;
+  header.writeUInt32LE(embedderIdBuf.length, h);
+  h += 4;
+  embedderIdBuf.copy(header, h);
+  h += embedderIdBuf.length;
+  header.writeUInt32LE(dims, h);
+  h += 4;
+  header.writeUInt32LE(chunks.length, h);
+  h += 4;
+  parts.push(header);
+  for (const chunk of chunks) {
+    if (chunk.vector.length !== dims) {
+      throw new Error(
+        `persisted-store: inconsistent vector dims (${chunk.vector.length} vs ${dims}) for chunk ${chunk.id}`
+      );
+    }
+    const id = Buffer.from(chunk.id, "utf8");
+    const path5 = Buffer.from(chunk.path, "utf8");
+    const hash = Buffer.from(chunk.hash, "utf8");
+    const text = Buffer.from(chunk.text, "utf8");
+    const fixed = Buffer.allocUnsafe(4 * 6);
+    let o = 0;
+    fixed.writeUInt32LE(id.length, o);
+    o += 4;
+    fixed.writeUInt32LE(path5.length, o);
+    o += 4;
+    fixed.writeUInt32LE(chunk.startLine >>> 0, o);
+    o += 4;
+    fixed.writeUInt32LE(chunk.endLine >>> 0, o);
+    o += 4;
+    fixed.writeUInt32LE(hash.length, o);
+    o += 4;
+    fixed.writeUInt32LE(text.length, o);
+    o += 4;
+    const vec = Buffer.allocUnsafe(dims * 4);
+    for (let i = 0; i < dims; i++) {
+      vec.writeFloatLE(chunk.vector[i], i * 4);
+    }
+    parts.push(fixed, id, path5, hash, text, vec);
+  }
+  return Buffer.concat(parts);
+}
+function deserializeChunks(buf) {
+  if (buf.length < 16 || !buf.subarray(0, 4).equals(MAGIC)) {
+    throw new Error("persisted-store: bad snapshot magic (not a GSI2 blob)");
+  }
+  let off = 4;
+  const need = (n) => {
+    if (off + n > buf.length) {
+      throw new Error("persisted-store: truncated snapshot");
+    }
+  };
+  need(4);
+  const embedderIdLen = buf.readUInt32LE(off);
+  off += 4;
+  need(embedderIdLen);
+  const embedderId = buf.toString("utf8", off, off + embedderIdLen);
+  off += embedderIdLen;
+  need(4);
+  const dims = buf.readUInt32LE(off);
+  off += 4;
+  need(4);
+  const count = buf.readUInt32LE(off);
+  off += 4;
+  const chunks = [];
+  for (let c = 0; c < count; c++) {
+    need(4 * 6);
+    const idLen = buf.readUInt32LE(off);
+    off += 4;
+    const pathLen = buf.readUInt32LE(off);
+    off += 4;
+    const startLine = buf.readUInt32LE(off);
+    off += 4;
+    const endLine = buf.readUInt32LE(off);
+    off += 4;
+    const hashLen = buf.readUInt32LE(off);
+    off += 4;
+    const textLen = buf.readUInt32LE(off);
+    off += 4;
+    need(idLen);
+    const id = buf.toString("utf8", off, off + idLen);
+    off += idLen;
+    need(pathLen);
+    const path5 = buf.toString("utf8", off, off + pathLen);
+    off += pathLen;
+    need(hashLen);
+    const hash = buf.toString("utf8", off, off + hashLen);
+    off += hashLen;
+    need(textLen);
+    const text = buf.toString("utf8", off, off + textLen);
+    off += textLen;
+    need(dims * 4);
+    const vector = new Float32Array(dims);
+    for (let i = 0; i < dims; i++) {
+      vector[i] = buf.readFloatLE(off + i * 4);
+    }
+    off += dims * 4;
+    chunks.push({ id, path: path5, startLine, endLine, hash, text, vector });
+  }
+  return { embedderId, dims, chunks };
+}
+async function saveIndex(opts) {
+  const chunks = chunksOf(opts.store);
+  const plaintext = serializeChunks(chunks, opts.embedderId);
+  const blob = encryptBlob(opts.key, plaintext);
+  await mkdir(opts.persistDir, { recursive: true });
+  const file = join6(opts.persistDir, INDEX_FILE);
+  await writeFile(file, blob);
+  return file;
+}
+async function loadIndex(opts) {
+  const file = join6(opts.persistDir, INDEX_FILE);
+  if (!existsSync3(file)) {
+    return null;
+  }
+  const blob = await readFile(file);
+  const plaintext = decryptBlob(opts.key, blob);
+  if (plaintext.length >= 4 && plaintext.subarray(0, 4).equals(MAGIC_LEGACY)) {
+    return null;
+  }
+  const snapshot = deserializeChunks(plaintext);
+  if (snapshot.embedderId !== opts.expectedEmbedderId || snapshot.dims !== opts.expectedDims) {
+    return null;
+  }
+  return snapshot.chunks;
+}
+
+// ../spikes/p0-supervisor/code-index/indexer.ts
+var DEFAULT_EMBED_PROGRESS_BATCH = 64;
+async function buildIndex(opts) {
+  const totalStart = performance.now();
+  const { workspaceRoot, embedder, store } = opts;
+  const report = (p) => {
+    if (!opts.onProgress) return;
+    try {
+      opts.onProgress(p);
+    } catch {
+    }
+  };
+  const policy = opts.residency ?? { residency: "memory-only", highSecurity: false };
+  const wantsEncryptedPersist = policy.residency === "workspace-encrypted" && !policy.highSecurity;
+  const persistKey = wantsEncryptedPersist && policy.workspaceRoot ? getWorkspaceKey(policy.workspaceRoot, opts.keyDir) : void 0;
+  const decision = resolveIndexResidency({
+    policy,
+    encryptAtRest: persistKey ? (plaintext) => encryptAtRestHook(persistKey, plaintext) : void 0
+  });
+  if (decision.effective === "disabled") {
+    return {
+      files: 0,
+      chunks: 0,
+      embedded: 0,
+      reused: 0,
+      embedMs: 0,
+      totalMs: performance.now() - totalStart,
+      embedderId: embedder.id,
+      residency: decision.effective
+    };
+  }
+  const loadedById = /* @__PURE__ */ new Map();
+  if (decision.persists && decision.persistDir && persistKey) {
+    const prior = await loadIndex({
+      persistDir: decision.persistDir,
+      key: persistKey,
+      expectedEmbedderId: embedder.id,
+      expectedDims: embedder.dims
+    });
+    if (prior && prior.length > 0) {
+      store.upsert(prior);
+      for (const chunk of prior) {
+        loadedById.set(chunk.id, chunk);
+      }
+    }
+  }
+  report({ phase: "discover", done: 0, total: 1 });
+  const loadChunks = opts.loadChunks ?? defaultLoadChunks;
+  const freshChunks = await loadChunks(
+    workspaceRoot,
+    opts.discoverOptions,
+    opts.chunkOptions
+  );
+  report({ phase: "discover", done: 1, total: 1 });
+  const freshPaths = /* @__PURE__ */ new Set();
+  for (const chunk of freshChunks) {
+    freshPaths.add(chunk.path);
+  }
+  const files = freshPaths.size;
+  report({ phase: "chunk", done: freshChunks.length, total: freshChunks.length });
+  const manifest = store.manifest();
+  const manifestIdsByPath = /* @__PURE__ */ new Map();
+  for (const id of manifest.keys()) {
+    const p = pathFromChunkId(id);
+    const set = manifestIdsByPath.get(p);
+    if (set) {
+      set.add(id);
+    } else {
+      manifestIdsByPath.set(p, /* @__PURE__ */ new Set([id]));
+    }
+  }
+  const toEmbed = [];
+  let reused = 0;
+  const freshIdsByPath = /* @__PURE__ */ new Map();
+  for (const chunk of freshChunks) {
+    const set = freshIdsByPath.get(chunk.path);
+    if (set) {
+      set.add(chunk.id);
+    } else {
+      freshIdsByPath.set(chunk.path, /* @__PURE__ */ new Set([chunk.id]));
+    }
+  }
+  for (const chunk of freshChunks) {
+    const storedHash = manifest.get(chunk.id);
+    if (storedHash === void 0 || storedHash !== chunk.hash) {
+      toEmbed.push(chunk);
+    } else {
+      reused++;
+    }
+  }
+  const pathsToRemove = [];
+  for (const [path5, priorIds] of manifestIdsByPath) {
+    const freshIds = freshIdsByPath.get(path5);
+    if (freshIds === void 0) {
+      pathsToRemove.push(path5);
+      continue;
+    }
+    let hasOrphan = false;
+    for (const priorId of priorIds) {
+      if (!freshIds.has(priorId)) {
+        hasOrphan = true;
+        break;
+      }
+    }
+    if (hasOrphan) {
+      pathsToRemove.push(path5);
+      const already = new Set(toEmbed.map((c) => c.id));
+      for (const chunk of freshChunks) {
+        if (chunk.path === path5 && !already.has(chunk.id)) {
+          toEmbed.push(chunk);
+          reused--;
+        }
+      }
+    }
+  }
+  if (pathsToRemove.length > 0) {
+    store.removeByPath(pathsToRemove);
+  }
+  let embedMs = 0;
+  let embeddedNow = [];
+  if (toEmbed.length > 0) {
+    const total = toEmbed.length;
+    const embedStart = performance.now();
+    const vectors = [];
+    if (opts.onProgress) {
+      report({ phase: "embed", done: 0, total });
+      for (let i = 0; i < total; i += DEFAULT_EMBED_PROGRESS_BATCH) {
+        const slice = toEmbed.slice(i, i + DEFAULT_EMBED_PROGRESS_BATCH);
+        const batchVectors = await embedder.embed(slice.map((c) => c.text));
+        if (batchVectors.length !== slice.length) {
+          throw new Error(
+            `indexer: embedder returned ${batchVectors.length} vectors for ${slice.length} texts (order/count must match)`
+          );
+        }
+        for (const v of batchVectors) vectors.push(v);
+        report({ phase: "embed", done: vectors.length, total });
+      }
+    } else {
+      const batch = await embedder.embed(toEmbed.map((c) => c.text));
+      for (const v of batch) vectors.push(v);
+    }
+    embedMs = performance.now() - embedStart;
+    if (vectors.length !== total) {
+      throw new Error(
+        `indexer: embedder returned ${vectors.length} vectors for ${total} texts (order/count must match)`
+      );
+    }
+    embeddedNow = toEmbed.map((chunk, i) => ({
+      ...chunk,
+      vector: vectors[i]
+    }));
+    store.upsert(embeddedNow);
+  }
+  if (opts.keywordIndex) {
+    if (pathsToRemove.length > 0) {
+      opts.keywordIndex.removeByPath(pathsToRemove);
+    }
+    opts.keywordIndex.add(freshChunks);
+  }
+  if (decision.persists && decision.persistDir && persistKey) {
+    const removed = new Set(pathsToRemove);
+    const byId = /* @__PURE__ */ new Map();
+    for (const chunk of loadedById.values()) {
+      if (!removed.has(chunk.path)) {
+        byId.set(chunk.id, chunk);
+      }
+    }
+    for (const chunk of embeddedNow) {
+      byId.set(chunk.id, chunk);
+    }
+    await saveIndex({
+      store: [...byId.values()],
+      persistDir: decision.persistDir,
+      key: persistKey,
+      embedderId: embedder.id
+    });
+  }
+  return {
+    files,
+    chunks: freshChunks.length,
+    embedded: toEmbed.length,
+    reused,
+    embedMs,
+    totalMs: performance.now() - totalStart,
+    embedderId: embedder.id,
+    residency: decision.effective
+  };
+}
+function encryptAtRestHook(key, plaintext) {
+  return encryptBlob(key, Buffer.from(plaintext, "utf8"));
+}
+function pathFromChunkId(id) {
+  const match = /^(.*):\d+-\d+$/.exec(id);
+  return match ? match[1] : id;
+}
+var defaultLoadChunks = async (workspaceRoot, discoverOptions, chunkOptions) => {
+  const { discoverFiles: discoverFiles2 } = await Promise.resolve().then(() => (init_discover(), discover_exports));
+  const { chunkFile: chunkFile2 } = await Promise.resolve().then(() => (init_chunk(), chunk_exports));
+  const discovered = await discoverFiles2({
+    workspaceRoot,
+    ...discoverOptions
+  });
+  const chunks = [];
+  for (const file of discovered) {
+    const text = await readFile2(file.absPath, "utf8");
+    chunks.push(...chunkFile2(file.path, text, chunkOptions));
+  }
+  return chunks;
+};
+
+// ../spikes/p0-supervisor/code-index/retriever.ts
+var DEFAULT_K = 8;
+var DEFAULT_ADJACENCY_GAP = 8;
+var DEFAULT_MAX_MERGED_LINES = 200;
+var DEFAULT_MAX_MERGED_CHARS = 8e3;
+var RRF_K = 60;
+var DEFAULT_MIN_RELEVANCE = 0.25;
+function cosineSim(a, b) {
+  const n = Math.min(a.length, b.length);
+  let dot2 = 0;
+  let aa = 0;
+  let bb = 0;
+  for (let i = 0; i < n; i++) {
+    dot2 += a[i] * b[i];
+    aa += a[i] * a[i];
+    bb += b[i] * b[i];
+  }
+  const denom = Math.sqrt(aa) * Math.sqrt(bb);
+  return denom > 0 ? dot2 / denom : 0;
+}
+function poolSize(k) {
+  return Math.max(k, 30);
+}
+async function retrieve(opts) {
+  const { query, embedder, store, keywordIndex } = opts;
+  const k = opts.k ?? DEFAULT_K;
+  const minRelevance = opts.minRelevance ?? DEFAULT_MIN_RELEVANCE;
+  const vectors = await embedder.embed([query]);
+  const queryVector = vectors[0];
+  if (queryVector === void 0) {
+    throw new Error("retriever: embedder returned no vector for the query");
+  }
+  if (keywordIndex === void 0) {
+    return applyRelevanceFloor(store.search(queryVector, k), minRelevance);
+  }
+  const pool = poolSize(k);
+  const vectorHits = store.search(queryVector, pool);
+  const keywordHits = keywordIndex.search(query, pool);
+  const fused = fuseByReciprocalRank([vectorHits, keywordHits], pool);
+  const cosineById = /* @__PURE__ */ new Map();
+  for (const hit of vectorHits) {
+    if (hit.relevance !== void 0) cosineById.set(hit.chunk.id, hit.relevance);
+  }
+  const withRelevance = fused.map((hit) => {
+    const cosine = cosineById.get(hit.chunk.id) ?? cosineFromStore(store, queryVector, hit.chunk.id);
+    return cosine === void 0 ? hit : { ...hit, relevance: cosine };
+  });
+  const merged = dedupeAdjacentHits(withRelevance);
+  const floored = applyRelevanceFloor(merged, minRelevance);
+  return k >= floored.length ? floored : floored.slice(0, k);
+}
+function cosineFromStore(store, queryVector, id) {
+  const vec = store.getVector?.(id);
+  return vec === void 0 ? void 0 : cosineSim(queryVector, vec);
+}
+function applyRelevanceFloor(hits, minRelevance) {
+  return hits.filter((h) => h.relevance === void 0 || h.relevance >= minRelevance);
+}
+function dedupeAdjacentHits(hits, opts = {}) {
+  const adjacencyGap = opts.adjacencyGap ?? DEFAULT_ADJACENCY_GAP;
+  const maxLines = opts.maxMergedLines ?? DEFAULT_MAX_MERGED_LINES;
+  const maxChars = opts.maxMergedChars ?? DEFAULT_MAX_MERGED_CHARS;
+  if (hits.length <= 1) return hits.slice();
+  const byPath = /* @__PURE__ */ new Map();
+  for (const hit of hits) {
+    const group = byPath.get(hit.chunk.path);
+    if (group) group.push(hit);
+    else byPath.set(hit.chunk.path, [hit]);
+  }
+  const regions = [];
+  for (const group of byPath.values()) {
+    if (group.length === 1) {
+      regions.push(group[0]);
+      continue;
+    }
+    const sorted = group.slice().sort((a, b) => a.chunk.startLine - b.chunk.startLine || a.chunk.endLine - b.chunk.endLine);
+    let run = [sorted[0]];
+    const flush = () => {
+      regions.push(run.length === 1 ? run[0] : mergeRegion(run));
+      run = [];
+    };
+    for (let i = 1; i < sorted.length; i++) {
+      const prev = run[run.length - 1];
+      const cur = sorted[i];
+      const overlapOrAdjacent = cur.chunk.startLine <= prev.chunk.endLine + 1 + adjacencyGap;
+      if (!overlapOrAdjacent) {
+        flush();
+        run = [cur];
+        continue;
+      }
+      const start = run[0].chunk.startLine;
+      const end = Math.max(run[run.length - 1].chunk.endLine, cur.chunk.endLine);
+      const projectedLines = end - start + 1;
+      const projectedChars = projectedMergedChars([...run, cur]);
+      if (projectedLines > maxLines || projectedChars > maxChars) {
+        flush();
+        run = [cur];
+        continue;
+      }
+      run.push(cur);
+    }
+    flush();
+  }
+  regions.sort((a, b) => {
+    if (b.score !== a.score) return b.score - a.score;
+    return a.chunk.id < b.chunk.id ? -1 : a.chunk.id > b.chunk.id ? 1 : 0;
+  });
+  return regions;
+}
+function buildMergedText(run) {
+  const lineByNumber = /* @__PURE__ */ new Map();
+  let minLine = Infinity;
+  let maxLine = -Infinity;
+  for (const hit of run) {
+    const lines = hit.chunk.text.split("\n");
+    for (let i = 0; i < lines.length; i++) {
+      const lineNo = hit.chunk.startLine + i;
+      if (!lineByNumber.has(lineNo)) lineByNumber.set(lineNo, lines[i]);
+      if (lineNo < minLine) minLine = lineNo;
+      if (lineNo > maxLine) maxLine = lineNo;
+    }
+  }
+  const out = [];
+  for (let n = minLine; n <= maxLine; n++) {
+    const line = lineByNumber.get(n);
+    if (line !== void 0) out.push(line);
+  }
+  return out.join("\n");
+}
+function projectedMergedChars(run) {
+  return buildMergedText(run).length;
+}
+function mergeRegion(run) {
+  const path5 = run[0].chunk.path;
+  const startLine = Math.min(...run.map((h) => h.chunk.startLine));
+  const endLine = Math.max(...run.map((h) => h.chunk.endLine));
+  const text = buildMergedText(run);
+  const score = Math.max(...run.map((h) => h.score));
+  const relevances = run.map((h) => h.relevance).filter((r) => r !== void 0);
+  const relevance = relevances.length > 0 ? Math.max(...relevances) : void 0;
+  const chunk = {
+    id: `${path5}:${startLine}-${endLine}`,
+    path: path5,
+    startLine,
+    endLine,
+    text,
+    // Synthetic region — not a stored chunk. Carry the first constituent's hash as
+    // an informational placeholder (no incremental-index lookup uses a region id).
+    hash: run[0].chunk.hash
+  };
+  return relevance === void 0 ? { chunk, score } : { chunk, score, relevance };
+}
+function fuseByReciprocalRank(lists, k) {
+  if (k <= 0) return [];
+  const fusedScore = /* @__PURE__ */ new Map();
+  const chunkById = /* @__PURE__ */ new Map();
+  for (const list of lists) {
+    for (let rank = 0; rank < list.length; rank++) {
+      const hit = list[rank];
+      const id = hit.chunk.id;
+      fusedScore.set(id, (fusedScore.get(id) ?? 0) + 1 / (RRF_K + rank));
+      if (!chunkById.has(id)) {
+        chunkById.set(id, hit.chunk);
+      }
+    }
+  }
+  const fused = [];
+  for (const [id, score] of fusedScore) {
+    const chunk = chunkById.get(id);
+    if (chunk) fused.push({ chunk, score });
+  }
+  fused.sort((a, b) => {
+    if (b.score !== a.score) return b.score - a.score;
+    return a.chunk.id < b.chunk.id ? -1 : a.chunk.id > b.chunk.id ? 1 : 0;
+  });
+  return k >= fused.length ? fused : fused.slice(0, k);
+}
+
+// ../spikes/p0-supervisor/code-index/embedder.ts
+import { createHash as createHash5 } from "node:crypto";
+var DEFAULT_HOST = "http://127.0.0.1:11434";
+var DEFAULT_MODEL = "nomic-embed-text";
+var DEFAULT_DIMS = 768;
+var DEFAULT_BATCH_SIZE = 16;
+var OllamaEmbedder = class {
+  id;
+  dims;
+  host;
+  model;
+  batchSize;
+  constructor(opts = {}) {
+    this.host = opts.host ?? DEFAULT_HOST;
+    this.model = opts.model ?? DEFAULT_MODEL;
+    this.dims = opts.dims ?? DEFAULT_DIMS;
+    this.batchSize = opts.batchSize ?? DEFAULT_BATCH_SIZE;
+    this.id = `ollama:${this.model}`;
+  }
+  async embed(texts) {
+    if (texts.length === 0) return [];
+    const out = [];
+    for (let i = 0; i < texts.length; i += this.batchSize) {
+      const batch = texts.slice(i, i + this.batchSize);
+      const vectors = await this.embedBatch(batch);
+      for (const v of vectors) out.push(v);
+    }
+    return out;
+  }
+  /** Embed a single batch via one `/api/embed` request. */
+  async embedBatch(batch) {
+    const res = await fetch(`${this.host}/api/embed`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ model: this.model, input: batch })
+    });
+    if (!res.ok) {
+      throw new Error(`ollama /api/embed ${res.status}: ${await res.text()}`);
+    }
+    const data = await res.json();
+    const rows = data.embeddings;
+    if (!Array.isArray(rows)) {
+      throw new Error("ollama /api/embed: response had no embeddings array");
+    }
+    if (rows.length !== batch.length) {
+      throw new Error(
+        `ollama /api/embed: expected ${batch.length} embeddings, got ${rows.length}`
+      );
+    }
+    return rows.map((row, idx) => {
+      if (!Array.isArray(row) || row.length !== this.dims) {
+        throw new Error(
+          `ollama /api/embed: vector ${idx} has length ${Array.isArray(row) ? row.length : "n/a"}, expected ${this.dims} (model/dims mismatch?)`
+        );
+      }
+      return Float32Array.from(row);
+    });
+  }
+};
+
+// ../spikes/p0-supervisor/code-index/vector-store.ts
+function l2Norm(vector) {
+  let sumSquares = 0;
+  for (let i = 0; i < vector.length; i++) {
+    const v = vector[i];
+    sumSquares += v * v;
+  }
+  return Math.sqrt(sumSquares);
+}
+function dot(a, b) {
+  const n = Math.min(a.length, b.length);
+  let acc = 0;
+  for (let i = 0; i < n; i++) {
+    acc += a[i] * b[i];
+  }
+  return acc;
+}
+var BruteForceVectorStore = class {
+  /** id -> stored entry (chunk + cached norm). */
+  entries = /* @__PURE__ */ new Map();
+  /** Number of chunks currently held. */
+  get size() {
+    return this.entries.size;
+  }
+  /**
+   * Insert or replace by `chunk.id`. Recomputes & caches the L2 norm for each
+   * upserted vector; an existing id is overwritten (its old entry, including the
+   * stale norm, is fully replaced).
+   */
+  upsert(chunks) {
+    for (const chunk of chunks) {
+      this.entries.set(chunk.id, { chunk, norm: l2Norm(chunk.vector) });
+    }
+  }
+  /**
+   * Top-k chunks by cosine similarity to `queryVector`, sorted by score
+   * descending. Cosine = dot(q, v) / (||q|| · ||v||); a zero-norm query or
+   * stored vector yields score 0 (can't divide by zero, and a zero vector has
+   * no direction). Returns `[]` for an empty store or k<=0; if k>size, returns
+   * every stored chunk (still sorted).
+   */
+  search(queryVector, k) {
+    if (k <= 0 || this.entries.size === 0) {
+      return [];
+    }
+    const queryNorm = l2Norm(queryVector);
+    const hits = [];
+    for (const { chunk, norm } of this.entries.values()) {
+      let score = 0;
+      const denom = queryNorm * norm;
+      if (denom > 0) {
+        score = dot(queryVector, chunk.vector) / denom;
+      }
+      hits.push({ chunk, score, relevance: score });
+    }
+    hits.sort((a, b) => {
+      if (b.score !== a.score) {
+        return b.score - a.score;
+      }
+      return a.chunk.id < b.chunk.id ? -1 : a.chunk.id > b.chunk.id ? 1 : 0;
+    });
+    return k >= hits.length ? hits : hits.slice(0, k);
+  }
+  /**
+   * Fetch a stored chunk's embedding vector by id, or undefined if not held. Used
+   * by the hybrid retriever to compute a DISPLAY cosine for keyword-only / fused
+   * hits whose cosine the vector search did not already supply. Returns the stored
+   * Float32Array directly (no copy) — callers MUST treat it as read-only.
+   */
+  getVector(id) {
+    return this.entries.get(id)?.chunk.vector;
+  }
+  /**
+   * Drop every chunk whose `path` is in `paths` (incremental file change/delete).
+   * Uses a Set for O(1) membership, so this is O(size) regardless of |paths|.
+   */
+  removeByPath(paths) {
+    if (paths.length === 0) {
+      return;
+    }
+    const drop = new Set(paths);
+    for (const [id, entry] of this.entries) {
+      if (drop.has(entry.chunk.path)) {
+        this.entries.delete(id);
+      }
+    }
+  }
+  /**
+   * id -> hash for everything stored (incremental diff against fresh chunks).
+   * Returns a fresh Map; mutating it does not affect the store.
+   */
+  manifest() {
+    const out = /* @__PURE__ */ new Map();
+    for (const { chunk } of this.entries.values()) {
+      out.set(chunk.id, chunk.hash);
+    }
+    return out;
+  }
+};
+
+// ../spikes/p0-supervisor/code-index/flat-vector-store.ts
+function l2NormSlice(data, off, dims) {
+  let sumSquares = 0;
+  for (let i = 0; i < dims; i++) {
+    const v = data[off + i];
+    sumSquares += v * v;
+  }
+  return Math.sqrt(sumSquares);
+}
+function l2Norm2(vector) {
+  let sumSquares = 0;
+  for (let i = 0; i < vector.length; i++) {
+    const v = vector[i];
+    sumSquares += v * v;
+  }
+  return Math.sqrt(sumSquares);
+}
+var FlatVectorStore = class {
+  /** Vector dimensionality, fixed at first upsert (0 until then). */
+  dims = 0;
+  /** Number of live rows. */
+  count = 0;
+  /** Packed vectors: row r at [r*dims, r*dims+dims). Capacity = data.length/dims. */
+  data = new Float32Array(0);
+  /** Precomputed L2 norm per row (parallel to chunks). */
+  norms = new Float32Array(0);
+  /** Chunk metadata per row (parallel to the packed slab). */
+  chunks = [];
+  /** chunk.id -> row index. */
+  idToRow = /* @__PURE__ */ new Map();
+  get size() {
+    return this.count;
+  }
+  /** Row capacity currently allocated in the slab. */
+  get capacity() {
+    return this.dims > 0 ? this.data.length / this.dims : 0;
+  }
+  /**
+   * Grow the slab + norms to hold at least `needRows` rows (geometric doubling so a
+   * bulk upsert is amortized O(1) per row). Preserves existing rows verbatim.
+   */
+  ensureCapacity(needRows) {
+    if (needRows <= this.capacity) {
+      return;
+    }
+    let newCap = Math.max(this.capacity, 8);
+    while (newCap < needRows) {
+      newCap *= 2;
+    }
+    const nextData = new Float32Array(newCap * this.dims);
+    nextData.set(this.data.subarray(0, this.count * this.dims));
+    this.data = nextData;
+    const nextNorms = new Float32Array(newCap);
+    nextNorms.set(this.norms.subarray(0, this.count));
+    this.norms = nextNorms;
+  }
+  /**
+   * Insert or replace by `chunk.id`. The first upsert fixes `dims` (the embedder's
+   * dimensionality); a later chunk whose vector length differs is rejected (defensive —
+   * the indexer only ever feeds one embedder's output). An existing id is overwritten
+   * IN PLACE (its row's vector + norm + metadata are replaced); a new id appends a row.
+   */
+  upsert(chunks) {
+    if (chunks.length === 0) {
+      return;
+    }
+    if (this.dims === 0) {
+      this.dims = chunks[0].vector.length;
+    }
+    this.ensureCapacity(this.count + chunks.length);
+    for (const chunk of chunks) {
+      if (chunk.vector.length !== this.dims) {
+        throw new Error(
+          `FlatVectorStore: inconsistent vector dims (${chunk.vector.length} vs ${this.dims}) for chunk ${chunk.id}`
+        );
+      }
+      const existing = this.idToRow.get(chunk.id);
+      const row = existing ?? this.count;
+      if (existing === void 0) {
+        this.count += 1;
+        this.idToRow.set(chunk.id, row);
+      }
+      const off = row * this.dims;
+      this.data.set(chunk.vector, off);
+      this.norms[row] = l2NormSlice(this.data, off, this.dims);
+      this.chunks[row] = chunk;
+    }
+  }
+  /**
+   * Top-k chunks by cosine similarity to `queryVector`, sorted by score descending.
+   * Cosine = dot(q, v) / (||q|| · ||v||); a zero-norm query or stored vector yields
+   * score 0. Returns `[]` for an empty store or k<=0; if k>size returns every chunk
+   * (sorted). EXACT: identical ranking + cosine values to the brute-force store.
+   *
+   * The hot path is a single tight loop over the packed slab — no per-chunk object
+   * deref, sequential memory access — then a partial top-k selection (a bounded
+   * insertion into a small sorted array) so we don't sort all N hits when k << N.
+   */
+  search(queryVector, k) {
+    if (k <= 0 || this.count === 0) {
+      return [];
+    }
+    const { data, norms, dims, count } = this;
+    const queryNorm = l2Norm2(queryVector);
+    const scores = new Float32Array(count);
+    if (queryNorm > 0) {
+      for (let r = 0; r < count; r++) {
+        const vNorm = norms[r];
+        if (vNorm <= 0) {
+          scores[r] = 0;
+          continue;
+        }
+        const off = r * dims;
+        let acc = 0;
+        for (let i = 0; i < dims; i++) {
+          acc += queryVector[i] * data[off + i];
+        }
+        scores[r] = acc / (queryNorm * vNorm);
+      }
+    }
+    const order = new Array(count);
+    for (let r = 0; r < count; r++) {
+      order[r] = r;
+    }
+    const chunks = this.chunks;
+    order.sort((a, b) => {
+      const sa = scores[a];
+      const sb = scores[b];
+      if (sb !== sa) {
+        return sb - sa;
+      }
+      const ia = chunks[a].id;
+      const ib = chunks[b].id;
+      return ia < ib ? -1 : ia > ib ? 1 : 0;
+    });
+    const take = k >= count ? count : k;
+    const hits = new Array(take);
+    for (let i = 0; i < take; i++) {
+      const r = order[i];
+      const score = scores[r];
+      hits[i] = { chunk: chunks[r], score, relevance: score };
+    }
+    return hits;
+  }
+  /**
+   * Fetch a stored chunk's embedding vector by id, or undefined if not held. Returns a
+   * COPY (a fresh Float32Array) of the packed row, so a caller cannot mutate the slab.
+   */
+  getVector(id) {
+    const row = this.idToRow.get(id);
+    if (row === void 0) {
+      return void 0;
+    }
+    const off = row * this.dims;
+    return this.data.slice(off, off + this.dims);
+  }
+  /**
+   * Drop every chunk whose `path` is in `paths` (incremental file change/delete).
+   * Compacts via swap-remove so [0, count) stays dense (no tombstones in the hot loop):
+   * a dropped row is overwritten by the current LAST live row, then the count shrinks.
+   */
+  removeByPath(paths) {
+    if (paths.length === 0 || this.count === 0) {
+      return;
+    }
+    const drop = new Set(paths);
+    let r = 0;
+    while (r < this.count) {
+      const here = this.chunks[r];
+      if (!drop.has(here.path)) {
+        r += 1;
+        continue;
+      }
+      this.idToRow.delete(here.id);
+      const last = this.count - 1;
+      if (r !== last) {
+        const dstOff = r * this.dims;
+        const srcOff = last * this.dims;
+        this.data.copyWithin(dstOff, srcOff, srcOff + this.dims);
+        this.norms[r] = this.norms[last];
+        const moved = this.chunks[last];
+        this.chunks[r] = moved;
+        this.idToRow.set(moved.id, r);
+      }
+      this.chunks.pop();
+      this.count -= 1;
+    }
+  }
+  /**
+   * id -> hash for everything stored (incremental diff against fresh chunks).
+   * Returns a fresh Map; mutating it does not affect the store.
+   */
+  manifest() {
+    const out = /* @__PURE__ */ new Map();
+    for (let r = 0; r < this.count; r++) {
+      const c = this.chunks[r];
+      out.set(c.id, c.hash);
+    }
+    return out;
+  }
+};
+
+// ../spikes/p0-supervisor/code-index/ivf-vector-store.ts
+function mulberry32(seed) {
+  let a = seed >>> 0;
+  return function next() {
+    a |= 0;
+    a = a + 1831565813 | 0;
+    let t = Math.imul(a ^ a >>> 15, 1 | a);
+    t = t + Math.imul(t ^ t >>> 7, 61 | t) ^ t;
+    return ((t ^ t >>> 14) >>> 0) / 4294967296;
+  };
+}
+function l2Norm3(vector) {
+  let s = 0;
+  for (let i = 0; i < vector.length; i++) {
+    s += vector[i] * vector[i];
+  }
+  return Math.sqrt(s);
+}
+var IvfVectorStore = class {
+  dims = 0;
+  count = 0;
+  /** Packed RAW vectors (row r at [r*dims, r*dims+dims)). */
+  data = new Float32Array(0);
+  /** Precomputed L2 norm per row (for exact cosine on probed candidates). */
+  norms = new Float32Array(0);
+  /** Chunk metadata per row. */
+  chunks = [];
+  idToRow = /* @__PURE__ */ new Map();
+  /** Packed UNIT-normalized vectors (for centroid training + assignment). */
+  unit = new Float32Array(0);
+  /** Trained centroids: nlist rows of `dims` (unit-ish). Empty until trained. */
+  centroids = new Float32Array(0);
+  nlist = 0;
+  /** Inverted lists: postings[c] = row indices assigned to centroid c. */
+  postings = [];
+  /** Set when the corpus changed since the last train (forces a lazy retrain). */
+  dirty = true;
+  opt;
+  constructor(options = {}) {
+    this.opt = {
+      nlist: options.nlist ?? 0,
+      // 0 → derive ~sqrt(N) at train time
+      nprobe: options.nprobe ?? 8,
+      trainIters: options.trainIters ?? 10,
+      seed: options.seed ?? 2654435769
+    };
+  }
+  get size() {
+    return this.count;
+  }
+  get capacity() {
+    return this.dims > 0 ? this.data.length / this.dims : 0;
+  }
+  ensureCapacity(needRows) {
+    if (needRows <= this.capacity) {
+      return;
+    }
+    let newCap = Math.max(this.capacity, 8);
+    while (newCap < needRows) {
+      newCap *= 2;
+    }
+    const nextData = new Float32Array(newCap * this.dims);
+    nextData.set(this.data.subarray(0, this.count * this.dims));
+    this.data = nextData;
+    const nextUnit = new Float32Array(newCap * this.dims);
+    nextUnit.set(this.unit.subarray(0, this.count * this.dims));
+    this.unit = nextUnit;
+    const nextNorms = new Float32Array(newCap);
+    nextNorms.set(this.norms.subarray(0, this.count));
+    this.norms = nextNorms;
+  }
+  upsert(chunks) {
+    if (chunks.length === 0) {
+      return;
+    }
+    if (this.dims === 0) {
+      this.dims = chunks[0].vector.length;
+    }
+    this.ensureCapacity(this.count + chunks.length);
+    for (const chunk of chunks) {
+      if (chunk.vector.length !== this.dims) {
+        throw new Error(
+          `IvfVectorStore: inconsistent vector dims (${chunk.vector.length} vs ${this.dims}) for chunk ${chunk.id}`
+        );
+      }
+      const existing = this.idToRow.get(chunk.id);
+      const row = existing ?? this.count;
+      if (existing === void 0) {
+        this.count += 1;
+        this.idToRow.set(chunk.id, row);
+      }
+      const off = row * this.dims;
+      this.data.set(chunk.vector, off);
+      const norm = l2Norm3(chunk.vector);
+      this.norms[row] = norm;
+      if (norm > 0) {
+        const inv = 1 / norm;
+        for (let i = 0; i < this.dims; i++) {
+          this.unit[off + i] = chunk.vector[i] * inv;
+        }
+      } else {
+        for (let i = 0; i < this.dims; i++) {
+          this.unit[off + i] = 0;
+        }
+      }
+      this.chunks[row] = chunk;
+    }
+    this.dirty = true;
+  }
+  getVector(id) {
+    const row = this.idToRow.get(id);
+    if (row === void 0) {
+      return void 0;
+    }
+    const off = row * this.dims;
+    return this.data.slice(off, off + this.dims);
+  }
+  removeByPath(paths) {
+    if (paths.length === 0 || this.count === 0) {
+      return;
+    }
+    const drop = new Set(paths);
+    let r = 0;
+    while (r < this.count) {
+      const here = this.chunks[r];
+      if (!drop.has(here.path)) {
+        r += 1;
+        continue;
+      }
+      this.idToRow.delete(here.id);
+      const last = this.count - 1;
+      if (r !== last) {
+        const dstOff = r * this.dims;
+        const srcOff = last * this.dims;
+        this.data.copyWithin(dstOff, srcOff, srcOff + this.dims);
+        this.unit.copyWithin(dstOff, srcOff, srcOff + this.dims);
+        this.norms[r] = this.norms[last];
+        const moved = this.chunks[last];
+        this.chunks[r] = moved;
+        this.idToRow.set(moved.id, r);
+      }
+      this.chunks.pop();
+      this.count -= 1;
+    }
+    this.dirty = true;
+  }
+  manifest() {
+    const out = /* @__PURE__ */ new Map();
+    for (let r = 0; r < this.count; r++) {
+      const c = this.chunks[r];
+      out.set(c.id, c.hash);
+    }
+    return out;
+  }
+  /**
+   * Top-k by cosine, APPROXIMATE: scan only the `nprobe` buckets nearest the query, but
+   * score candidates EXACTLY. For a corpus too small to cluster (count < nlist target)
+   * or k>=size, fall back to an exact full scan so small repos stay exact.
+   */
+  search(queryVector, k) {
+    if (k <= 0 || this.count === 0) {
+      return [];
+    }
+    const queryNorm = l2Norm3(queryVector);
+    if (queryNorm === 0) {
+      return this.exactScan(queryVector, queryNorm, k);
+    }
+    this.ensureTrained();
+    if (this.nlist === 0 || k >= this.count) {
+      return this.exactScan(queryVector, queryNorm, k);
+    }
+    const invQ = 1 / queryNorm;
+    const uq = new Float32Array(this.dims);
+    for (let i = 0; i < this.dims; i++) {
+      uq[i] = queryVector[i] * invQ;
+    }
+    const nprobe = Math.max(1, Math.min(this.opt.nprobe, this.nlist));
+    const centScores = new Array(this.nlist);
+    for (let c = 0; c < this.nlist; c++) {
+      const coff = c * this.dims;
+      let acc = 0;
+      for (let i = 0; i < this.dims; i++) {
+        acc += uq[i] * this.centroids[coff + i];
+      }
+      centScores[c] = { c, s: acc };
+    }
+    centScores.sort((a, b) => b.s - a.s);
+    const hits = [];
+    const data = this.data;
+    const dims = this.dims;
+    for (let p = 0; p < nprobe; p++) {
+      const list = this.postings[centScores[p].c];
+      for (let j = 0; j < list.length; j++) {
+        const r = list[j];
+        const vNorm = this.norms[r];
+        let score = 0;
+        if (vNorm > 0) {
+          const off = r * dims;
+          let acc = 0;
+          for (let i = 0; i < dims; i++) {
+            acc += queryVector[i] * data[off + i];
+          }
+          score = acc / (queryNorm * vNorm);
+        }
+        hits.push({ chunk: this.chunks[r], score, relevance: score });
+      }
+    }
+    hits.sort((a, b) => {
+      if (b.score !== a.score) {
+        return b.score - a.score;
+      }
+      return a.chunk.id < b.chunk.id ? -1 : a.chunk.id > b.chunk.id ? 1 : 0;
+    });
+    return k >= hits.length ? hits : hits.slice(0, k);
+  }
+  /** Exact full scan (fallback path), identical semantics to the brute-force store. */
+  exactScan(queryVector, queryNorm, k) {
+    const hits = new Array(this.count);
+    const data = this.data;
+    const dims = this.dims;
+    for (let r = 0; r < this.count; r++) {
+      const vNorm = this.norms[r];
+      let score = 0;
+      if (queryNorm > 0 && vNorm > 0) {
+        const off = r * dims;
+        let acc = 0;
+        for (let i = 0; i < dims; i++) {
+          acc += queryVector[i] * data[off + i];
+        }
+        score = acc / (queryNorm * vNorm);
+      }
+      hits[r] = { chunk: this.chunks[r], score, relevance: score };
+    }
+    hits.sort((a, b) => {
+      if (b.score !== a.score) {
+        return b.score - a.score;
+      }
+      return a.chunk.id < b.chunk.id ? -1 : a.chunk.id > b.chunk.id ? 1 : 0;
+    });
+    return k >= hits.length ? hits : hits.slice(0, k);
+  }
+  /** Train (or retrain) centroids + inverted lists from the current unit vectors. */
+  ensureTrained() {
+    if (!this.dirty) {
+      return;
+    }
+    this.dirty = false;
+    const target = this.opt.nlist > 0 ? this.opt.nlist : Math.max(1, Math.round(Math.sqrt(this.count)));
+    if (this.count < Math.max(64, target * 4)) {
+      this.nlist = 0;
+      this.centroids = new Float32Array(0);
+      this.postings = [];
+      return;
+    }
+    const nlist = Math.min(target, this.count);
+    const dims = this.dims;
+    const rng = mulberry32(this.opt.seed ^ this.count * 2654435761);
+    const centroids = new Float32Array(nlist * dims);
+    const chosen = /* @__PURE__ */ new Set();
+    for (let c = 0; c < nlist; c++) {
+      let row = Math.floor(rng() * this.count);
+      let guard = 0;
+      while (chosen.has(row) && guard < this.count) {
+        row = (row + 1) % this.count;
+        guard += 1;
+      }
+      chosen.add(row);
+      centroids.set(this.unit.subarray(row * dims, row * dims + dims), c * dims);
+    }
+    const assign = new Int32Array(this.count);
+    const counts = new Int32Array(nlist);
+    for (let iter = 0; iter < this.opt.trainIters; iter++) {
+      let moved = 0;
+      for (let r = 0; r < this.count; r++) {
+        const roff = r * dims;
+        let best = -1;
+        let bestDot = -Infinity;
+        for (let c = 0; c < nlist; c++) {
+          const coff = c * dims;
+          let acc = 0;
+          for (let i = 0; i < dims; i++) {
+            acc += this.unit[roff + i] * centroids[coff + i];
+          }
+          if (acc > bestDot) {
+            bestDot = acc;
+            best = c;
+          }
+        }
+        if (assign[r] !== best) {
+          moved += 1;
+        }
+        assign[r] = best;
+      }
+      centroids.fill(0);
+      counts.fill(0);
+      for (let r = 0; r < this.count; r++) {
+        const c = assign[r];
+        counts[c] += 1;
+        const coff = c * dims;
+        const roff = r * dims;
+        for (let i = 0; i < dims; i++) {
+          centroids[coff + i] += this.unit[roff + i];
+        }
+      }
+      for (let c = 0; c < nlist; c++) {
+        const coff = c * dims;
+        if (counts[c] === 0) {
+          const row = Math.floor(rng() * this.count);
+          centroids.set(this.unit.subarray(row * dims, row * dims + dims), coff);
+          continue;
+        }
+        let n = 0;
+        for (let i = 0; i < dims; i++) {
+          n += centroids[coff + i] * centroids[coff + i];
+        }
+        n = Math.sqrt(n);
+        if (n > 0) {
+          const inv = 1 / n;
+          for (let i = 0; i < dims; i++) {
+            centroids[coff + i] *= inv;
+          }
+        }
+      }
+      if (iter > 0 && moved === 0) {
+        break;
+      }
+    }
+    const postings = new Array(nlist);
+    for (let c = 0; c < nlist; c++) {
+      postings[c] = [];
+    }
+    for (let r = 0; r < this.count; r++) {
+      const roff = r * dims;
+      let best = 0;
+      let bestDot = -Infinity;
+      for (let c = 0; c < nlist; c++) {
+        const coff = c * dims;
+        let acc = 0;
+        for (let i = 0; i < dims; i++) {
+          acc += this.unit[roff + i] * centroids[coff + i];
+        }
+        if (acc > bestDot) {
+          bestDot = acc;
+          best = c;
+        }
+      }
+      postings[best].push(r);
+    }
+    this.centroids = centroids;
+    this.nlist = nlist;
+    this.postings = postings;
+  }
+};
+
+// ../spikes/p0-supervisor/code-index/vector-store-factory.ts
+var VECTOR_STORE_KINDS = ["brute", "flat", "ann"];
+var DEFAULT_VECTOR_STORE_KIND = "flat";
+function resolveVectorStoreKind(value) {
+  return typeof value === "string" && VECTOR_STORE_KINDS.includes(value) ? value : DEFAULT_VECTOR_STORE_KIND;
+}
+function createVectorStore(kind = DEFAULT_VECTOR_STORE_KIND, annOptions) {
+  switch (kind) {
+    case "brute":
+      return new BruteForceVectorStore();
+    case "flat":
+      return new FlatVectorStore();
+    case "ann":
+      return new IvfVectorStore(annOptions);
+    default:
+      return new BruteForceVectorStore();
+  }
+}
+
+// ../spikes/p0-supervisor/code-index/keyword-index.ts
+var K1 = 1.2;
+var B = 0.75;
+function tokenizeCodeAware(text) {
+  const tokens = [];
+  const idRuns = text.match(/[A-Za-z0-9_]+/g);
+  if (idRuns === null) return tokens;
+  for (const run of idRuns) {
+    const seen = /* @__PURE__ */ new Set();
+    const emit = (tok) => {
+      if (tok.length === 0 || seen.has(tok)) return;
+      seen.add(tok);
+      tokens.push(tok);
+    };
+    emit(run.replace(/_/g, "").toLowerCase());
+    for (const piece of run.split("_")) {
+      if (piece.length === 0) continue;
+      for (const part of splitIdentifier(piece)) {
+        if (part.length > 0) emit(part.toLowerCase());
+      }
+    }
+  }
+  return tokens;
+}
+function splitIdentifier(run) {
+  return run.split(
+    /(?<=[a-z0-9])(?=[A-Z])|(?<=[A-Z])(?=[A-Z][a-z])|(?<=[A-Za-z])(?=[0-9])|(?<=[0-9])(?=[A-Za-z])/
+  );
+}
+var BM25KeywordIndex = class {
+  /** id -> stored doc (chunk + per-term frequencies + length). */
+  docs = /* @__PURE__ */ new Map();
+  /** term -> number of docs containing it (document frequency). */
+  docFreq = /* @__PURE__ */ new Map();
+  /** Running sum of all doc lengths, so avgdl = totalLength / docs.size. */
+  totalLength = 0;
+  /** Number of chunks currently held. */
+  get size() {
+    return this.docs.size;
+  }
+  /** Average document length over the corpus (avgdl), or 0 for an empty corpus. */
+  get avgDocLength() {
+    return this.docs.size === 0 ? 0 : this.totalLength / this.docs.size;
+  }
+  /**
+   * Insert or replace by `chunk.id`. Re-adding the same id REPLACES the prior doc:
+   * we first retract its contribution to the corpus stats (df, totalLength) then
+   * add the fresh tokenization, so the inverted index and the length stats stay
+   * exactly correct across edits.
+   */
+  add(chunks) {
+    for (const chunk of chunks) {
+      const prior = this.docs.get(chunk.id);
+      if (prior) {
+        this.retract(prior);
+      }
+      const tokens = tokenizeCodeAware(chunk.text);
+      const termFreqs = /* @__PURE__ */ new Map();
+      for (const tok of tokens) {
+        termFreqs.set(tok, (termFreqs.get(tok) ?? 0) + 1);
+      }
+      const doc = { chunk, termFreqs, length: tokens.length };
+      this.docs.set(chunk.id, doc);
+      this.totalLength += doc.length;
+      for (const term of termFreqs.keys()) {
+        this.docFreq.set(term, (this.docFreq.get(term) ?? 0) + 1);
+      }
+    }
+  }
+  /**
+   * Drop every chunk whose `path` is in `paths` (incremental file change/delete),
+   * retracting each dropped doc's contribution to the corpus stats so scoring of
+   * the surviving docs stays correct.
+   */
+  removeByPath(paths) {
+    if (paths.length === 0) return;
+    const drop = new Set(paths);
+    for (const [id, doc] of this.docs) {
+      if (drop.has(doc.chunk.path)) {
+        this.retract(doc);
+        this.docs.delete(id);
+      }
+    }
+  }
+  /**
+   * Retract one doc's contribution from the corpus stats: subtract its length from
+   * the running total and decrement each of its distinct terms' document frequency
+   * (deleting a term's entry when it reaches zero, so `docFreq` never retains dead
+   * terms). Does NOT remove the doc from `docs` — the caller does that (so this is
+   * reusable by both the replace path in {@link add} and the delete path in
+   * {@link removeByPath}).
+   */
+  retract(doc) {
+    this.totalLength -= doc.length;
+    for (const term of doc.termFreqs.keys()) {
+      const next = (this.docFreq.get(term) ?? 0) - 1;
+      if (next <= 0) {
+        this.docFreq.delete(term);
+      } else {
+        this.docFreq.set(term, next);
+      }
+    }
+  }
+  /**
+   * Top-k chunks by BM25 relevance to `query`, sorted by score descending. Only
+   * docs containing AT LEAST ONE query term are scored (BM25 of a doc with no
+   * query term is 0). Returns `[]` for an empty corpus, a query with no tokens, or
+   * k<=0; if k>matches, returns every matching doc (still sorted). Ties break on
+   * chunk.id for determinism, mirroring the vector store.
+   */
+  search(query, k) {
+    if (k <= 0 || this.docs.size === 0) return [];
+    const queryTokens = tokenizeCodeAware(query);
+    if (queryTokens.length === 0) return [];
+    const queryTerms = new Set(queryTokens);
+    const N = this.docs.size;
+    const avgdl = this.avgDocLength;
+    const scores = /* @__PURE__ */ new Map();
+    for (const term of queryTerms) {
+      const df = this.docFreq.get(term);
+      if (df === void 0 || df === 0) continue;
+      const idf = Math.log(1 + (N - df + 0.5) / (df + 0.5));
+      for (const doc of this.docs.values()) {
+        const f = doc.termFreqs.get(term);
+        if (f === void 0) continue;
+        const denom = f + K1 * (1 - B + B * doc.length / (avgdl || 1));
+        const contribution = idf * (f * (K1 + 1) / denom);
+        scores.set(doc.chunk.id, (scores.get(doc.chunk.id) ?? 0) + contribution);
+      }
+    }
+    const hits = [];
+    for (const [id, score] of scores) {
+      const doc = this.docs.get(id);
+      if (doc) hits.push({ chunk: doc.chunk, score });
+    }
+    hits.sort((a, b) => {
+      if (b.score !== a.score) return b.score - a.score;
+      return a.chunk.id < b.chunk.id ? -1 : a.chunk.id > b.chunk.id ? 1 : 0;
+    });
+    return k >= hits.length ? hits : hits.slice(0, k);
+  }
+};
+
 // ../spikes/p0-supervisor/trust-gate.ts
 function trustFromCapabilities(caps) {
   if (!caps.fsIsolated) return "untrusted";
@@ -2736,8 +4609,8 @@ var CodexChatBackend = class {
         i += 1;
       }
       if (finished && i >= events.length) break;
-      await new Promise((resolve2) => {
-        resolveNext = resolve2;
+      await new Promise((resolve5) => {
+        resolveNext = resolve5;
       });
     }
   }
@@ -2746,11 +4619,12 @@ var CodexChatBackend = class {
 // ../spikes/p0-model-gateway/governed-agentic-run.ts
 import { execFile as execFile2 } from "node:child_process";
 import { promisify as promisify2 } from "node:util";
-import { join as join6 } from "node:path";
+import { join as join9 } from "node:path";
+import { mkdirSync as mkdirSync5, writeFileSync as writeFileSync2 } from "node:fs";
 
 // ../spikes/p0-verifier/verifier.ts
-import { cpSync, existsSync as existsSync2, readdirSync, rmSync as rmSync2, statSync as statSync2 } from "node:fs";
-import * as path3 from "node:path";
+import { cpSync, existsSync as existsSync4, readdirSync, rmSync as rmSync2, statSync as statSync2 } from "node:fs";
+import * as path4 from "node:path";
 
 // ../spikes/p0-sandbox/docker-runtime.ts
 import { spawn as spawn3, spawnSync } from "node:child_process";
@@ -2761,6 +4635,13 @@ var DEFAULT_IMAGE = process.env.GLYPHSPEK_SANDBOX_IMAGE ?? "node:22-alpine";
 var KEEPALIVE_SECONDS = 86400;
 var TIMEOUT_EXIT_CODE = 124;
 var SPAWN_FAIL_EXIT_CODE = 1;
+function dockerAvailable() {
+  try {
+    return spawnSync("docker", ["info"], { stdio: "ignore" }).status === 0;
+  } catch {
+    return false;
+  }
+}
 function containerNameFor(runId) {
   const safe = runId.replace(/[^a-zA-Z0-9_.-]/g, "-");
   return `glyphspek-${safe}`;
@@ -2806,7 +4687,7 @@ function resourceFlags(limits) {
   return flags;
 }
 function runDocker(args, timeoutMs) {
-  return new Promise((resolve2) => {
+  return new Promise((resolve5) => {
     const child = spawn3("docker", args, { stdio: ["ignore", "pipe", "pipe"] });
     let stdout = "";
     let stderr = "";
@@ -2829,7 +4710,7 @@ function runDocker(args, timeoutMs) {
       if (settled) return;
       settled = true;
       if (timer) clearTimeout(timer);
-      resolve2(result);
+      resolve5(result);
     };
     child.on("error", (err) => {
       finish({
@@ -3013,21 +4894,21 @@ function mirrorDir(src, dest, exclude) {
   for (const entry of readdirSync(dest)) {
     if (exclude.has(entry)) continue;
     if (!srcEntries.has(entry)) {
-      rmSync2(path3.join(dest, entry), { recursive: true, force: true });
+      rmSync2(path4.join(dest, entry), { recursive: true, force: true });
     }
   }
   for (const entry of srcEntries) {
-    const srcPath = path3.join(src, entry);
-    const destPath = path3.join(dest, entry);
+    const srcPath = path4.join(src, entry);
+    const destPath = path4.join(dest, entry);
     const st = statSync2(srcPath);
     if (st.isDirectory()) {
-      if (existsSync2(destPath) && !statSync2(destPath).isDirectory()) {
+      if (existsSync4(destPath) && !statSync2(destPath).isDirectory()) {
         rmSync2(destPath, { force: true });
       }
       cpSync(srcPath, destPath, { recursive: true, force: true });
       mirrorDir(srcPath, destPath, /* @__PURE__ */ new Set());
     } else {
-      if (existsSync2(destPath) && statSync2(destPath).isDirectory()) {
+      if (existsSync4(destPath) && statSync2(destPath).isDirectory()) {
         rmSync2(destPath, { recursive: true, force: true });
       }
       cpSync(srcPath, destPath, { force: true });
@@ -3050,8 +4931,8 @@ async function runVerification(input) {
   const chain = verifyChain(events);
   const traceRootHash = chain.ok ? computeTraceRoot(events) : GENESIS_HASH;
   const runId = newRunId();
-  const runDir = path3.join(input.runsBaseDir ?? DEFAULT_RUNS_BASE_DIR, `verifier-${runId}`);
-  const verifierWorktree = path3.join(runDir, "worktree");
+  const runDir = path4.join(input.runsBaseDir ?? DEFAULT_RUNS_BASE_DIR, `verifier-${runId}`);
+  const verifierWorktree = path4.join(runDir, "worktree");
   const home = createSyntheticHome(runDir);
   const runtime = input.runtime ?? new DockerSandboxRuntime();
   let sandboxTorndown = false;
@@ -3064,7 +4945,7 @@ async function runVerification(input) {
     createWorktree(repoPath, runId, verifierWorktree);
     worktreeCreated = true;
     if (sourceWorktree) {
-      if (!existsSync2(sourceWorktree)) {
+      if (!existsSync4(sourceWorktree)) {
         throw new Error(`verifier: sourceWorktree does not exist: ${sourceWorktree}`);
       }
       overlaySourceWorktree(sourceWorktree, verifierWorktree);
@@ -3357,11 +5238,11 @@ async function* runAgenticBuild(req, opts = {}) {
       }
     } else if (evt.type === "item.completed" && item?.type === "file_change") {
       for (const ch of item.changes ?? []) {
-        const path4 = asStr(ch.path);
+        const path5 = asStr(ch.path);
         const kind = asStr(ch.kind) ?? "unknown";
-        if (path4) {
-          fileChangeReports.push({ path: path4, kind });
-          push({ type: "file_change", path: path4, kind });
+        if (path5) {
+          fileChangeReports.push({ path: path5, kind });
+          push({ type: "file_change", path: path5, kind });
         }
       }
     } else if (evt.type === "turn.completed" && evt.usage) {
@@ -3410,7 +5291,7 @@ async function* runAgenticBuild(req, opts = {}) {
     clearTimeout(timer);
     if (opts.signal) opts.signal.removeEventListener("abort", onAbort);
   };
-  const closed = new Promise((resolve2) => {
+  const closed = new Promise((resolve5) => {
     child.on("error", (err) => {
       cleanup();
       push({
@@ -3419,7 +5300,7 @@ async function* runAgenticBuild(req, opts = {}) {
       });
       finished = true;
       wake();
-      resolve2(null);
+      resolve5(null);
     });
     child.on("close", (code) => {
       cleanup();
@@ -3427,7 +5308,7 @@ async function* runAgenticBuild(req, opts = {}) {
         handleLine(stdoutBuf);
         stdoutBuf = "";
       }
-      resolve2(code);
+      resolve5(code);
     });
   });
   child.stdin.on("error", () => {
@@ -3495,8 +5376,8 @@ async function* runAgenticBuild(req, opts = {}) {
       i += 1;
     }
     if (finished && i >= events.length) break;
-    await new Promise((resolve2) => {
-      resolveNext = resolve2;
+    await new Promise((resolve5) => {
+      resolveNext = resolve5;
     });
   }
 }
@@ -3556,6 +5437,28 @@ async function runVerifyCheck(command, cwd, env, timeoutMs, signal) {
     return { name, command: [...command], status: "error" };
   }
 }
+function writeEphemeralVerifyPolicy(verifyCommand, runDir) {
+  const dir = join9(runDir, "verifier-policy");
+  mkdirSync5(dir, { recursive: true });
+  const policyPath = join9(dir, "verify-policy.json");
+  writeFileSync2(
+    policyPath,
+    JSON.stringify(
+      {
+        version: 1,
+        defaults: { file_read: "deny", file_write: "deny", command: "deny", network: "deny", mcp: "deny" },
+        allow: { read_paths: [], write_paths: [], commands: [], network: [] },
+        deny: { read_paths: [], write_paths: [], commands: [] },
+        // The reviewed verification target — exactly the resolved verify command.
+        verify: [[...verifyCommand]]
+      },
+      null,
+      2
+    ),
+    "utf8"
+  );
+  return policyPath;
+}
 async function runGovernedAgenticBuild(opts) {
   const now = opts.now ?? Date.now;
   const emit = opts.emit ?? (() => {
@@ -3570,12 +5473,12 @@ async function runGovernedAgenticBuild(opts) {
     runId = opts.existingRun.runId;
     tracePath = opts.existingRun.tracePath;
     sink = opts.sink ?? opts.existingRun.sink;
-    runDir = join6(tracePath, "..", "..");
+    runDir = join9(tracePath, "..", "..");
   } else {
     const created = createRun(opts.runsBaseDir);
     runId = created.runId;
     runDir = created.dir;
-    tracePath = join6(runSubdirPath(runDir, "trace"), "trace.jsonl");
+    tracePath = join9(runSubdirPath(runDir, "trace"), "trace.jsonl");
     sink = opts.sink ?? createTraceWriter(tracePath);
   }
   let lastTraceHash;
@@ -3693,25 +5596,52 @@ async function runGovernedAgenticBuild(opts) {
   let verifyRan;
   let verifierIsolation;
   let verifyCommandSource;
-  const independentResult = opts.independentVerifier ? await runIndependentVerification({
-    repoPath: opts.independentVerifier.repoPath ?? opts.cwd,
-    // The agentic actor edits the cwd IN PLACE, so the cwd IS the actor's result
-    // worktree the independent verifier overlays onto its own fresh checkout.
-    sourceWorktree: opts.cwd,
-    policyPath: opts.independentVerifier.policyPath,
-    tracePath,
-    privateKey: verifierKey,
-    ...opts.independentVerifier.runtime ? { runtime: opts.independentVerifier.runtime } : {},
-    ...opts.independentVerifier.runsBaseDir !== void 0 ? { runsBaseDir: opts.independentVerifier.runsBaseDir } : {},
-    ...opts.onOperatorLog ? { onOperatorLog: opts.onOperatorLog } : {}
-  }) : void 0;
+  const autoOpt = opts.autoIndependentVerifier;
+  const autoEnabled = autoOpt !== false;
+  const autoCfg = typeof autoOpt === "object" ? autoOpt : void 0;
+  const resolvedVerifyCommand = opts.verifyCommand && opts.verifyCommand.length > 0 ? opts.verifyCommand : void 0;
+  let independentResult;
+  if (opts.independentVerifier) {
+    independentResult = await runIndependentVerification({
+      repoPath: opts.independentVerifier.repoPath ?? opts.cwd,
+      // The agentic actor edits the cwd IN PLACE, so the cwd IS the actor's result
+      // worktree the independent verifier overlays onto its own fresh checkout.
+      sourceWorktree: opts.cwd,
+      policyPath: opts.independentVerifier.policyPath,
+      tracePath,
+      privateKey: verifierKey,
+      ...opts.independentVerifier.runtime ? { runtime: opts.independentVerifier.runtime } : {},
+      ...opts.independentVerifier.runsBaseDir !== void 0 ? { runsBaseDir: opts.independentVerifier.runsBaseDir } : {},
+      ...opts.onOperatorLog ? { onOperatorLog: opts.onOperatorLog } : {}
+    });
+  } else if (autoEnabled && resolvedVerifyCommand) {
+    const dockerUp = (autoCfg?.runtimeAvailable ?? dockerAvailable)();
+    if (dockerUp) {
+      const policyPath = writeEphemeralVerifyPolicy(resolvedVerifyCommand, runDir);
+      independentResult = await runIndependentVerification({
+        repoPath: opts.cwd,
+        sourceWorktree: opts.cwd,
+        policyPath,
+        tracePath,
+        privateKey: verifierKey,
+        ...autoCfg?.runtime ? { runtime: autoCfg.runtime } : {},
+        ...autoCfg?.runsBaseDir !== void 0 ? { runsBaseDir: autoCfg.runsBaseDir } : {},
+        ...opts.onOperatorLog ? { onOperatorLog: opts.onOperatorLog } : {}
+      });
+    } else {
+      (opts.onOperatorLog ?? (() => {
+      }))(
+        "Docker unavailable \u2014 using the inline-unsandboxed check (degraded; not independently verified)"
+      );
+    }
+  }
   if (independentResult && independentResult.ran) {
     verdict = independentResult.verdict;
     verifyRan = independentResult.verdict.checks.some(
       (c) => c.status === "pass" || c.status === "fail"
     );
     verifierIsolation = "independent-sandboxed";
-    verifyCommandSource = verifyRan ? "override" : "none";
+    verifyCommandSource = verifyRan ? opts.independentVerifier ? "override" : opts.verifyCommandSource ?? "override" : "none";
     append(
       "verifier_verdict",
       {
@@ -3792,13 +5722,13 @@ async function runGovernedAgenticBuild(opts) {
 }
 
 // ../spikes/p0-model-gateway/verify-command.ts
-import { existsSync as existsSync3, readFileSync as readFileSync3, readdirSync as readdirSync2 } from "node:fs";
-import { join as join7 } from "node:path";
+import { existsSync as existsSync5, readFileSync as readFileSync4, readdirSync as readdirSync2 } from "node:fs";
+import { join as join10 } from "node:path";
 import { execFileSync as execFileSync2 } from "node:child_process";
 var VERIFY_OVERRIDE_PATH = ".glyphspek/verify.json";
 var defaultVerifyResolverDeps = {
-  fileExists: (p) => existsSync3(p),
-  readFile: (p) => readFileSync3(p, "utf8"),
+  fileExists: (p) => existsSync5(p),
+  readFile: (p) => readFileSync4(p, "utf8"),
   listDir: (dir) => {
     try {
       return readdirSync2(dir);
@@ -3829,11 +5759,11 @@ function asStringArray(v) {
   return void 0;
 }
 function readOverride(cwd, deps) {
-  const path4 = join7(cwd, VERIFY_OVERRIDE_PATH);
-  if (!deps.fileExists(path4)) return void 0;
+  const path5 = join10(cwd, VERIFY_OVERRIDE_PATH);
+  if (!deps.fileExists(path5)) return void 0;
   let raw;
   try {
-    raw = JSON.parse(deps.readFile(path4));
+    raw = JSON.parse(deps.readFile(path5));
   } catch {
     return void 0;
   }
@@ -3886,7 +5816,7 @@ function resolveVerifyCommand(cwd, deps = defaultVerifyResolverDeps) {
     return { command: override, label: override.join(" "), source: "override" };
   }
   const entries = deps.listDir(cwd);
-  const has = (name) => deps.fileExists(join7(cwd, name));
+  const has = (name) => deps.fileExists(join10(cwd, name));
   if (has("Package.swift")) {
     return { command: ["swift", "test"], label: "swift test", source: "swiftpm" };
   }
@@ -3914,7 +5844,7 @@ function resolveVerifyCommand(cwd, deps = defaultVerifyResolverDeps) {
   }
   if (has("package.json")) {
     try {
-      const pkg = JSON.parse(deps.readFile(join7(cwd, "package.json")));
+      const pkg = JSON.parse(deps.readFile(join10(cwd, "package.json")));
       if (pkg.scripts && typeof pkg.scripts.test === "string" && pkg.scripts.test.trim()) {
         return { command: ["npm", "test"], label: "npm test", source: "npm" };
       }
@@ -3928,6 +5858,369 @@ function resolveVerifyCommand(cwd, deps = defaultVerifyResolverDeps) {
     source: "none",
     note: `no build/test check could be auto-detected for this repo. The verdict will be labeled "changed-files only \u2014 NOT independently verified by a build/test". Add ${VERIFY_OVERRIDE_PATH} (a JSON array of strings) with the exact check argv to get a real verified verdict, e.g. ["npm","test"] or ["xcodebuild","test","-scheme","<YourScheme>","-destination","platform=macOS"].`
   };
+}
+
+// ../spikes/p0-supervisor/web-fetch.ts
+import { createHash as createHash6 } from "node:crypto";
+import { lookup as dnsLookup } from "node:dns/promises";
+import { request as httpRequest2 } from "node:http";
+import { request as httpsRequest } from "node:https";
+import { connect as netConnect2, isIP } from "node:net";
+import { connect as tlsConnect } from "node:tls";
+import { URL as URL2 } from "node:url";
+import { gunzipSync, inflateSync, brotliDecompressSync } from "node:zlib";
+var WEB_DEFAULT_MAX_FETCH_KB = 2048;
+var WEB_DEFAULT_MAX_CONTEXT_KB = 50;
+var WEB_DEFAULT_TIMEOUT_MS = 1e4;
+var WEB_DEFAULT_MAX_REDIRECTS = 5;
+function marker(reason) {
+  return `[@Web: ${reason}]`;
+}
+function fail(originalUrl, reason, attemptedHost) {
+  return { ok: false, originalUrl, marker: marker(reason), reason, ...attemptedHost ? { attemptedHost } : {} };
+}
+function safeInt(value, fallback, min, max) {
+  if (!Number.isFinite(value) || value === void 0) return fallback;
+  return Math.max(min, Math.min(max, Math.floor(value)));
+}
+function prepareWebUrl(raw) {
+  let url;
+  try {
+    url = new URL2(String(raw || "").trim());
+  } catch {
+    return { error: marker("refused \u2014 not a valid URL"), reason: "refused \u2014 not a valid URL" };
+  }
+  if (url.protocol !== "http:" && url.protocol !== "https:") {
+    const scheme = url.protocol.replace(/:$/, "");
+    return { error: marker(`refused \u2014 unsupported scheme '${scheme}'`), reason: `refused \u2014 unsupported scheme '${scheme}'` };
+  }
+  if (url.username || url.password) {
+    return { error: marker("refused \u2014 credentials in URL not allowed"), reason: "refused \u2014 credentials in URL not allowed" };
+  }
+  url.hash = "";
+  const port = url.port ? Number(url.port) : url.protocol === "http:" ? 80 : 443;
+  if (port !== 80 && port !== 443) {
+    return { error: marker("refused \u2014 non-default port"), reason: "refused \u2014 non-default port" };
+  }
+  const host = url.hostname.replace(/\.$/, "").toLowerCase();
+  if (!host) {
+    return { error: marker("refused \u2014 not a valid URL"), reason: "refused \u2014 not a valid URL" };
+  }
+  url.hostname = host;
+  return { url, host, port };
+}
+function ipv4ToNumber(ip) {
+  const parts = ip.split(".");
+  if (parts.length !== 4) return void 0;
+  let n = 0;
+  for (const p of parts) {
+    const v = Number(p);
+    if (!Number.isInteger(v) || v < 0 || v > 255) return void 0;
+    n = (n << 8) + v;
+  }
+  return n >>> 0;
+}
+function inRange(n, base, bits) {
+  const b = ipv4ToNumber(base);
+  if (b === void 0) return false;
+  const mask = bits === 0 ? 0 : 4294967295 << 32 - bits >>> 0;
+  return (n & mask) === (b & mask);
+}
+function normalizeIpLiteral(host) {
+  const h = host.replace(/^\[/, "").replace(/\]$/, "").toLowerCase();
+  if (/^0x[0-9a-f]+$/i.test(h)) {
+    const n = Number.parseInt(h.slice(2), 16);
+    if (Number.isFinite(n)) return `${n >>> 24 & 255}.${n >>> 16 & 255}.${n >>> 8 & 255}.${n & 255}`;
+  }
+  if (/^[0-9]+$/.test(h)) {
+    const n = Number(h);
+    if (Number.isFinite(n)) return `${n >>> 24 & 255}.${n >>> 16 & 255}.${n >>> 8 & 255}.${n & 255}`;
+  }
+  if (/^0[0-7.]+$/.test(h) && h.includes(".")) {
+    const parts = h.split(".").map((p) => Number.parseInt(p || "0", 8));
+    if (parts.length === 4 && parts.every((p) => Number.isInteger(p) && p >= 0 && p <= 255)) {
+      return parts.join(".");
+    }
+  }
+  if (h.startsWith("::ffff:")) return h.slice("::ffff:".length);
+  return h;
+}
+function isPublicAddress(address) {
+  const ip = normalizeIpLiteral(address);
+  const family = isIP(ip);
+  if (family === 4) {
+    const n = ipv4ToNumber(ip);
+    if (n === void 0) return false;
+    const ranges = [
+      ["0.0.0.0", 8],
+      ["10.0.0.0", 8],
+      ["100.64.0.0", 10],
+      ["127.0.0.0", 8],
+      ["169.254.0.0", 16],
+      ["172.16.0.0", 12],
+      ["192.168.0.0", 16],
+      ["192.0.2.0", 24],
+      ["198.51.100.0", 24],
+      ["203.0.113.0", 24],
+      ["224.0.0.0", 4]
+    ];
+    return !ranges.some(([base, bits]) => inRange(n, base, bits));
+  }
+  if (family === 6) {
+    const h = ip.toLowerCase();
+    if (h === "::" || h === "::1") return false;
+    if (h.startsWith("fe80:") || h.startsWith("fe8") || h.startsWith("fe9") || h.startsWith("fea") || h.startsWith("feb")) return false;
+    if (h.startsWith("fc") || h.startsWith("fd")) return false;
+    if (h.startsWith("ff")) return false;
+    if (h.startsWith("2001:db8")) return false;
+    return true;
+  }
+  return false;
+}
+async function resolvePublic(host, lookup) {
+  if (host === "localhost" || host.endsWith(".localhost")) return void 0;
+  const literal = normalizeIpLiteral(host);
+  if (isIP(literal)) return isPublicAddress(literal) ? literal : void 0;
+  const records = await lookup(host, { all: true, verbatim: true });
+  const publicRecord = records.find((r) => isPublicAddress(r.address));
+  return publicRecord?.address;
+}
+function decodeBody(body, encoding) {
+  const enc = encoding.toLowerCase();
+  if (enc.includes("gzip")) return gunzipSync(body);
+  if (enc.includes("br")) return brotliDecompressSync(body);
+  if (enc.includes("deflate")) return inflateSync(body);
+  return body;
+}
+function extractText(body, contentType) {
+  const type = contentType.split(";")[0].trim().toLowerCase();
+  if (type && !type.startsWith("text/html") && !type.startsWith("text/plain") && !type.startsWith("text/markdown") && type !== "application/json" && !type.endsWith("+json")) {
+    return { unsupported: true, boilerplateStripped: false };
+  }
+  let raw = body.toString("utf8");
+  if (type.startsWith("text/html")) {
+    raw = raw.replace(/<script\b[^>]*>[\s\S]*?<\/script>/gi, " ").replace(/<style\b[^>]*>[\s\S]*?<\/style>/gi, " ").replace(/<!--[\s\S]*?-->/g, " ").replace(/<[^>]+>/g, " ").replace(/&nbsp;/g, " ").replace(/&amp;/g, "&").replace(/&lt;/g, "<").replace(/&gt;/g, ">").replace(/&quot;/g, '"');
+    return { text: raw.replace(/\s+/g, " ").trim(), boilerplateStripped: true };
+  }
+  return { text: raw.trim(), boilerplateStripped: false };
+}
+function proxyPort(proxy) {
+  if (proxy.port) return Number(proxy.port);
+  return proxy.protocol === "https:" ? 443 : 80;
+}
+function authorityHost(host) {
+  return isIP(host) === 6 ? `[${host}]` : host;
+}
+function connectHttpsThroughProxy(proxy, target, resolvedAddress, timeoutMs) {
+  return new Promise((resolve5, reject) => {
+    const raw = netConnect2({
+      host: proxy.hostname,
+      port: proxyPort(proxy)
+    });
+    let settled = false;
+    let buffered = Buffer.alloc(0);
+    const targetAuthority = `${authorityHost(resolvedAddress)}:${Number(target.port || 443)}`;
+    const hostAuthority = `${target.hostname}:${Number(target.port || 443)}`;
+    const fail2 = (err) => {
+      if (settled) return;
+      settled = true;
+      raw.destroy();
+      reject(err);
+    };
+    const timer = setTimeout(() => fail2(new Error(`timed out after ${Math.round(timeoutMs / 1e3)}s`)), timeoutMs);
+    if (typeof timer.unref === "function") {
+      timer.unref();
+    }
+    raw.on("connect", () => {
+      raw.write(
+        [
+          `CONNECT ${targetAuthority} HTTP/1.1`,
+          `Host: ${hostAuthority}`,
+          "User-Agent: GlyphSpek-WebContext/1",
+          "Connection: close",
+          "",
+          ""
+        ].join("\r\n")
+      );
+    });
+    raw.on("data", (chunk) => {
+      buffered = Buffer.concat([buffered, chunk]);
+      const headerEnd = buffered.indexOf("\r\n\r\n");
+      if (headerEnd === -1) return;
+      const header = buffered.subarray(0, headerEnd).toString("latin1");
+      const status = /^HTTP\/\d(?:\.\d)?\s+(\d{3})\b/i.exec(header)?.[1];
+      if (!status || Number(status) < 200 || Number(status) >= 300) {
+        fail2(new Error(`proxy CONNECT failed${status ? ` \u2014 HTTP ${status}` : ""}`));
+        return;
+      }
+      raw.removeAllListeners("data");
+      raw.removeAllListeners("error");
+      raw.removeAllListeners("timeout");
+      clearTimeout(timer);
+      const tls = tlsConnect({
+        socket: raw,
+        servername: target.hostname,
+        rejectUnauthorized: true
+      });
+      tls.once("secureConnect", () => {
+        if (settled) return;
+        settled = true;
+        resolve5(tls);
+      });
+      tls.once("error", (err) => {
+        if (/certificate|tls|ssl|self[- ]signed|unable to verify/i.test(String(err.message))) {
+          fail2(new Error("TLS validation failed"));
+        } else {
+          fail2(err);
+        }
+      });
+    });
+    raw.once("timeout", () => fail2(new Error(`timed out after ${Math.round(timeoutMs / 1e3)}s`)));
+    raw.once("error", fail2);
+    raw.setTimeout(timeoutMs);
+  });
+}
+function runRequest(client, options, maxBytes) {
+  return new Promise((resolve5, reject) => {
+    const req = client(options, (res) => {
+      const chunks = [];
+      let bytes = 0;
+      res.on("data", (chunk) => {
+        bytes += chunk.length;
+        if (bytes > maxBytes) {
+          req.destroy(new Error(`response exceeded maxFetchKB`));
+          return;
+        }
+        chunks.push(chunk);
+      });
+      res.on("end", () => resolve5({
+        statusCode: res.statusCode ?? 0,
+        headers: res.headers,
+        body: Buffer.concat(chunks),
+        bytesRead: bytes
+      }));
+    });
+    req.on("timeout", () => req.destroy(new Error(`timed out after ${Math.round(Number(options.timeout ?? 0) / 1e3)}s`)));
+    req.on("error", reject);
+    req.end();
+  });
+}
+function proxyRequest(proxy, target, resolvedAddress, timeoutMs, maxBytes) {
+  const headers = {
+    Host: target.host,
+    Accept: "text/html,text/plain,text/markdown,application/json;q=0.9,*/*;q=0.1",
+    "Accept-Encoding": "gzip, deflate, br",
+    "User-Agent": "GlyphSpek-WebContext/1"
+  };
+  if (target.protocol === "https:") {
+    return connectHttpsThroughProxy(proxy, target, resolvedAddress, timeoutMs).then((tlsSocket) => runRequest(
+      httpsRequest,
+      {
+        protocol: "https:",
+        hostname: target.hostname,
+        port: Number(target.port || 443),
+        path: `${target.pathname}${target.search}`,
+        method: "GET",
+        headers,
+        timeout: timeoutMs,
+        createConnection: () => tlsSocket
+      },
+      maxBytes
+    ));
+  }
+  return runRequest(
+    httpRequest2,
+    {
+      protocol: "http:",
+      hostname: proxy.hostname,
+      port: proxyPort(proxy),
+      path: `http://${authorityHost(resolvedAddress)}:${Number(target.port || 80)}${target.pathname}${target.search}`,
+      method: "GET",
+      headers,
+      timeout: timeoutMs
+    },
+    maxBytes
+  );
+}
+async function governedWebFetch(opts) {
+  const originalUrl = String(opts.url || "").trim();
+  const lookup = opts.lookup ?? dnsLookup;
+  const maxFetchBytes = safeInt(opts.maxFetchKB, WEB_DEFAULT_MAX_FETCH_KB, 1, 16384) * 1024;
+  const maxContextBytes = safeInt(opts.maxContextKB, WEB_DEFAULT_MAX_CONTEXT_KB, 1, 1024) * 1024;
+  const timeoutMs = safeInt(opts.timeoutMs, WEB_DEFAULT_TIMEOUT_MS, 100, 6e4);
+  const maxRedirects = safeInt(opts.maxRedirects, WEB_DEFAULT_MAX_REDIRECTS, 0, 10);
+  const proxy = new URL2(opts.proxyUrl);
+  let current = originalUrl;
+  for (let hop = 0; hop <= maxRedirects; hop++) {
+    const prepared = prepareWebUrl(current);
+    if ("error" in prepared) return { ok: false, originalUrl, marker: prepared.error, reason: prepared.reason };
+    const { url, host, port } = prepared;
+    let resolved;
+    try {
+      resolved = await resolvePublic(host, lookup);
+    } catch (err) {
+      return fail(originalUrl, `fetch failed \u2014 ${String(err.message || "DNS failure")}`, host);
+    }
+    if (!resolved) return fail(originalUrl, "refused \u2014 non-public target", host);
+    opts.onAttempt?.({ url: url.toString(), host, port });
+    let response;
+    try {
+      response = await proxyRequest(proxy, url, resolved, timeoutMs, maxFetchBytes);
+    } catch (err) {
+      const msg = String(err.message ?? err);
+      if (/timed out/i.test(msg)) return fail(originalUrl, `fetch failed \u2014 ${msg}`, host);
+      return fail(originalUrl, `fetch failed \u2014 ${msg.slice(0, 120)}`, host);
+    }
+    if ([301, 302, 303, 307, 308].includes(response.statusCode)) {
+      const loc = response.headers.location;
+      const location = Array.isArray(loc) ? loc[0] : loc;
+      if (!location) return fail(originalUrl, `fetch failed \u2014 HTTP ${response.statusCode}`, host);
+      if (hop === maxRedirects) return fail(originalUrl, "fetch failed \u2014 too many redirects", host);
+      const next = new URL2(location, url);
+      if (url.protocol === "https:" && next.protocol === "http:") {
+        return fail(originalUrl, "refused \u2014 non-public target", host);
+      }
+      current = next.toString();
+      continue;
+    }
+    if (response.statusCode < 200 || response.statusCode >= 300) {
+      return fail(originalUrl, `fetch failed \u2014 HTTP ${response.statusCode}`, host);
+    }
+    let decoded;
+    try {
+      decoded = decodeBody(response.body, String(response.headers["content-encoding"] ?? ""));
+    } catch {
+      return fail(originalUrl, "unsupported content type \u2014 encoded body");
+    }
+    if (decoded.byteLength > maxFetchBytes * 8) {
+      return fail(originalUrl, "fetch failed \u2014 response exceeded decompressed limit", host);
+    }
+    const contentType = String(response.headers["content-type"] ?? "text/plain");
+    const extracted = extractText(decoded, contentType);
+    if (extracted.unsupported) return fail(originalUrl, `unsupported content type \u2014 ${contentType.split(";")[0] || "unknown"}`, host);
+    const fullText = extracted.text ?? "";
+    if (!fullText.trim()) return fail(originalUrl, `no readable content at ${url.toString()}`, host);
+    const fullBytes = Buffer.byteLength(fullText, "utf8");
+    const truncated = fullBytes > maxContextBytes;
+    const text = truncated ? `${Buffer.from(fullText).subarray(0, maxContextBytes).toString("utf8")}
+... [truncated]` : fullText;
+    const sha256 = createHash6("sha256").update(fullText, "utf8").digest("hex");
+    opts.onAttempt?.({ url: url.toString(), host, port, contentSha256: sha256 });
+    return {
+      ok: true,
+      originalUrl,
+      finalUrl: url.toString(),
+      contentType,
+      text,
+      fullText,
+      sha256,
+      bytesRead: response.bytesRead,
+      extractedBytes: fullBytes,
+      truncated,
+      boilerplateStripped: extracted.boilerplateStripped
+    };
+  }
+  return fail(originalUrl, "fetch failed \u2014 too many redirects");
 }
 
 // ../spikes/p0-supervisor/bridge-server.ts
@@ -3997,7 +6290,7 @@ function selfHashCheck(selfPath, pinnedSha) {
   }
   let actual;
   try {
-    actual = createHash3("sha256").update(readFileSync4(selfPath)).digest("hex");
+    actual = createHash7("sha256").update(readFileSync5(selfPath)).digest("hex");
   } catch (err) {
     return {
       ok: false,
@@ -4012,6 +6305,7 @@ function selfHashCheck(selfPath, pinnedSha) {
   }
   return { ok: true };
 }
+var DEFAULT_INDEX_RETRIEVE_K = 6;
 var DEFAULT_CHAT_BACKEND_ID = "codex";
 var CODEX_HASH_CAP_BYTES = 256 * 1024 * 1024;
 function captureCodexBinaryIdentity(codexPath) {
@@ -4026,7 +6320,7 @@ function captureCodexBinaryIdentity(codexPath) {
   }
   if (sizeBytes === void 0 || sizeBytes <= CODEX_HASH_CAP_BYTES) {
     try {
-      const hash = createHash3("sha256").update(readFileSync4(codexPath)).digest("hex");
+      const hash = createHash7("sha256").update(readFileSync5(codexPath)).digest("hex");
       identity.sha256 = hash;
     } catch {
     }
@@ -4226,9 +6520,25 @@ var BridgeServer = class {
   chat;
   agentic;
   terminalModelEndpoints;
+  index;
   stdinBuffer = "";
   handshakeDone = false;
   hashChecked = false;
+  /**
+   * The CANONICAL session workspace root `index/retrieve` is BOUND to (the index/
+   * disclosure boundary). Established at most once per connection and then PINNED:
+   *   - PREFERRED: from the trusted handshake channel (`HandshakeParams.workspaceRoot`),
+   *     canonicalized (realpath) at handshake. When set this way the FIRST and every
+   *     subsequent `index/retrieve` must resolve to this exact directory.
+   *   - FALLBACK: when the handshake omitted a root (older client / no workspace folder
+   *     open), it is pinned from the FIRST post-handshake `index/retrieve` (the
+   *     legitimate extension's warm-up, fired on session open before any adversary can
+   *     interpose). A later retrieve with a DIFFERENT canonical root is refused.
+   * Once set, a request whose canonical root differs is refused WITHOUT indexing or
+   * reading that root — so the local index can only ever index the first-party
+   * session's own workspace, never an arbitrary readable absolute directory.
+   */
+  sessionWorkspaceRoot;
   /** Created runs, keyed by runId (retained for run/event emission). */
   runs = /* @__PURE__ */ new Map();
   /** The chat gateway, constructed lazily on the first chat/send. */
@@ -4285,6 +6595,22 @@ var BridgeServer = class {
   remoteTraceWriters = /* @__PURE__ */ new Map();
   /** Trace file path per target runId (the run dir's trace.jsonl). */
   remoteTracePaths = /* @__PURE__ */ new Map();
+  /**
+   * Per-workspace LOCAL code index (@Codebase). Keyed by absolute workspaceRoot, each
+   * entry holds the brute-force vector store + the BM25 keyword index + the in-flight
+   * build promise, so the HYBRID index is built ONCE per workspace and concurrent
+   * retrievals de-dupe onto the same build (the first retrieve for a workspace triggers
+   * the lazy buildIndex; later ones reuse the cached store + keyword index). Both
+   * structures are populated in the SAME buildIndex call so they stay in lockstep.
+   * Memory-only residency: nothing is written to disk by this seam.
+   */
+  indexStores = /* @__PURE__ */ new Map();
+  /**
+   * The DEFAULT embedder for `index/retrieve`, constructed ONCE on first use (a loopback
+   * {@link OllamaEmbedder}) when no embedder was injected via `index.embedder`. Lazy so a
+   * supervisor that never retrieves never constructs it.
+   */
+  defaultEmbedder;
   constructor(opts) {
     this.supervisorVersion = opts.supervisorVersion ?? DEFAULT_SUPERVISOR_VERSION;
     this.runsBaseDir = opts.runsBaseDir;
@@ -4297,6 +6623,7 @@ var BridgeServer = class {
     this.chat = opts.chat;
     this.agentic = opts.agentic;
     this.terminalModelEndpoints = opts.terminalModelEndpoints;
+    this.index = opts.index;
   }
   /**
    * Resolve the model endpoints a governed terminal session classifies. Explicit
@@ -4422,6 +6749,9 @@ var BridgeServer = class {
       case BridgeMethod.ChatSend:
         void this.handleChatSend(req);
         return;
+      case BridgeMethod.WebFetch:
+        void this.handleWebFetch(req);
+        return;
       case BridgeMethod.AgenticBuildStart:
         void this.handleAgenticBuildStart(req);
         return;
@@ -4430,6 +6760,12 @@ var BridgeServer = class {
         return;
       case BridgeMethod.ApprovalRespond:
         this.handleApprovalRespond(req);
+        return;
+      case BridgeMethod.IndexRetrieve:
+        void this.handleIndexRetrieve(req);
+        return;
+      case BridgeMethod.IndexBuild:
+        void this.handleIndexBuild(req);
         return;
       default:
         this.emit(
@@ -4457,6 +6793,19 @@ var BridgeServer = class {
           this.errorResponse(req.id, BridgeErrorCode.HashMismatch, check.message)
         );
         return;
+      }
+    }
+    const params = req.params ?? {};
+    const handshakeRoot = typeof params.workspaceRoot === "string" ? params.workspaceRoot.trim() : "";
+    if (handshakeRoot.length > 0) {
+      const canonical = this.canonicalDir(handshakeRoot);
+      if (canonical) {
+        this.sessionWorkspaceRoot = canonical;
+        this.logLine(`[bridge-server] session workspace root bound from handshake: ${canonical}`);
+      } else {
+        this.logLine(
+          `[bridge-server] handshake workspaceRoot is not a readable directory; deferring index/retrieve binding to first post-handshake retrieve.`
+        );
       }
     }
     const result = {
@@ -5050,6 +7399,103 @@ var BridgeServer = class {
       });
     }
   }
+  /**
+   * web/fetch — supervisor-owned `@Web` fetch. This deliberately does NOT create a
+   * governed chat session: v4 locks no-active-session behavior to fail-closed. A
+   * successful fetch appends metadata + content hash only to the active chat run's
+   * trace; fetched body is returned to the caller for one-turn untrusted context
+   * injection and is never persisted here.
+   */
+  async handleWebFetch(req) {
+    const fail2 = (result) => {
+      this.emit(this.successResponse(req.id, result));
+    };
+    if (!this.handshakeDone) {
+      fail2({
+        ok: false,
+        originalUrl: "",
+        marker: "[@Web: fetch failed \u2014 supervisor unavailable]",
+        reason: "web/fetch before a completed handshake"
+      });
+      return;
+    }
+    const governed = this.chatGovernedSession;
+    if (!governed || !this.runs.has(governed.runId)) {
+      fail2({
+        ok: false,
+        originalUrl: typeof req.params?.url === "string" ? req.params.url : "",
+        marker: "[@Web: fetch failed \u2014 no active governed session]",
+        reason: "no active governed session"
+      });
+      return;
+    }
+    const params = req.params ?? {};
+    const originalUrl = typeof params.url === "string" ? params.url : "";
+    if (!originalUrl.trim()) {
+      fail2({
+        ok: false,
+        originalUrl,
+        marker: "[@Web: refused \u2014 not a valid URL]",
+        reason: "refused \u2014 not a valid URL"
+      });
+      return;
+    }
+    const run = this.runs.get(governed.runId);
+    const tracePath = run?.created?.dir ? join11(runSubdirPath(run.created.dir, "trace"), "trace.jsonl") : void 0;
+    const sink = tracePath ? createTraceWriter(tracePath) : void 0;
+    const seen = /* @__PURE__ */ new Set();
+    const recordAttempt = (attempt) => {
+      if (!sink) return;
+      const key = `${attempt.host}:${attempt.port}:${attempt.contentSha256 ?? ""}`;
+      if (seen.has(key)) return;
+      seen.add(key);
+      const payload = {
+        tool: "network",
+        requestedCapability: `network:${attempt.host}:${attempt.port}`,
+        destination: `${attempt.host}:${attempt.port}`,
+        decision: "allow",
+        enforcement: "observe-only",
+        provenanceLabel: "web",
+        rule: "observed \u2014 @Web public-document fetch through governed soft egress; NOT a hard allowlist authorization",
+        ...attempt.contentSha256 ? { contentSha256: attempt.contentSha256 } : {}
+      };
+      const appended = sink.append({
+        v: TRACE_EVENT_VERSION,
+        runId: governed.runId,
+        seq: 0,
+        ts: Date.now(),
+        type: "policy_decision",
+        payload
+      });
+      this.emitRunEventEnvelope({
+        rev: RUN_EVENT_PROTOCOL_VERSION,
+        runId: governed.runId,
+        kind: "trace_event",
+        event: appended
+      });
+    };
+    try {
+      const result = await governedWebFetch({
+        url: originalUrl,
+        proxyUrl: governed.proxyUrl,
+        ...typeof params.maxFetchKB === "number" ? { maxFetchKB: params.maxFetchKB } : {},
+        ...typeof params.maxContextKB === "number" ? { maxContextKB: params.maxContextKB } : {},
+        ...typeof params.timeoutMs === "number" ? { timeoutMs: params.timeoutMs } : {},
+        ...typeof params.maxRedirects === "number" ? { maxRedirects: params.maxRedirects } : {},
+        onAttempt: recordAttempt
+      });
+      const response = result.ok ? { ...result, runId: governed.runId } : result;
+      this.emit(this.successResponse(req.id, response));
+    } catch (err) {
+      this.logLine(`[bridge-server] web/fetch failed: ${String(err?.message ?? err)}`);
+      fail2({
+        ok: false,
+        originalUrl,
+        marker: "[@Web: fetch failed \u2014 supervisor unavailable]",
+        reason: "supervisor unavailable"
+      });
+    }
+  }
   /* ============================================================== *
    * AGENTIC BUILD RPC (Phase B — the chat→ACTOR promotion)
    * ============================================================== */
@@ -5113,7 +7559,7 @@ var BridgeServer = class {
     if (params.pendingApproval === true) {
       const approvalId = `apr-${runId}`;
       const pendingRun = createRun(this.agentic?.runsBaseDir ?? this.runsBaseDir);
-      const pendingTracePath = join8(runSubdirPath(pendingRun.dir, "trace"), "trace.jsonl");
+      const pendingTracePath = join11(runSubdirPath(pendingRun.dir, "trace"), "trace.jsonl");
       this.remoteTracePaths.set(runId, pendingTracePath);
       this.pendingBuilds.set(approvalId, {
         approvalId,
@@ -5150,7 +7596,7 @@ var BridgeServer = class {
     const abort = new AbortController();
     try {
       const buildRun = existing ? { runId, dir: existing.runDir, state: "created" } : createRun(this.agentic?.runsBaseDir ?? this.runsBaseDir);
-      const tracePath = existing ? existing.tracePath : join8(runSubdirPath(buildRun.dir, "trace"), "trace.jsonl");
+      const tracePath = existing ? existing.tracePath : join11(runSubdirPath(buildRun.dir, "trace"), "trace.jsonl");
       const sink = this.remoteTraceWriters.get(runId) ?? createTraceWriter(tracePath);
       this.remoteTraceWriters.set(runId, sink);
       this.remoteTracePaths.set(runId, tracePath);
@@ -5331,6 +7777,310 @@ var BridgeServer = class {
     this.logLine(`[bridge-server] run/cancel ${runId} \u2192 aborted.`);
     this.emit(this.successResponse(req.id, { runId, cancelled: true }));
   }
+  /* ============================================================== *
+   * CODE-INDEX RETRIEVAL (@Codebase repo-aware retrieval)
+   * ============================================================== */
+  /**
+   * The DEFAULT embedder for `index/retrieve`: the injected `index.embedder` if present,
+   * else a lazily-constructed, REUSED loopback {@link OllamaEmbedder}. Constructing it
+   * once (not per request) means the index for a workspace is always built + queried
+   * with the SAME embedder (a different embedder/model would produce incompatible
+   * vectors against a cached store).
+   */
+  resolveEmbedder() {
+    if (this.index?.embedder) return this.index.embedder;
+    if (!this.defaultEmbedder) {
+      this.defaultEmbedder = new OllamaEmbedder();
+    }
+    return this.defaultEmbedder;
+  }
+  /**
+   * Get-or-build the LOCAL code index for a workspace. The vector store, the BM25
+   * keyword index, and the in-flight build promise are cached per absolute
+   * workspaceRoot so the HYBRID index is built EXACTLY ONCE and concurrent retrievals
+   * (and the chat warm-up) de-dupe onto the same `built` promise rather than
+   * triggering parallel builds. The keyword index is populated ALONGSIDE the vector
+   * store in the SAME buildIndex call (one pass over the fresh chunks), so they stay
+   * in lockstep. Memory-only residency: nothing is persisted by this seam. The caller
+   * awaits `built` before querying either structure.
+   */
+  /**
+   * Canonicalize a requested directory path to its REAL absolute path, or return
+   * `undefined` when it does not exist / is not a directory / cannot be resolved.
+   * Resolve-then-realpath collapses `..`/symlinks so a path-escape (`/repo/../etc`)
+   * or a symlink out of the workspace canonicalizes to its true target and is then
+   * compared against the pinned session root — it cannot smuggle a different
+   * directory past the equality check. Resolve-never-throw: any fs error (ENOENT,
+   * EACCES, ENOTDIR) yields `undefined`, which the caller maps to a refusal WITHOUT
+   * reading the path.
+   */
+  canonicalDir(requested) {
+    try {
+      const real = realpathSync(resolve4(requested));
+      if (!statSync3(real).isDirectory()) return void 0;
+      return real;
+    } catch {
+      return void 0;
+    }
+  }
+  /**
+   * Resolve + ENFORCE the index/disclosure boundary for a requested `workspaceRoot`,
+   * shared by `index/retrieve` and `index/build` so they bind to the SAME session root by
+   * the SAME machinery. On success returns the canonical (realpath'd) root; otherwise a
+   * short non-secret refusal reason WITHOUT reading the requested root:
+   *   - empty/missing → refused;
+   *   - non-existent / not a directory → refused;
+   *   - no session root yet bound → PIN this canonical root (the legitimate extension's
+   *     warm-up), then enforce it for every later call;
+   *   - a canonical root that differs from the bound session root → refused (cross-root).
+   * The caller MUST have already passed the completed-handshake gate.
+   */
+  bindSessionRoot(requestedRaw, surface) {
+    const workspaceRoot = typeof requestedRaw === "string" ? requestedRaw.trim() : "";
+    if (workspaceRoot.length === 0) {
+      return { ok: false, reason: `${surface} requires a non-empty workspaceRoot` };
+    }
+    const canonicalRoot = this.canonicalDir(workspaceRoot);
+    if (!canonicalRoot) {
+      return { ok: false, reason: `${surface} workspaceRoot does not exist or is not a directory` };
+    }
+    if (this.sessionWorkspaceRoot === void 0) {
+      this.sessionWorkspaceRoot = canonicalRoot;
+      this.logLine(`[bridge-server] session workspace root pinned from first ${surface}: ${canonicalRoot}`);
+      return { ok: true, root: canonicalRoot };
+    }
+    if (canonicalRoot !== this.sessionWorkspaceRoot) {
+      this.logLine(
+        `[bridge-server] ${surface} refused: requested root resolves outside the session workspace (bound to a different directory).`
+      );
+      return { ok: false, reason: `${surface} workspaceRoot is not the session workspace root` };
+    }
+    return { ok: true, root: canonicalRoot };
+  }
+  /**
+   * Resolve the residency policy for an index build on `workspaceRoot`. Default is the
+   * memory-only (no-disk) posture (today's behavior). When `persist` is true (the
+   * `glyphspek.index.persist` setting flowing through `index/build`'s params), build with
+   * the 'workspace-encrypted' residency so the index survives a session restart as an
+   * encrypted, workspace-LOCAL snapshot (index-residency.ts refuses any path outside the
+   * workspace, and the build refuses to persist without the per-workspace AES key).
+   */
+  indexResidencyFor(workspaceRoot, persist) {
+    return persist ? { residency: "workspace-encrypted", highSecurity: false, workspaceRoot } : { residency: "memory-only", highSecurity: false };
+  }
+  /**
+   * Build the ONE shared per-workspace index (fresh store + keyword index) under the
+   * given residency, cache it keyed by canonical workspaceRoot, and return the entry
+   * whose `built` resolves with the build's {@link IndexStats}. The SAME entry backs
+   * `index/build`, `index/retrieve`, and repo-aware FIM — there is exactly one index per
+   * workspace (never a parallel one). `forSurface` only labels the operator log line.
+   */
+  /**
+   * Resolve the effective vector-store kind for a build: an explicit per-request kind
+   * (validated) wins; else the supervisor's configured default; else the module default.
+   * Always lands on a valid kind ('brute' fallback is always available).
+   */
+  resolveStoreKind(requested) {
+    if (requested !== void 0) {
+      return resolveVectorStoreKind(requested);
+    }
+    return this.index?.defaultVectorStore ?? DEFAULT_VECTOR_STORE_KIND;
+  }
+  startIndexBuild(workspaceRoot, embedder, residency, forSurface, onProgress, storeKind = this.resolveStoreKind()) {
+    const store = createVectorStore(storeKind);
+    const keywordIndex = new BM25KeywordIndex();
+    const built = buildIndex({
+      workspaceRoot,
+      embedder,
+      store,
+      keywordIndex,
+      residency,
+      ...this.index?.keyDir ? { keyDir: this.index.keyDir } : {},
+      // STREAM PROGRESS (index/build only — index/retrieve's lazy build passes no
+      // sink). The indexer's progress tick shape IS the wire event shape, so we
+      // forward it straight through to the per-request `onProgress`.
+      ...onProgress ? { onProgress } : {}
+    }).then((stats) => {
+      this.logLine(
+        `[bridge-server] ${forSurface} built local hybrid index for ${workspaceRoot}: ${stats.files} files, ${stats.chunks} chunks (embedded ${stats.embedded}, reused ${stats.reused}, residency ${stats.residency}, embedder ${stats.embedderId}, vectorStore ${storeKind}, keyword ${keywordIndex.size} chunks).`
+      );
+      return stats;
+    });
+    const entry = { store, keywordIndex, built };
+    this.indexStores.set(workspaceRoot, entry);
+    return entry;
+  }
+  getOrBuildIndex(workspaceRoot, embedder, residency = { residency: "memory-only", highSecurity: false }, storeKind = this.resolveStoreKind()) {
+    const existing = this.indexStores.get(workspaceRoot);
+    if (existing) return existing;
+    return this.startIndexBuild(workspaceRoot, embedder, residency, "index/retrieve", void 0, storeKind);
+  }
+  /**
+   * index/retrieve — fetch top-k repo chunks from the workspace's LOCAL code index for
+   * repo-aware chat context (@Codebase). Lazily builds the on-device index for the
+   * SESSION'S OWN workspace on first use (de-duped per workspace), embeds the query
+   * with the SAME local embedder, and returns the top-k cosine-similar chunks.
+   *
+   * SECURITY — INDEX/DISCLOSURE BOUNDARY (the load-bearing rule). This method reads
+   * source files and returns chunk TEXT, so it MUST only ever index/read the
+   * FIRST-PARTY SESSION'S OWN workspace, and only AFTER a completed handshake. Two
+   * gates run BEFORE any discovery / file read / embed:
+   *   1. COMPLETED-HANDSHAKE GATE. Pre-handshake → `{ ok:false, hits:[] }`, no read.
+   *   2. SESSION-ROOT BINDING. The requested `workspaceRoot` is canonicalized (realpath,
+   *      collapsing `..`/symlinks) and must EQUAL the session's bound root:
+   *        - PREFERRED: the root pinned from the trusted handshake channel; or
+   *        - FALLBACK: the root pinned from the FIRST post-handshake retrieve (the
+   *          legitimate extension's warm-up), then enforced for every later call.
+   *      A request that does not exist / is not a directory, or whose canonical root
+   *      differs from the bound root → `{ ok:false, hits:[] }` WITHOUT indexing,
+   *      reading, or embedding that root.
+   *
+   * BEST-EFFORT / NON-FATAL: retrieval must NEVER crash chat. On ANY error — a refusal
+   * above, the embedder daemon down, a build failure — the result is `{ ok:false,
+   * hits:[] }` with a short non-secret `error`, so the chat turn proceeds with NO repo
+   * context instead of failing. Nothing here egresses code (the index path is local by
+   * construction); the result carries non-secret repo snippets, no credential.
+   */
+  async handleIndexRetrieve(req) {
+    const fail2 = (error) => {
+      const result = { ok: false, hits: [], error };
+      this.emit(this.successResponse(req.id, result));
+    };
+    try {
+      if (!this.handshakeDone) {
+        fail2("index/retrieve before a completed handshake");
+        return;
+      }
+      const params = req.params ?? {};
+      const query = typeof params.query === "string" ? params.query : "";
+      const bound = this.bindSessionRoot(params.workspaceRoot, "index/retrieve");
+      if (!bound.ok) {
+        fail2(bound.reason);
+        return;
+      }
+      const canonicalRoot = bound.root;
+      if (query.trim().length === 0) {
+        this.emit(this.successResponse(req.id, { ok: true, hits: [] }));
+        return;
+      }
+      const k = typeof params.k === "number" && Number.isFinite(params.k) && params.k > 0 ? Math.floor(params.k) : this.index?.defaultK ?? DEFAULT_INDEX_RETRIEVE_K;
+      const embedder = this.resolveEmbedder();
+      const storeKind = this.resolveStoreKind(params.vectorStore);
+      const entry = this.getOrBuildIndex(canonicalRoot, embedder, void 0, storeKind);
+      await entry.built;
+      const hits = await retrieve({
+        query,
+        embedder,
+        store: entry.store,
+        keywordIndex: entry.keywordIndex,
+        k
+      });
+      const result = {
+        ok: true,
+        hits: hits.map((h) => ({
+          path: h.chunk.path,
+          startLine: h.chunk.startLine,
+          endLine: h.chunk.endLine,
+          text: h.chunk.text,
+          score: h.score,
+          // Display cosine for the citation UI; fall back to score (vector-only path
+          // already has relevance == cosine, so the ?? only fires if it's unset).
+          relevance: h.relevance ?? h.score
+        }))
+      };
+      this.logLine(
+        `[bridge-server] index/retrieve ${canonicalRoot}: ${result.hits.length} hit(s) for query (len ${query.length}).`
+      );
+      this.emit(this.successResponse(req.id, result));
+    } catch (err) {
+      const message = String(err?.message ?? err);
+      const raw = typeof req.params?.workspaceRoot === "string" ? req.params.workspaceRoot.trim() : "";
+      const wsRoot = raw ? this.canonicalDir(raw) : void 0;
+      if (wsRoot) this.indexStores.delete(wsRoot);
+      this.logLine(`[bridge-server] index/retrieve failed (non-fatal): ${message}`);
+      fail2(`index/retrieve failed: ${message}`);
+    }
+  }
+  /**
+   * index/build — BUILD (or rebuild) the SESSION'S OWN local code index on demand (the
+   * no-CLI "Index Workspace" command). It shares the SAME per-workspace server-side index
+   * `index/retrieve` + repo-aware FIM use (never a parallel one): it builds a FRESH store
+   * + keyword index, caches it keyed by the canonical session root (replacing any prior
+   * cached index so a reindex is a true rebuild), and returns the build {@link IndexStats}
+   * the command surfaces as a toast / status-bar label.
+   *
+   * SECURITY — the SAME index/disclosure boundary as `index/retrieve`:
+   *   1. COMPLETED-HANDSHAKE GATE. Pre-handshake → `{ ok:false }`, no read.
+   *   2. SESSION-ROOT BINDING (the shared {@link bindSessionRoot}). The requested
+   *      `workspaceRoot` is canonicalized and must equal the session's bound root; a
+   *      cross-root / missing / non-dir request is refused WITHOUT reading it.
+   *
+   * RESIDENCY. `persist` (the `glyphspek.index.persist` setting carried in the params)
+   * selects the residency: default false → memory-only (today's no-disk behavior); true →
+   * 'workspace-encrypted' (an encrypted, workspace-local snapshot under
+   * <workspaceRoot>/.glyphspek/index that survives a session restart).
+   *
+   * BEST-EFFORT / NON-FATAL: never throws. On ANY error (a refusal above, the embedder
+   * daemon down, a build failure) the result is `{ ok:false, error }`; the poisoned cache
+   * entry is dropped so a later build can retry. Nothing here egresses code; the result
+   * carries only non-secret build COUNTS, no credential.
+   */
+  async handleIndexBuild(req) {
+    const fail2 = (error) => {
+      const result = { ok: false, error };
+      this.emit(this.successResponse(req.id, result));
+    };
+    let canonicalRoot;
+    try {
+      if (!this.handshakeDone) {
+        fail2("index/build before a completed handshake");
+        return;
+      }
+      const params = req.params ?? {};
+      const bound = this.bindSessionRoot(params.workspaceRoot, "index/build");
+      if (!bound.ok) {
+        fail2(bound.reason);
+        return;
+      }
+      canonicalRoot = bound.root;
+      const persist = params.persist === true;
+      const residency = this.indexResidencyFor(canonicalRoot, persist);
+      const embedder = this.resolveEmbedder();
+      const storeKind = this.resolveStoreKind(params.vectorStore);
+      this.indexStores.delete(canonicalRoot);
+      const entry = this.startIndexBuild(
+        canonicalRoot,
+        embedder,
+        residency,
+        "index/build",
+        (p) => this.emitIndexProgress(p),
+        storeKind
+      );
+      const stats = await entry.built;
+      const result = {
+        ok: true,
+        stats: {
+          files: stats.files,
+          chunks: stats.chunks,
+          embedded: stats.embedded,
+          reused: stats.reused,
+          embedMs: stats.embedMs,
+          totalMs: stats.totalMs,
+          embedderId: stats.embedderId,
+          residency: stats.residency
+        }
+      };
+      this.logLine(
+        `[bridge-server] index/build ${canonicalRoot}: ${stats.files} files, ${stats.chunks} chunks (persist=${persist}, residency ${stats.residency}).`
+      );
+      this.emit(this.successResponse(req.id, result));
+    } catch (err) {
+      const message = String(err?.message ?? err);
+      if (canonicalRoot) this.indexStores.delete(canonicalRoot);
+      this.logLine(`[bridge-server] index/build failed (non-fatal): ${message}`);
+      fail2(`index/build failed: ${message}`);
+    }
+  }
   /**
    * REMOTE-ACTION TRACE RECORDER (trace-integrity High A). Append ONE remote human
    * action (mobile approval, coding message, diff accept/reject) into the TARGET RUN's
@@ -5401,7 +8151,7 @@ var BridgeServer = class {
     let tracePath = this.remoteTracePaths.get(runId);
     if (!tracePath) {
       const created = createRun(this.agentic?.runsBaseDir ?? this.runsBaseDir);
-      tracePath = join8(runSubdirPath(created.dir, "trace"), "trace.jsonl");
+      tracePath = join11(runSubdirPath(created.dir, "trace"), "trace.jsonl");
       this.remoteTracePaths.set(runId, tracePath);
     }
     const writer = createTraceWriter(tracePath);
@@ -5661,6 +8411,20 @@ var BridgeServer = class {
     const note = {
       glyphspek: BRIDGE_JSONRPC,
       method: BridgeNotification.ChatDelta,
+      params: event
+    };
+    this.emit(note);
+  }
+  /**
+   * Emit one index/progress notification (no id) carrying an {@link IndexProgressEvent}
+   * during an in-flight `index/build`. Mirrors {@link emitChatDelta}: a no-id
+   * notification the client routes to the request's `onProgress` callback (and uses to
+   * reset the request's inactivity timeout). Carries NON-SECRET COUNTS only.
+   */
+  emitIndexProgress(event) {
+    const note = {
+      glyphspek: BRIDGE_JSONRPC,
+      method: BridgeNotification.IndexProgress,
       params: event
     };
     this.emit(note);

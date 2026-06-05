@@ -45,7 +45,7 @@
  * handler never wraps the bridge in try/catch around process lifecycle.
  */
 Object.defineProperty(exports, "__esModule", { value: true });
-exports.SupervisorBridge = exports.defaultBridgeSpawn = void 0;
+exports.SupervisorBridge = exports.DEFAULT_INDEX_BUILD_TIMEOUT_MS = exports.defaultBridgeSpawn = void 0;
 const node_child_process_1 = require("node:child_process");
 const supervisorBinary_1 = require("./supervisorBinary");
 const bridgeProtocol_1 = require("./bridgeProtocol");
@@ -73,6 +73,15 @@ const defaultBridgeSpawn = (command, args, options) => {
 };
 exports.defaultBridgeSpawn = defaultBridgeSpawn;
 const DEFAULT_REQUEST_TIMEOUT_MS = 30_000;
+/**
+ * The default `index/build` request timeout (30 minutes). Far longer than the global
+ * 30s default because a COLD index build of a real repo is tens of seconds to several
+ * MINUTES. This is the INACTIVITY BACKSTOP only: the request resets it on every
+ * `index/progress` event, so the real mechanism that keeps a progressing build alive
+ * is the reset-on-progress — this cap only fires if the build STALLS with no progress
+ * for the whole window. Overridable via the `glyphspek.index.buildTimeoutMs` setting.
+ */
+exports.DEFAULT_INDEX_BUILD_TIMEOUT_MS = 1_800_000;
 /**
  * Grace period between the polite SIGTERM and the SIGKILL escalation in dispose().
  * The bridge-server exits cleanly on stdin-end/SIGTERM in the normal case; this
@@ -162,6 +171,12 @@ class SupervisorBridge {
         const handshakeParams = {
             bridgeProtocolVersion: bridgeProtocol_1.BRIDGE_PROTOCOL_VERSION,
             extensionVersion: this.opts.extensionVersion,
+            // Bind the supervisor's index/retrieve to THIS session's workspace via the
+            // trusted handshake channel (when a workspace folder is open). Omitted when
+            // absent so the supervisor falls back to first-retrieve pinning.
+            ...(typeof this.opts.workspaceRoot === 'string' && this.opts.workspaceRoot.trim().length > 0
+                ? { workspaceRoot: this.opts.workspaceRoot.trim() }
+                : {}),
         };
         const response = await this.request(bridgeProtocol_1.BridgeMethod.Handshake, handshakeParams);
         if (response.error) {
@@ -367,6 +382,69 @@ class SupervisorBridge {
         }
         return { ok: true, turnId: result.turnId };
     }
+    /**
+     * Fetch ONE explicit public http(s) URL for `@Web` context. The extension only sends
+     * this bridge RPC; it never performs web egress itself. The supervisor owns URL
+     * validation, proxy routing, trace attribution, and content hashing.
+     *
+     * BEST-EFFORT / HONEST: resolves (never rejects) with a canonical `@Web` failure
+     * marker on any transport/server/malformed-result failure so the chat turn can tell
+     * the model and user that nothing was fetched.
+     */
+    async webFetch(params) {
+        const originalUrl = typeof params.url === 'string' ? params.url : '';
+        if (!this.ready || !this.child || this.closed) {
+            const reason = this.closeReason || 'bridge is not connected (handshake not completed).';
+            return {
+                ok: false,
+                originalUrl,
+                marker: '[@Web: fetch failed — supervisor unavailable]',
+                reason,
+            };
+        }
+        const response = await this.request(bridgeProtocol_1.BridgeMethod.WebFetch, params);
+        if (response.error) {
+            this.opts.log.appendLine(`[bridge] web/fetch error ${response.error.code}: ${response.error.message}`);
+            return {
+                ok: false,
+                originalUrl,
+                marker: '[@Web: fetch failed — supervisor unavailable]',
+                reason: response.error.message,
+            };
+        }
+        const result = response.result;
+        if (!result || typeof result.ok !== 'boolean') {
+            return {
+                ok: false,
+                originalUrl,
+                marker: '[@Web: fetch failed — supervisor unavailable]',
+                reason: 'malformed web/fetch result from supervisor.',
+            };
+        }
+        if (result.ok) {
+            if (typeof result.finalUrl !== 'string' ||
+                typeof result.text !== 'string' ||
+                typeof result.fullText !== 'string' ||
+                typeof result.sha256 !== 'string') {
+                return {
+                    ok: false,
+                    originalUrl,
+                    marker: '[@Web: fetch failed — supervisor unavailable]',
+                    reason: 'malformed web/fetch success from supervisor.',
+                };
+            }
+            return result;
+        }
+        if (typeof result.marker !== 'string' || !result.marker.startsWith('[@Web:')) {
+            return {
+                ok: false,
+                originalUrl,
+                marker: '[@Web: fetch failed — supervisor unavailable]',
+                reason: 'malformed web/fetch failure from supervisor.',
+            };
+        }
+        return result;
+    }
     /* ============================================================== *
      * AGENTIC BUILD RPC (Phase C — the chat→ACTOR promotion)
      * ============================================================== */
@@ -419,6 +497,88 @@ class SupervisorBridge {
             return { ok: false, reason: 'malformed build/start ack from supervisor (no runId).' };
         }
         return { ok: true, runId: result.runId };
+    }
+    /* ============================================================== *
+     * CODE-INDEX RETRIEVAL RPC (@Codebase repo-aware retrieval)
+     * ============================================================== */
+    /**
+     * Retrieve top-k repo chunks from the workspace's LOCAL code index (`index/retrieve`)
+     * for repo-aware chat context. SYNCHRONOUS (request/result, NOT ack-then-stream): the
+     * supervisor lazily builds the on-device index for `params.workspaceRoot`, embeds
+     * `params.query`, and returns the ranked hits. Everything is LOCAL — nothing egresses
+     * code; the result carries non-secret repo SNIPPETS only, never a credential.
+     *
+     * BEST-EFFORT / NON-FATAL: resolves (never rejects). On an unconnected bridge, a
+     * transport/server error, or a malformed result, this resolves to
+     * `{ ok:false, hits:[] }` so the caller (chat) degrades to NO repo context rather than
+     * failing the turn — retrieval must NEVER break chat.
+     */
+    async indexRetrieve(params) {
+        if (!this.ready || !this.child || this.closed) {
+            const error = this.closeReason || 'bridge is not connected (handshake not completed).';
+            return { ok: false, hits: [], error };
+        }
+        const response = await this.request(bridgeProtocol_1.BridgeMethod.IndexRetrieve, params);
+        if (response.error) {
+            this.opts.log.appendLine(`[bridge] index/retrieve error ${response.error.code}: ${response.error.message}`);
+            return { ok: false, hits: [], error: response.error.message };
+        }
+        const result = response.result;
+        if (!result || typeof result.ok !== 'boolean' || !Array.isArray(result.hits)) {
+            return { ok: false, hits: [], error: 'malformed index/retrieve result from supervisor.' };
+        }
+        return result;
+    }
+    /**
+     * BUILD (or rebuild) the workspace's LOCAL code index on demand (`index/build` — the
+     * no-CLI "Index Workspace" command). SYNCHRONOUS (request/result): the supervisor builds
+     * the on-device index for `params.workspaceRoot` (or rebuilds it) and returns the
+     * {@link IndexBuildResult} stats. `params.persist` opts into the 'workspace-encrypted'
+     * residency (a persisted, encrypted, workspace-local snapshot). Everything is LOCAL —
+     * nothing egresses code; no credential.
+     *
+     * STREAMING PROGRESS (the no-timeout fix): the build emits `index/progress`
+     * notifications as it runs. `opts.onProgress` (when supplied) receives each
+     * {@link IndexProgressEvent} so the command can drive a percent notification, and —
+     * critically — every event RESETS this request's inactivity timer, so a long but
+     * progressing build never times out. `opts.timeoutMs` sets the INACTIVITY BACKSTOP
+     * (default {@link DEFAULT_INDEX_BUILD_TIMEOUT_MS} = 30 min); the request resolves on
+     * the terminal {@link IndexBuildResult} as before.
+     *
+     * BEST-EFFORT / NON-FATAL: resolves (never rejects). On an unconnected bridge, a
+     * transport/server error, or a malformed result, this resolves to `{ ok:false, error }`
+     * so the command path renders an honest failure rather than throwing.
+     */
+    async indexBuild(params, opts) {
+        if (!this.ready || !this.child || this.closed) {
+            const error = this.closeReason || 'bridge is not connected (handshake not completed).';
+            return { ok: false, error };
+        }
+        // Mark THIS request as the in-flight index/build so handleLine can correlate the
+        // (id-less) index/progress notifications to it. nextId is the id request() will mint.
+        const buildId = this.nextId;
+        this.indexBuildPendingId = buildId;
+        try {
+            const response = await this.request(bridgeProtocol_1.BridgeMethod.IndexBuild, params, {
+                timeoutMs: opts?.timeoutMs ?? exports.DEFAULT_INDEX_BUILD_TIMEOUT_MS,
+                ...(opts?.onProgress ? { onProgress: opts.onProgress } : {}),
+            });
+            if (response.error) {
+                this.opts.log.appendLine(`[bridge] index/build error ${response.error.code}: ${response.error.message}`);
+                return { ok: false, error: response.error.message };
+            }
+            const result = response.result;
+            if (!result || typeof result.ok !== 'boolean') {
+                return { ok: false, error: 'malformed index/build result from supervisor.' };
+            }
+            return result;
+        }
+        finally {
+            // Clear the slot only if it still points at THIS build (a later build may have
+            // already claimed it — the command serializes builds, but be defensive).
+            if (this.indexBuildPendingId === buildId)
+                this.indexBuildPendingId = undefined;
+        }
     }
     /* ============================================================== *
      * GOVERNED TERMINAL SESSION RPC (M7 — the in-IDE Governed Terminal)
@@ -647,6 +807,28 @@ class SupervisorBridge {
                     this.onBuildEvent(note.params);
                 return;
             }
+            if (note.method === bridgeProtocol_1.BridgeNotification.IndexProgress) {
+                // Correlate to the single in-flight index/build: deliver to its per-request
+                // onProgress sink AND reset that request's inactivity timer, so a long but
+                // PROGRESSING build never times out. A stray progress with no in-flight build
+                // (or after it resolved) is harmlessly dropped.
+                const id = this.indexBuildPendingId;
+                if (id !== undefined) {
+                    const pending = this.pending.get(id);
+                    if (pending) {
+                        this.resetPendingTimer(id);
+                        if (pending.onProgress) {
+                            try {
+                                pending.onProgress(note.params);
+                            }
+                            catch {
+                                /* a throwing progress sink must never break the stream */
+                            }
+                        }
+                    }
+                }
+                return;
+            }
             if (this.onRunEvent)
                 this.onRunEvent(note.params);
             return;
@@ -654,8 +836,18 @@ class SupervisorBridge {
         // Anything else (a request FROM the server, a foreign envelope) is ignored:
         // the client does not accept server-initiated requests.
     }
-    /** Send a request and resolve with its response (never rejects). */
-    request(method, params) {
+    /**
+     * Send a request and resolve with its response (never rejects).
+     *
+     * STREAMING SUPPORT (index/build): an optional `opts.onProgress` registers a
+     * per-request sink for `index/progress` notifications correlated to THIS request
+     * (see {@link handleLine}); every such event ALSO resets the request's inactivity
+     * timer (re-armed for `opts.timeoutMs ?? this.requestTimeoutMs`), so a long but
+     * PROGRESSING build never times out — only a true stall does. `opts.timeoutMs`
+     * overrides the per-request timeout (the index/build backstop cap) without touching
+     * the global default that chat/run/model RPCs use.
+     */
+    request(method, params, opts) {
         return new Promise((resolve) => {
             if (this.closed || !this.child) {
                 resolve(this.errorResponse(0, bridgeProtocol_1.BridgeErrorCode.InvalidRequest, this.closeReason || 'bridge not connected'));
@@ -668,16 +860,23 @@ class SupervisorBridge {
                 method,
                 params,
             };
-            const timer = setTimeout(() => {
-                if (this.pending.delete(id)) {
-                    resolve(this.errorResponse(id, bridgeProtocol_1.BridgeErrorCode.InvalidRequest, `request "${method}" timed out after ${this.requestTimeoutMs}ms`));
-                }
-            }, this.requestTimeoutMs);
-            // Don't keep the event loop alive purely for a pending bridge request.
-            timer.unref?.();
+            const timeoutMs = opts?.timeoutMs ?? this.requestTimeoutMs;
+            const arm = () => {
+                const t = setTimeout(() => {
+                    if (this.pending.delete(id)) {
+                        resolve(this.errorResponse(id, bridgeProtocol_1.BridgeErrorCode.InvalidRequest, `request "${method}" timed out after ${timeoutMs}ms`));
+                    }
+                }, timeoutMs);
+                // Don't keep the event loop alive purely for a pending bridge request.
+                t.unref?.();
+                return t;
+            };
+            const timer = arm();
             this.pending.set(id, {
                 resolve: resolve,
                 timer,
+                timeoutMs,
+                ...(opts?.onProgress ? { onProgress: opts.onProgress } : {}),
             });
             try {
                 this.child.stdin?.write(`${JSON.stringify(envelope)}\n`);
@@ -689,6 +888,24 @@ class SupervisorBridge {
                 }
             }
         });
+    }
+    /**
+     * Reset the inactivity timer for a still-pending request (a progress event landed).
+     * Clears the old timer and re-arms a fresh one of the SAME length so a long but
+     * progressing streaming request (index/build) is kept alive by its own progress.
+     */
+    resetPendingTimer(id) {
+        const pending = this.pending.get(id);
+        if (!pending)
+            return;
+        clearTimeout(pending.timer);
+        const t = setTimeout(() => {
+            if (this.pending.delete(id)) {
+                pending.resolve(this.errorResponse(id, bridgeProtocol_1.BridgeErrorCode.InvalidRequest, `request timed out after ${pending.timeoutMs}ms of inactivity`));
+            }
+        }, pending.timeoutMs);
+        t.unref?.();
+        pending.timer = t;
     }
     /** Resolve every in-flight request with an error (used on close/process error). */
     failAllPending(message) {

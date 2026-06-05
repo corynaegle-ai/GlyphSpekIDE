@@ -61,14 +61,47 @@ var __importStar = (this && this.__importStar) || (function () {
 })();
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.CHAT_BACKEND_ID = void 0;
+exports.buildBridgeEnv = buildBridgeEnv;
 exports.createRunViaBridge = createRunViaBridge;
 exports.startRunViaBridge = startRunViaBridge;
 exports.startGovernedTerminalSession = startGovernedTerminalSession;
 exports.openChatSession = openChatSession;
 exports.runAgenticBuild = runAgenticBuild;
 const os = __importStar(require("node:os"));
+const fs = __importStar(require("node:fs"));
+const path = __importStar(require("node:path"));
 const bridge_1 = require("./bridge");
 const supervisorHash_1 = require("./supervisorHash");
+const runEventProtocol_1 = require("./runEventProtocol");
+/*
+ * M5 §14 — when a LIVE-STREAMING session's connect (spawn → hash-pin → handshake)
+ * REFUSES, the panel got NO distinct failure card (the run never opened, so no
+ * run/event ever streamed): a hash-mismatch / incompatible-version / handshake-auth
+ * refusal silently surfaced as just a `refused` outcome the command path reported in
+ * a toast. We now ALSO emit a distinct §14 `failure` run-event into the run-event
+ * sink so the Trust Panel renders the matching supervisor_hash_mismatch /
+ * incompatible_supervisor / bridge_auth_failure card — the same fail-closed,
+ * de-authoritated signal the host already emits for bridge_mismatch.
+ *
+ * The connect failed before the supervisor minted a runId, so we anchor the event to
+ * a STABLE synthetic id (a run that never opened); the webview's run-view keys on it
+ * fine and the card honestly represents the refused connect. `spawn-failed` maps to
+ * no distinct §14 state (bridgeConnectFailureEvent returns null) — it stays a generic
+ * refusal. Resolve-never-reject contract is preserved: a throwing sink is swallowed.
+ */
+function emitBridgeConnectFailure(onRunEvent, status, message, output) {
+    const event = (0, runEventProtocol_1.bridgeConnectFailureEvent)(BRIDGE_CONNECT_FAILURE_RUN_ID, status, message);
+    if (!event)
+        return; // spawn-failed / connected: no distinct §14 state.
+    try {
+        onRunEvent(event);
+    }
+    catch (err) {
+        output.appendLine(`[host] §14 connect-failure emission sink threw (ignored): ${String(err?.message ?? err)}`);
+    }
+}
+/** Stable synthetic run id for a connect that refused before a run was minted. */
+const BRIDGE_CONNECT_FAILURE_RUN_ID = 'bridge-connect-failure';
 /**
  * Environment-variable names forwarded into the bridge-server child WHEN PRESENT,
  * beyond the always-set ELECTRON_RUN_AS_NODE / PATH / HOME and the two
@@ -94,6 +127,19 @@ const FORWARDED_ENV_KEYS = [
 function buildBridgeEnv(opts) {
     const src = process.env;
     const runsBase = opts.runsBase ?? defaultRunsBase();
+    // The bridge-server child is spawned with cwd = runsBase (see the SupervisorBridge
+    // construction below). Node's child_process.spawn reports a MISLEADING
+    // `spawn <execPath> ENOENT` when the cwd directory does not exist — and resolveRunsBase()
+    // namespaces by workspace, so a freshly-opened project's runs dir has never been created.
+    // Create it HERE so EVERY bridge spawn site (chat, run, build) is covered, not just the
+    // call sites that remembered to mkdir. Best-effort: a genuine failure surfaces downstream
+    // as the spawn's own error rather than throwing out of env-building.
+    try {
+        fs.mkdirSync(runsBase, { recursive: true });
+    }
+    catch {
+        /* non-fatal: if the dir truly cannot be created, the spawn below reports it */
+    }
     const env = {
         ELECTRON_RUN_AS_NODE: '1',
         GLYPHSPEK_RUNS_BASE: runsBase,
@@ -117,7 +163,7 @@ function buildBridgeEnv(opts) {
 }
 /** The $HOME-based default runs base (mirrors extension.ts resolveRunsBase). */
 function defaultRunsBase() {
-    return `${os.homedir()}/.glyphspek/runs`;
+    return path.join(os.homedir(), '.glyphspek', 'runs');
 }
 /**
  * Spawn the packaged bridge-server, connect (spawn + hash-pin + handshake), create
@@ -239,6 +285,10 @@ async function startRunViaBridge(opts) {
     try {
         const connect = await bridge.connect();
         if (connect.status !== 'connected') {
+            // M5 §14 — surface the refusal as a DISTINCT failure card (hash-mismatch /
+            // incompatible-supervisor / bridge-auth-failure) so the panel de-authoritates
+            // it, not just a silent `refused` outcome.
+            emitBridgeConnectFailure(opts.onRunEvent, connect.status, connect.message, output);
             disposeOnce();
             return {
                 connected: false,
@@ -338,6 +388,9 @@ async function startGovernedTerminalSession(opts) {
     try {
         const connect = await bridge.connect();
         if (connect.status !== 'connected') {
+            // M5 §14 — surface the refusal as a DISTINCT failure card before the session
+            // collapses to a `refused` outcome.
+            emitBridgeConnectFailure(opts.onRunEvent, connect.status, connect.message, output);
             disposeOnce();
             return {
                 started: false,
@@ -432,6 +485,11 @@ async function openChatSession(opts) {
         env,
         cwd: env.GLYPHSPEK_RUNS_BASE,
         extensionVersion: opts.extensionVersion,
+        // Bind the supervisor's index/retrieve to THIS session's workspace via the trusted
+        // handshake channel (when a workspace folder is open).
+        ...(typeof opts.workspaceRoot === 'string' && opts.workspaceRoot.trim().length > 0
+            ? { workspaceRoot: opts.workspaceRoot.trim() }
+            : {}),
         log: output,
         spawn: opts.spawn ?? bridge_1.defaultBridgeSpawn,
         ...(opts.requestTimeoutMs !== undefined ? { requestTimeoutMs: opts.requestTimeoutMs } : {}),
@@ -532,6 +590,36 @@ async function openChatSession(opts) {
                 // the queue. (runOneTurn resolves-never-rejects, but be defensive.)
                 turnQueue = result.then(() => undefined, () => undefined);
                 return result;
+            },
+            // Repo-aware retrieval (@Codebase). Delegates straight to the bridge client, which
+            // resolves-never-rejects (best-effort): a disposed/failed session yields
+            // { ok:false, hits:[] } so the chat handler degrades to NO repo context.
+            indexRetrieve(params) {
+                if (disposed) {
+                    return Promise.resolve({ ok: false, hits: [], error: 'chat session is closed.' });
+                }
+                return bridge.indexRetrieve(params);
+            },
+            webFetch(params) {
+                if (disposed) {
+                    return Promise.resolve({
+                        ok: false,
+                        originalUrl: params.url,
+                        marker: '[@Web: fetch failed — no active governed session]',
+                        reason: 'chat session is closed.',
+                    });
+                }
+                return bridge.webFetch(params);
+            },
+            // On-demand index build/rebuild (the "Index Workspace" command). Same best-effort
+            // posture: a disposed/failed session yields { ok:false } so the command never throws.
+            // Forwards onProgress/timeoutMs so the build STREAMS progress (the percent + the
+            // reset-on-progress that keeps a long build's request alive).
+            indexBuild(params, opts) {
+                if (disposed) {
+                    return Promise.resolve({ ok: false, error: 'chat session is closed.' });
+                }
+                return bridge.indexBuild(params, opts);
             },
             dispose: disposeOnce,
         };
