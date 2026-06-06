@@ -39,9 +39,12 @@ import { TerminalLocation } from '../../../../platform/terminal/common/terminal.
 import {
 	decideAnchorVisibility,
 	computeFloatingTerminalDims,
+	clampFloatingDims,
+	clampDragOffset,
 	FLOATING_TERMINAL_DIMS,
 	FloatingTerminalController as FloatingTerminalStateMachine,
 	type FloatingDimension,
+	type FloatingRect,
 	type FloatingTerminalControllerDeps,
 	type GovernedStartResult as PureGovernedStartResult,
 	type HostedTerminalLike,
@@ -66,10 +69,19 @@ export class FloatingTerminalWidget extends Disposable implements IContentWidget
 	private anchorLine: number;
 	private shown = false;
 
+	// User-applied move/resize state. userOffset is a px translate over the editor-anchored
+	// base position (drag); userDims overrides the computed size (resize). A single
+	// MutableDisposable holds the in-flight drag/resize gesture's window listeners so they
+	// are torn down on mouseup OR widget dispose (no leak, no double-gesture).
+	private readonly userOffset = { x: 0, y: 0 };
+	private userDims: FloatingDimension | undefined;
+	private readonly activeGesture = this._register(new MutableDisposable<DisposableStore>());
+
 	constructor(
 		private readonly editor: ICodeEditor,
 		private readonly onDescribeCommand: () => void,
 		private readonly onDismiss: () => void,
+		private readonly onResize: (dims: FloatingDimension) => void,
 	) {
 		super();
 
@@ -104,10 +116,31 @@ export class FloatingTerminalWidget extends Disposable implements IContentWidget
 		this._register(toDisposable(() => describe.removeEventListener('click', onDescribe)));
 		header.appendChild(describe);
 
+		// Close affordance — a real (keyboard-reachable) icon button that dismisses the
+		// terminal via the SAME path as Esc (E2/AD5: every teardown finalizes via stopSession).
+		const close = document.createElement('button');
+		close.classList.add('glyphspek-floating-terminal-close', ...ThemeIcon.asClassNameArray(Codicon.close));
+		close.setAttribute('aria-label', localize('glyphspek.floatingTerminal.close.aria', "Close Governed Terminal"));
+		close.title = localize('glyphspek.floatingTerminal.close.title', "Close (Esc)");
+		const onClose = () => this.onDismiss();
+		close.addEventListener('click', onClose);
+		this._register(toDisposable(() => close.removeEventListener('click', onClose)));
+		header.appendChild(close);
+
 		this.terminalHost.classList.add('glyphspek-floating-terminal-host');
 
 		this.domNode.appendChild(header);
 		this.domNode.appendChild(this.terminalHost);
+
+		// Resizeable — a bottom-right corner grip drags the box to a clamped size.
+		const grip = document.createElement('div');
+		grip.classList.add('glyphspek-floating-terminal-resize');
+		grip.setAttribute('aria-hidden', 'true');
+		this.domNode.appendChild(grip);
+
+		// Moveable — the header is the drag handle (its buttons keep their own clicks).
+		this.installDrag(header);
+		this.installResize(grip);
 
 		// ACC4/E2 — Esc dismisses; do NOT swallow other keys (no focus trap). Tab/editor
 		// chords pass through (xterm's attachCustomKeyEventHandler lets editor chords out).
@@ -125,6 +158,104 @@ export class FloatingTerminalWidget extends Disposable implements IContentWidget
 	/** The element the hosted terminal canvas mounts into (after the widget is DOM-connected). */
 	get hostElement(): HTMLElement {
 		return this.terminalHost;
+	}
+
+	/** Apply the current user drag offset as a translate over the editor-anchored position. */
+	private applyOffset(): void {
+		this.domNode.style.transform = `translate(${this.userOffset.x}px, ${this.userOffset.y}px)`;
+	}
+
+	/** Apply the current user-resized dimensions to the chrome (the terminal canvas follows). */
+	private applyDims(): void {
+		if (!this.userDims) {
+			return;
+		}
+		this.domNode.style.width = `${this.userDims.width}px`;
+		this.domNode.style.height = `${this.userDims.height}px`;
+	}
+
+	/** The editor content area, in viewport px (the bounds a drag must stay within). */
+	private editorBounds(): FloatingRect {
+		const ed = this.editor.getDomNode();
+		if (ed) {
+			const r = ed.getBoundingClientRect();
+			return { left: r.left, top: r.top, width: r.width, height: r.height };
+		}
+		return { left: 0, top: 0, width: Number.MAX_SAFE_INTEGER, height: Number.MAX_SAFE_INTEGER };
+	}
+
+	/** The largest the box may grow to (the editor content area). */
+	private maxDims(): FloatingDimension {
+		const layout = this.editor.getLayoutInfo();
+		return { width: layout.contentWidth, height: layout.height };
+	}
+
+	/** Move — dragging the header applies a CLAMPED px offset over the anchored position. */
+	private installDrag(handle: HTMLElement): void {
+		const onDown = (e: MouseEvent) => {
+			// Left-button only, and never start a drag from an interactive child (the
+			// Describe / Close buttons keep their own click behavior).
+			if (e.button !== 0 || (e.target instanceof HTMLElement && e.target.closest('button'))) {
+				return;
+			}
+			e.preventDefault();
+			const targetWindow = getWindow(this.domNode);
+			const startX = e.clientX, startY = e.clientY;
+			const startOffset = { ...this.userOffset };
+			const rect = this.domNode.getBoundingClientRect();
+			// The editor-placed base rect = current rect MINUS the current user offset.
+			const base: FloatingRect = { left: rect.left - this.userOffset.x, top: rect.top - this.userOffset.y, width: rect.width, height: rect.height };
+			const bounds = this.editorBounds();
+			const gesture = new DisposableStore();
+			this.activeGesture.value = gesture;
+			const onMove = (ev: MouseEvent) => {
+				const proposed = { x: startOffset.x + (ev.clientX - startX), y: startOffset.y + (ev.clientY - startY) };
+				const clamped = clampDragOffset({ proposed, base, bounds });
+				this.userOffset.x = clamped.x;
+				this.userOffset.y = clamped.y;
+				this.applyOffset();
+			};
+			const onUp = () => this.activeGesture.clear();
+			targetWindow.addEventListener('mousemove', onMove);
+			targetWindow.addEventListener('mouseup', onUp);
+			gesture.add(toDisposable(() => {
+				targetWindow.removeEventListener('mousemove', onMove);
+				targetWindow.removeEventListener('mouseup', onUp);
+			}));
+		};
+		handle.addEventListener('mousedown', onDown);
+		this._register(toDisposable(() => handle.removeEventListener('mousedown', onDown)));
+	}
+
+	/** Resize — dragging the corner grip sets a CLAMPED size and re-lays out the terminal. */
+	private installResize(grip: HTMLElement): void {
+		const onDown = (e: MouseEvent) => {
+			if (e.button !== 0) {
+				return;
+			}
+			e.preventDefault();
+			e.stopPropagation(); // do not also begin a drag / focus the terminal.
+			const targetWindow = getWindow(this.domNode);
+			const startX = e.clientX, startY = e.clientY;
+			const startDims = this.computeDims();
+			const gesture = new DisposableStore();
+			this.activeGesture.value = gesture;
+			const onMove = (ev: MouseEvent) => {
+				const proposed: FloatingDimension = { width: startDims.width + (ev.clientX - startX), height: startDims.height + (ev.clientY - startY) };
+				this.userDims = clampFloatingDims(proposed, this.maxDims());
+				this.applyDims();
+				this.onResize(this.userDims); // re-layout the live terminal to the new size.
+			};
+			const onUp = () => this.activeGesture.clear();
+			targetWindow.addEventListener('mousemove', onMove);
+			targetWindow.addEventListener('mouseup', onUp);
+			gesture.add(toDisposable(() => {
+				targetWindow.removeEventListener('mousemove', onMove);
+				targetWindow.removeEventListener('mouseup', onUp);
+			}));
+		};
+		grip.addEventListener('mousedown', onDown);
+		this._register(toDisposable(() => grip.removeEventListener('mousedown', onDown)));
 	}
 
 	/** Update the green/governed badge → degraded (G7): drop the claim of being governed. */
@@ -178,6 +309,7 @@ export class FloatingTerminalWidget extends Disposable implements IContentWidget
 		}
 		this.shown = true;
 		this.editor.addContentWidget(this);
+		this.editor.layoutContentWidget(this);
 		this.editor.render(true);
 	}
 
@@ -204,6 +336,8 @@ export class FloatingTerminalWidget extends Disposable implements IContentWidget
 					resolve();
 					return;
 				}
+				// Nudge the editor to commit + position the content widget each frame.
+				this.editor.layoutContentWidget(this);
 				frame.value = scheduleAtNextAnimationFrame(targetWindow, tick);
 			};
 			frame.value = scheduleAtNextAnimationFrame(targetWindow, tick);
@@ -218,9 +352,13 @@ export class FloatingTerminalWidget extends Disposable implements IContentWidget
 		this.editor.removeContentWidget(this);
 	}
 
-	/** Compute the floating dims from the editor layout + rows (pure C3/E24). */
+	/** Compute the floating dims (pure C3/E24). A user-resized size (userDims) wins, re-clamped
+	 * to the current editor bounds so it never exceeds a shrunken editor. */
 	computeDims(rows = DEFAULT_ROWS): FloatingDimension {
 		const layout = this.editor.getLayoutInfo();
+		if (this.userDims) {
+			return clampFloatingDims(this.userDims, { width: layout.contentWidth, height: layout.height });
+		}
 		return computeFloatingTerminalDims({ contentWidth: layout.contentWidth, height: layout.height }, rows, FLOATING_TERMINAL_DIMS);
 	}
 
@@ -318,6 +456,7 @@ export class FloatingTerminalController extends Disposable {
 			this.editor,
 			() => void this.describeCommand(),
 			() => void this.dispose(),
+			(dims) => this.terminal?.layout(new Dimension(dims.width, dims.height)),
 		);
 		this.widget = widget;
 		this.sessionDisposables.add(widget);

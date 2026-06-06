@@ -37,6 +37,9 @@
 	padding: 4px 8px;
 	background-color: var(--vscode-editorWidget-background);
 	border-bottom: 1px solid var(--vscode-editorWidget-border);
+	/* Drag handle: the header moves the floating terminal. */
+	cursor: move;
+	user-select: none;
 }
 
 .glyphspek-floating-terminal-shield {
@@ -72,7 +75,39 @@
 	outline-offset: 1px;
 }
 
+.glyphspek-floating-terminal-close {
+	display: flex;
+	align-items: center;
+	justify-content: center;
+	border: 1px solid var(--vscode-button-border, transparent);
+	background-color: transparent;
+	color: var(--vscode-icon-foreground);
+	border-radius: 2px;
+	padding: 2px 4px;
+	cursor: pointer;
+}
+
+.glyphspek-floating-terminal-close:hover {
+	background-color: var(--vscode-toolbar-hoverBackground);
+}
+
+.glyphspek-floating-terminal-close:focus {
+	outline: 1px solid var(--vscode-focusBorder);
+	outline-offset: 1px;
+}
+
 .glyphspek-floating-terminal-host {
 	flex: 1;
 	min-height: 160px;
+}
+
+/* Resize grip — bottom-right corner; a subtle diagonal wedge (theme token, no hex). */
+.glyphspek-floating-terminal-resize {
+	position: absolute;
+	right: 0;
+	bottom: 0;
+	width: 14px;
+	height: 14px;
+	cursor: nwse-resize;
+	background: linear-gradient(135deg, transparent 50%, var(--vscode-editorWidget-border) 50%);
 }

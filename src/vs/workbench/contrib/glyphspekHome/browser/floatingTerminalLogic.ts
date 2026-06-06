@@ -102,6 +102,55 @@ export function computeFloatingTerminalDims(
 	return { width, height };
 }
 
+/**
+ * C6 (PURE) — clamp a USER-resized dimension to [min, editor-bounded max] on each axis. The
+ * grip can never shrink the box below a usable minimum nor grow it past the editor content
+ * area. Never throws.
+ */
+export function clampFloatingDims(
+	desired: FloatingDimension,
+	max: FloatingDimension,
+	tuning: typeof FLOATING_TERMINAL_DIMS = FLOATING_TERMINAL_DIMS,
+): FloatingDimension {
+	const width = Math.max(tuning.minWidthPx, Math.min(desired.width, Math.max(max.width, tuning.minWidthPx)));
+	const height = Math.max(tuning.minHeightPx, Math.min(desired.height, Math.max(max.height, tuning.minHeightPx)));
+	return { width, height };
+}
+
+/** A rectangle in px (a dragged box, or the bounds it must stay within). */
+export interface FloatingRect {
+	left: number;
+	top: number;
+	width: number;
+	height: number;
+}
+
+/** Inputs to {@link clampDragOffset}. */
+export interface DragClampInput {
+	/** The proposed user offset (px) from the editor-placed base position. */
+	proposed: { x: number; y: number };
+	/** The widget's editor-placed base rect, BEFORE the user offset is applied. */
+	base: FloatingRect;
+	/** The bounds the widget must remain within (e.g. the editor content area). */
+	bounds: FloatingRect;
+}
+
+/**
+ * C5 (PURE) — clamp a drag offset so the dragged widget stays fully within `bounds`. Returns
+ * the adjusted offset (relative to base); if the widget is larger than the bounds on an axis
+ * it pins to the bounds' start on that axis. Never throws.
+ */
+export function clampDragOffset(input: DragClampInput): { x: number; y: number } {
+	const { proposed, base, bounds } = input;
+	const minLeft = bounds.left;
+	const maxLeft = bounds.left + Math.max(0, bounds.width - base.width);
+	const minTop = bounds.top;
+	const maxTop = bounds.top + Math.max(0, bounds.height - base.height);
+	const clampedLeft = Math.min(Math.max(base.left + proposed.x, minLeft), maxLeft);
+	const clampedTop = Math.min(Math.max(base.top + proposed.y, minTop), maxTop);
+	return { x: clampedLeft - base.left, y: clampedTop - base.top };
+}
+
 /* ---------------------------------------------------------------- *
  * D2 / D3 / D5 / E9 — NL-generate sanitize (reused for the fold-in)
  * ---------------------------------------------------------------- */

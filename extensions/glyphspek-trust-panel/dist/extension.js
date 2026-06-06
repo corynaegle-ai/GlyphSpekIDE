@@ -4251,16 +4251,24 @@ async function startGovernedFloatingTerminalSession(context, output) {
     if (!request) {
         return { ok: false, message: 'GlyphSpek: could not resolve a governed-terminal policy/cwd.' };
     }
-    // Open + reveal the Trust Panel FIRST so the live run/event stream renders (B2/B3).
-    const panel = TrustPanel.createOrShow(context.extensionUri, getWebviewGestureGate());
-    panel.reveal();
+    // ANCHOR-SAFE (do NOT reveal the Trust Panel here). The floating terminal anchors to the
+    // ACTIVE code editor; TrustPanel.createOrShow + reveal both target
+    // activeTextEditor.viewColumn, so opening/revealing the webview makes it the active tab IN
+    // THE ANCHOR EDITOR'S COLUMN — hiding that editor and clearing its model. The fork then
+    // attaches the terminal to a content widget whose host is no longer in the DOM, and
+    // TerminalInstance._open() throws "A container element needs to be set with attachToElement
+    // and be part of the DOM" (the "failed to attach" bug). So route live run events to the
+    // Trust Panel ONLY if the operator already has it open (read-only peek — never creates,
+    // never reveals, never steals the column). The run is fully traced regardless; the Trust
+    // Panel is just a viewer the user can open separately.
+    const panel = TrustPanel.peekCurrent();
     const start = await (0, supervisorBridgeRunner_1.startGovernedTerminalSession)({
         bridgeServerPath: resolveBundledBridgeServerPath(context),
         extensionVersion: resolveExtensionVersion(context),
         runsBase: resolveRunsBase(),
         request,
         output,
-        onRunEvent: withAmbientDevModePosture(context, (raw) => panel.postRunEvent(raw)),
+        onRunEvent: withAmbientDevModePosture(context, (raw) => panel?.postRunEvent(raw)),
     });
     // REFUSE-NOT-DEGRADE: a failed/partial handshake returns NO env/proxy. The fork must
     // open NO terminal (never an ungoverned shell in the floating window).
