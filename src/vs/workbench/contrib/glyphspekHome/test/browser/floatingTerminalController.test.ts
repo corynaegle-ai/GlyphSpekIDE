@@ -92,6 +92,28 @@ suite('GlyphSpek Floating Terminal — controller state machine (T-SESSION)', ()
 		assert.ok(rec.calls.includes('focus'));
 	});
 
+	test('C0 regression — attach WAITS for an ASYNC connectWidget (render-pass DOM commit)', async () => {
+		// Repro of the "governed terminal failed to attach: A container element needs to be
+		// set with attachToElement and be part of the DOM before calling _open" bug. The
+		// editor commits a freshly-added content widget to the DOM on a render pass that
+		// LAGS addContentWidget, so connectWidget resolves ASYNCHRONOUSLY. The machine MUST
+		// await it before attaching, else TerminalInstance._open() throws on a host that is
+		// not yet connected. (Pre-fix the machine called connectWidget() without awaiting →
+		// attach ran while the promise was still pending → throw.)
+		const rec = newRec();
+		const deps = makeDeps({ rec });
+		deps.connectWidget = async () => {
+			rec.calls.push('connectWidget:start');
+			await Promise.resolve(); // a microtask — stands in for the deferred render-pass commit.
+			rec.calls.push('connectWidget:done');
+		};
+		const c = new FloatingTerminalController(deps, DIMS);
+		const state = await c.start();
+		assert.strictEqual(state, 'live');
+		assert.ok(rec.calls.indexOf('connectWidget:done') < rec.calls.indexOf('attach'),
+			'attach happens ONLY AFTER the async connectWidget resolves (the host is in the DOM)');
+	});
+
 	test('AD3/G1 — a refused start shows an honest error and opens NO terminal', async () => {
 		const rec = newRec();
 		const c = new FloatingTerminalController(makeDeps({ rec, start: async () => ({ ok: false, message: 'no governance' }) }), DIMS);

@@ -185,8 +185,10 @@ export interface FloatingTerminalControllerDeps {
 	registerOwned(runId: string): void;
 	/** Create + host the terminal AFTER the container is DOM-connected (C0); sets strictEnv+env VERBATIM (B1a). */
 	createHostedTerminal(start: GovernedStartResult): HostedTerminalLike;
-	/** Add the content widget to the editor (DOM-connect) — MUST happen before attach (C0). */
-	connectWidget(): void;
+	/** Add the content widget to the editor and WAIT until its host is DOM-connected — MUST
+	 * complete before attach (C0); may be async because the editor commits a freshly-added
+	 * content widget to the DOM on a render pass. */
+	connectWidget(): void | Promise<void>;
 	/** Remove the content widget + tear down DOM/listeners (always runs on dispose). */
 	removeWidget(): void;
 	/** Subscribe to the ext-host mid-session governance-loss signal (supervisor child/proxy death → G7/E18). */
@@ -266,7 +268,7 @@ export class FloatingTerminalController {
 		}
 
 		try {
-			this.deps.connectWidget(); // C0: DOM-connect BEFORE attach.
+			await this.deps.connectWidget(); // C0: DOM-connect (await render-pass commit) BEFORE attach.
 			const terminal = this.deps.createHostedTerminal(start);
 			this.terminal = terminal;
 			terminal.attachToElement(undefined);

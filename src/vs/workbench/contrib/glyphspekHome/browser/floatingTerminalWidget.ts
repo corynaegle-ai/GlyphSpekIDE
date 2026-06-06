@@ -26,9 +26,9 @@
  *    BEFORE attachToElement/setVisible (else _open() throws).
  */
 
-import { Dimension } from '../../../../base/browser/dom.js';
+import { Dimension, getWindow, scheduleAtNextAnimationFrame } from '../../../../base/browser/dom.js';
 import { Codicon } from '../../../../base/common/codicons.js';
-import { Disposable, DisposableStore, toDisposable } from '../../../../base/common/lifecycle.js';
+import { Disposable, DisposableStore, MutableDisposable, toDisposable } from '../../../../base/common/lifecycle.js';
 import { ThemeIcon } from '../../../../base/common/themables.js';
 import { localize } from '../../../../nls.js';
 import { ICommandService } from '../../../../platform/commands/common/commands.js';
@@ -166,13 +166,48 @@ export class FloatingTerminalWidget extends Disposable implements IContentWidget
 		};
 	}
 
-	/** C0 — add the widget to the editor (DOM-connect) BEFORE the terminal is attached. */
+	/** C0 — add the widget to the editor BEFORE the terminal is attached. addContentWidget
+	 * only REGISTERS the widget; the editor commits it to the DOM on its next render pass,
+	 * so force a synchronous render here to push the host element into the document. Any
+	 * residual async commit is covered by {@link whenHostConnected} (the controller awaits
+	 * it before attaching — else TerminalInstance._open() throws "container ... part of the
+	 * DOM"). */
 	show(): void {
 		if (this.shown) {
 			return;
 		}
 		this.shown = true;
 		this.editor.addContentWidget(this);
+		this.editor.render(true);
+	}
+
+	/**
+	 * C0 — resolve once the terminal host element is actually connected to the document.
+	 * A freshly-added content widget is committed to the DOM on a render pass that can lag
+	 * the synchronous addContentWidget/render call; the governed terminal must NOT attach
+	 * before then, because TerminalInstance._open() throws if its container is not in the
+	 * DOM (the "failed to attach" path). Bounded: after maxFrames it resolves anyway so a
+	 * genuinely un-anchorable host fails honestly downstream (refuse-not-degrade) rather
+	 * than hanging.
+	 */
+	whenHostConnected(maxFrames = 20): Promise<void> {
+		if (this.terminalHost.isConnected) {
+			return Promise.resolve();
+		}
+		const targetWindow = getWindow(this.domNode);
+		const frame = this._register(new MutableDisposable());
+		return new Promise<void>(resolve => {
+			let frames = 0;
+			const tick = () => {
+				if (this.terminalHost.isConnected || frames++ >= maxFrames) {
+					frame.clear();
+					resolve();
+					return;
+				}
+				frame.value = scheduleAtNextAnimationFrame(targetWindow, tick);
+			};
+			frame.value = scheduleAtNextAnimationFrame(targetWindow, tick);
+		});
 	}
 
 	hide(): void {
@@ -312,7 +347,12 @@ export class FloatingTerminalController extends Disposable {
 				this.liveRunId = runId; // remember so the contribution can route governanceLost(runId).
 				void this.commandService.executeCommand('glyphspek.governedTerminal.registerOwned', runId);
 			},
-			connectWidget: () => widget.show(), // C0 — addContentWidget → host element DOM-connected.
+			connectWidget: async () => {
+				// C0 — register + force-render the widget, then WAIT until the host is truly in
+				// the DOM before the machine attaches the terminal (else _open() throws).
+				widget.show();
+				await widget.whenHostConnected();
+			},
 			removeWidget: () => {
 				const finish = () => {
 					if (this.degradedTimer) {
