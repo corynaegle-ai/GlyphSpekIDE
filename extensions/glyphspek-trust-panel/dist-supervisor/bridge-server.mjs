@@ -5873,6 +5873,8 @@ var WEB_DEFAULT_MAX_FETCH_KB = 2048;
 var WEB_DEFAULT_MAX_CONTEXT_KB = 50;
 var WEB_DEFAULT_TIMEOUT_MS = 1e4;
 var WEB_DEFAULT_MAX_REDIRECTS = 5;
+var WEB_DEFAULT_IDLE_TIMEOUT_MS = 5e3;
+var WEB_DEFAULT_MAX_DECOMPRESSION_RATIO = 8;
 function marker(reason) {
   return `[@Web: ${reason}]`;
 }
@@ -5926,15 +5928,25 @@ function inRange(n, base, bits) {
   const mask = bits === 0 ? 0 : 4294967295 << 32 - bits >>> 0;
   return (n & mask) === (b & mask);
 }
+function uint32ToDottedQuad(n) {
+  return `${n >>> 24 & 255}.${n >>> 16 & 255}.${n >>> 8 & 255}.${n & 255}`;
+}
 function normalizeIpLiteral(host) {
   const h = host.replace(/^\[/, "").replace(/\]$/, "").toLowerCase();
-  if (/^0x[0-9a-f]+$/i.test(h)) {
+  if (/^0x[0-9a-f]+$/.test(h)) {
     const n = Number.parseInt(h.slice(2), 16);
-    if (Number.isFinite(n)) return `${n >>> 24 & 255}.${n >>> 16 & 255}.${n >>> 8 & 255}.${n & 255}`;
+    if (Number.isInteger(n) && n >= 0 && n <= 4294967295) return uint32ToDottedQuad(n);
+    return h;
   }
-  if (/^[0-9]+$/.test(h)) {
+  if (/^0[0-7]+$/.test(h)) {
+    const n = Number.parseInt(h, 8);
+    if (Number.isInteger(n) && n >= 0 && n <= 4294967295) return uint32ToDottedQuad(n);
+    return h;
+  }
+  if (/^[1-9][0-9]*$/.test(h) || h === "0") {
     const n = Number(h);
-    if (Number.isFinite(n)) return `${n >>> 24 & 255}.${n >>> 16 & 255}.${n >>> 8 & 255}.${n & 255}`;
+    if (Number.isInteger(n) && n >= 0 && n <= 4294967295) return uint32ToDottedQuad(n);
+    return h;
   }
   if (/^0[0-7.]+$/.test(h) && h.includes(".")) {
     const parts = h.split(".").map((p) => Number.parseInt(p || "0", 8));
@@ -5992,12 +6004,43 @@ function decodeBody(body, encoding) {
   if (enc.includes("deflate")) return inflateSync(body);
   return body;
 }
+function resolveCharset(body, contentType, isHtml) {
+  const fromHeader = /charset\s*=\s*"?([\w:.+-]+)"?/i.exec(contentType)?.[1];
+  if (fromHeader) return fromHeader.trim().toLowerCase();
+  if (isHtml) {
+    const head = body.subarray(0, 1024).toString("latin1");
+    const meta = /<meta[^>]+charset\s*=\s*["']?\s*([\w:.+-]+)/i.exec(head)?.[1] ?? /<meta[^>]+content\s*=\s*["'][^"']*charset\s*=\s*([\w:.+-]+)/i.exec(head)?.[1];
+    if (meta) return meta.trim().toLowerCase();
+  }
+  return "utf-8";
+}
+function decodeCharset(body, charset) {
+  const cs = charset.replace(/[^a-z0-9]/g, "");
+  if (cs === "utf8" || cs === "utf" || cs === "") {
+    const text = body.toString("utf8");
+    if (Buffer.byteLength(text, "utf8") !== body.byteLength && text.includes("\uFFFD")) {
+      return void 0;
+    }
+    return text;
+  }
+  try {
+    return new TextDecoder(charset, { fatal: true }).decode(body);
+  } catch {
+    return void 0;
+  }
+}
 function extractText(body, contentType) {
   const type = contentType.split(";")[0].trim().toLowerCase();
   if (type && !type.startsWith("text/html") && !type.startsWith("text/plain") && !type.startsWith("text/markdown") && type !== "application/json" && !type.endsWith("+json")) {
     return { unsupported: true, boilerplateStripped: false };
   }
-  let raw = body.toString("utf8");
+  const isHtml = type.startsWith("text/html");
+  const charset = resolveCharset(body, contentType, isHtml);
+  const decoded = decodeCharset(body, charset);
+  if (decoded === void 0) {
+    return { unsupported: true, boilerplateStripped: false };
+  }
+  let raw = decoded;
   if (type.startsWith("text/html")) {
     raw = raw.replace(/<script\b[^>]*>[\s\S]*?<\/script>/gi, " ").replace(/<style\b[^>]*>[\s\S]*?<\/style>/gi, " ").replace(/<!--[\s\S]*?-->/g, " ").replace(/<[^>]+>/g, " ").replace(/&nbsp;/g, " ").replace(/&amp;/g, "&").replace(/&lt;/g, "<").replace(/&gt;/g, ">").replace(/&quot;/g, '"');
     return { text: raw.replace(/\s+/g, " ").trim(), boilerplateStripped: true };
@@ -6011,7 +6054,7 @@ function proxyPort(proxy) {
 function authorityHost(host) {
   return isIP(host) === 6 ? `[${host}]` : host;
 }
-function connectHttpsThroughProxy(proxy, target, resolvedAddress, timeoutMs) {
+function connectHttpsThroughProxy(proxy, target, resolvedAddress, timeoutMs, idleTimeoutMs, recordConnect) {
   return new Promise((resolve5, reject) => {
     const raw = netConnect2({
       host: proxy.hostname,
@@ -6021,6 +6064,7 @@ function connectHttpsThroughProxy(proxy, target, resolvedAddress, timeoutMs) {
     let buffered = Buffer.alloc(0);
     const targetAuthority = `${authorityHost(resolvedAddress)}:${Number(target.port || 443)}`;
     const hostAuthority = `${target.hostname}:${Number(target.port || 443)}`;
+    recordConnect?.({ host: resolvedAddress, port: Number(target.port || 443), servername: target.hostname });
     const fail2 = (err) => {
       if (settled) return;
       settled = true;
@@ -6077,15 +6121,26 @@ function connectHttpsThroughProxy(proxy, target, resolvedAddress, timeoutMs) {
     });
     raw.once("timeout", () => fail2(new Error(`timed out after ${Math.round(timeoutMs / 1e3)}s`)));
     raw.once("error", fail2);
-    raw.setTimeout(timeoutMs);
+    raw.setTimeout(Math.min(idleTimeoutMs, timeoutMs));
   });
 }
-function runRequest(client, options, maxBytes) {
+function runRequest(client, options, maxBytes, idleTimeoutMs) {
   return new Promise((resolve5, reject) => {
+    const idleSecs = Math.round(idleTimeoutMs / 1e3);
     const req = client(options, (res) => {
       const chunks = [];
       let bytes = 0;
+      const armIdle = () => {
+        if (typeof res.setTimeout === "function") {
+          res.setTimeout(
+            idleTimeoutMs,
+            () => req.destroy(new Error(`timed out after ${idleSecs}s`))
+          );
+        }
+      };
+      armIdle();
       res.on("data", (chunk) => {
+        armIdle();
         bytes += chunk.length;
         if (bytes > maxBytes) {
           req.destroy(new Error(`response exceeded maxFetchKB`));
@@ -6101,11 +6156,12 @@ function runRequest(client, options, maxBytes) {
       }));
     });
     req.on("timeout", () => req.destroy(new Error(`timed out after ${Math.round(Number(options.timeout ?? 0) / 1e3)}s`)));
+    req.setTimeout(Math.min(idleTimeoutMs, Number(options.timeout ?? idleTimeoutMs)));
     req.on("error", reject);
     req.end();
   });
 }
-function proxyRequest(proxy, target, resolvedAddress, timeoutMs, maxBytes) {
+function proxyRequest(proxy, target, resolvedAddress, o) {
   const headers = {
     Host: target.host,
     Accept: "text/html,text/plain,text/markdown,application/json;q=0.9,*/*;q=0.1",
@@ -6113,7 +6169,7 @@ function proxyRequest(proxy, target, resolvedAddress, timeoutMs, maxBytes) {
     "User-Agent": "GlyphSpek-WebContext/1"
   };
   if (target.protocol === "https:") {
-    return connectHttpsThroughProxy(proxy, target, resolvedAddress, timeoutMs).then((tlsSocket) => runRequest(
+    return connectHttpsThroughProxy(proxy, target, resolvedAddress, o.timeoutMs, o.idleTimeoutMs, o.recordConnect).then((tlsSocket) => runRequest(
       httpsRequest,
       {
         protocol: "https:",
@@ -6122,12 +6178,14 @@ function proxyRequest(proxy, target, resolvedAddress, timeoutMs, maxBytes) {
         path: `${target.pathname}${target.search}`,
         method: "GET",
         headers,
-        timeout: timeoutMs,
+        timeout: o.timeoutMs,
         createConnection: () => tlsSocket
       },
-      maxBytes
+      o.maxBytes,
+      o.idleTimeoutMs
     ));
   }
+  o.recordConnect?.({ host: resolvedAddress, port: Number(target.port || 80), servername: target.hostname });
   return runRequest(
     httpRequest2,
     {
@@ -6137,9 +6195,10 @@ function proxyRequest(proxy, target, resolvedAddress, timeoutMs, maxBytes) {
       path: `http://${authorityHost(resolvedAddress)}:${Number(target.port || 80)}${target.pathname}${target.search}`,
       method: "GET",
       headers,
-      timeout: timeoutMs
+      timeout: o.timeoutMs
     },
-    maxBytes
+    o.maxBytes,
+    o.idleTimeoutMs
   );
 }
 async function governedWebFetch(opts) {
@@ -6148,10 +6207,15 @@ async function governedWebFetch(opts) {
   const maxFetchBytes = safeInt(opts.maxFetchKB, WEB_DEFAULT_MAX_FETCH_KB, 1, 16384) * 1024;
   const maxContextBytes = safeInt(opts.maxContextKB, WEB_DEFAULT_MAX_CONTEXT_KB, 1, 1024) * 1024;
   const timeoutMs = safeInt(opts.timeoutMs, WEB_DEFAULT_TIMEOUT_MS, 100, 6e4);
+  const idleTimeoutMs = safeInt(opts.idleTimeoutMs, WEB_DEFAULT_IDLE_TIMEOUT_MS, 100, 6e4);
+  const totalTimeoutMs = safeInt(opts.totalTimeoutMs, timeoutMs, 100, 12e4);
+  const deadline = Date.now() + totalTimeoutMs;
+  const totalSecs = Math.round(totalTimeoutMs / 1e3);
   const maxRedirects = safeInt(opts.maxRedirects, WEB_DEFAULT_MAX_REDIRECTS, 0, 10);
   const proxy = new URL2(opts.proxyUrl);
   let current = originalUrl;
   for (let hop = 0; hop <= maxRedirects; hop++) {
+    if (Date.now() >= deadline) return fail(originalUrl, `fetch failed \u2014 timed out after ${totalSecs}s`);
     const prepared = prepareWebUrl(current);
     if ("error" in prepared) return { ok: false, originalUrl, marker: prepared.error, reason: prepared.reason };
     const { url, host, port } = prepared;
@@ -6162,12 +6226,22 @@ async function governedWebFetch(opts) {
       return fail(originalUrl, `fetch failed \u2014 ${String(err.message || "DNS failure")}`, host);
     }
     if (!resolved) return fail(originalUrl, "refused \u2014 non-public target", host);
+    const connectAddress = opts.rebindConnectTarget ? opts.rebindConnectTarget(resolved) : resolved;
+    if (!isPublicAddress(connectAddress)) return fail(originalUrl, "refused \u2014 non-public target", host);
+    const remaining = Math.max(100, deadline - Date.now());
+    const hopTimeout = Math.min(timeoutMs, remaining);
     opts.onAttempt?.({ url: url.toString(), host, port });
     let response;
     try {
-      response = await proxyRequest(proxy, url, resolved, timeoutMs, maxFetchBytes);
+      response = await proxyRequest(proxy, url, connectAddress, {
+        timeoutMs: hopTimeout,
+        idleTimeoutMs: Math.min(idleTimeoutMs, hopTimeout),
+        maxBytes: maxFetchBytes,
+        ...opts.recordConnect ? { recordConnect: opts.recordConnect } : {}
+      });
     } catch (err) {
       const msg = String(err.message ?? err);
+      if (Date.now() >= deadline) return fail(originalUrl, `fetch failed \u2014 timed out after ${totalSecs}s`, host);
       if (/timed out/i.test(msg)) return fail(originalUrl, `fetch failed \u2014 ${msg}`, host);
       return fail(originalUrl, `fetch failed \u2014 ${msg.slice(0, 120)}`, host);
     }
@@ -6186,13 +6260,18 @@ async function governedWebFetch(opts) {
     if (response.statusCode < 200 || response.statusCode >= 300) {
       return fail(originalUrl, `fetch failed \u2014 HTTP ${response.statusCode}`, host);
     }
+    const contentEncoding = String(response.headers["content-encoding"] ?? "");
     let decoded;
     try {
-      decoded = decodeBody(response.body, String(response.headers["content-encoding"] ?? ""));
+      decoded = decodeBody(response.body, contentEncoding);
     } catch {
       return fail(originalUrl, "unsupported content type \u2014 encoded body");
     }
-    if (decoded.byteLength > maxFetchBytes * 8) {
+    const wasCompressed = /gzip|br|deflate/i.test(contentEncoding) && response.bytesRead > 0;
+    if (decoded.byteLength > maxFetchBytes * WEB_DEFAULT_MAX_DECOMPRESSION_RATIO) {
+      return fail(originalUrl, "fetch failed \u2014 response exceeded decompressed limit", host);
+    }
+    if (wasCompressed && decoded.byteLength > response.bytesRead * WEB_DEFAULT_MAX_DECOMPRESSION_RATIO) {
       return fail(originalUrl, "fetch failed \u2014 response exceeded decompressed limit", host);
     }
     const contentType = String(response.headers["content-type"] ?? "text/plain");
@@ -6665,7 +6744,8 @@ var BridgeServer = class {
   }
   /**
    * Tear down connection-scoped resources held by this server — currently the lazily
-   * opened GOVERNED CHAT SESSION (Finding 1): its egress proxy listener + run trace.
+   * opened GOVERNED CHAT SESSION and any live governed terminal sessions: their
+   * egress proxy listeners + run traces.
    * In production the bridge child process exits when the extension disposes the chat
    * session (killing the proxy with it); this is the explicit, awaitable teardown so a
    * HEADLESS test that opened a chat session can release the proxy listener (otherwise
@@ -6677,6 +6757,13 @@ var BridgeServer = class {
     if (governed) {
       try {
         await governed.session.stop();
+      } catch {
+      }
+    }
+    for (const serverRun of this.runs.values()) {
+      if (!serverRun.terminalSession || serverRun.terminalVerdict) continue;
+      try {
+        serverRun.terminalVerdict = await serverRun.terminalSession.stop();
       } catch {
       }
     }
@@ -7184,6 +7271,10 @@ var BridgeServer = class {
     const request = validation.request;
     const created = createRun(this.runsBaseDir);
     const lifecycle = new RunLifecycle(created.state);
+    this.remoteTracePaths.set(
+      created.runId,
+      join11(runSubdirPath(created.dir, "trace"), "trace.jsonl")
+    );
     const namesApprovedRuntime = isApprovedIsolationRuntime(request.runtimeProfile);
     const runtimeIsolated = false;
     const trust = "governed-unsandboxed";
@@ -8104,12 +8195,21 @@ var BridgeServer = class {
    */
   recordRemoteAction(evt) {
     const targetRunId = this.resolveRemoteTargetRunId(evt);
+    const streamToKnownRun = this.runs.has(targetRunId) || this.remoteTracePaths.has(targetRunId);
     const sink = this.remoteTraceWriterFor(targetRunId);
-    sink.append({
+    const appended = sink.append({
       ...evt,
       runId: targetRunId,
       source: "human"
     });
+    if (streamToKnownRun) {
+      this.emitRunEventEnvelope({
+        rev: RUN_EVENT_PROTOCOL_VERSION,
+        runId: targetRunId,
+        kind: "trace_event",
+        event: appended
+      });
+    }
     this.logLine(
       `[bridge-server] recorded remote ${evt.type} into run ${targetRunId} trace (source=human).`
     );

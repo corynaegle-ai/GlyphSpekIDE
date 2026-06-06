@@ -103,6 +103,8 @@ class SupervisorBridge {
         this.closeReason = '';
         /** Set once a compatible handshake completes; gates createRun(). */
         this.ready = false;
+        /** Guards {@link onChildExit} so a child that emits both 'error' and 'close' fires it once. */
+        this.childExitFired = false;
         this.opts = options;
         this.spawnFn = options.spawn ?? exports.defaultBridgeSpawn;
         this.requestTimeoutMs = options.requestTimeoutMs ?? DEFAULT_REQUEST_TIMEOUT_MS;
@@ -110,6 +112,20 @@ class SupervisorBridge {
     /** Register a handler for streamed run-event notifications (Trust Panel feed). */
     setRunEventHandler(handler) {
         this.onRunEvent = handler;
+    }
+    /**
+     * Register a handler fired ONCE when the supervisor child exits unexpectedly (crash /
+     * proxy death / the child leaving on its own). The governed floating terminal session
+     * uses this to detect MID-SESSION governance loss (G7/E18) — the bridge child dying
+     * means the egress proxy is gone. A graceful, dispose()-driven stop CLEARS the handler
+     * first (see {@link clearChildExitHandler}) so an intentional teardown does NOT fire it.
+     */
+    setChildExitHandler(handler) {
+        this.onChildExit = handler;
+    }
+    /** Clear the child-exit handler so an intentional dispose()/stop does NOT fire G7. */
+    clearChildExitHandler() {
+        this.onChildExit = undefined;
     }
     /**
      * Register a handler for streamed `chat/delta` notifications (M7 chat). After a
@@ -739,6 +755,23 @@ class SupervisorBridge {
         this.killTimer = timer;
     }
     /* ----------------------- internals ----------------------- */
+    /** Fire the child-exit handler at most once (governance loss → G7). Never throws. */
+    fireChildExit(code) {
+        if (this.childExitFired) {
+            return;
+        }
+        this.childExitFired = true;
+        const handler = this.onChildExit;
+        if (!handler) {
+            return;
+        }
+        try {
+            handler(code);
+        }
+        catch {
+            /* best-effort: a governance-loss handler must never break process teardown */
+        }
+    }
     /** Wire the child's stdout (NDJSON in) + error/close handlers. */
     wireChild() {
         const child = this.child;
@@ -757,6 +790,8 @@ class SupervisorBridge {
         });
         child.on('error', (err) => {
             this.failAllPending(`supervisor process error: ${String(err?.message ?? err)}`);
+            // G7/E18 — a spawn/runtime error is governance loss for a live session.
+            this.fireChildExit(null);
         });
         child.on('close', (code) => {
             // The child left on its own — cancel any pending SIGKILL escalation so the
@@ -768,6 +803,10 @@ class SupervisorBridge {
             this.closeReason =
                 `supervisor exited (code ${code ?? 'null'}) before the request completed.`;
             this.failAllPending(this.closeReason);
+            // G7/E18 — the child closing means the egress proxy is gone: governance is lost for
+            // a still-live session. A graceful dispose()/stop clears the handler FIRST, so this
+            // only fires on an UNEXPECTED exit.
+            this.fireChildExit(code);
         });
     }
     /** Parse one NDJSON line and dispatch a response or a notification. */

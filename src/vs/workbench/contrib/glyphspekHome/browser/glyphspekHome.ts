@@ -4,6 +4,7 @@
  *--------------------------------------------------------------------------------------------*/
 
 import './media/glyphspekHome.css';
+import './media/floatingTerminal.css';
 import { $, append, clearNode, Dimension } from '../../../../base/browser/dom.js';
 import { DisposableStore } from '../../../../base/common/lifecycle.js';
 import { CancellationToken } from '../../../../base/common/cancellation.js';

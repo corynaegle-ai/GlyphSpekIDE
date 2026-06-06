@@ -1,0 +1,78 @@
+/*---------------------------------------------------------------------------------------------
+ *  Copyright (c) Microsoft Corporation. All rights reserved.
+ *  Licensed under the MIT License. See License.txt in the project root for license information.
+ *--------------------------------------------------------------------------------------------*/
+
+/*
+ * GLYPHSPEK FLOATING GOVERNED TERMINAL — cursor-anchored content-widget chrome.
+ *
+ * ACC3 — THEME TOKENS ONLY, no hardcoded hex. Every color is a registered VS Code theme
+ * variable (--vscode-*), so the widget renders correctly in light / dark / high-contrast.
+ * The governed identity uses --vscode-terminal-ansiGreen (the same "governed/traced" green
+ * the panel governed terminal + authority status-bar use); the degraded state drops it for
+ * a neutral/warning token. A CSS-token grep test (floatingTerminalTheme.test) asserts there
+ * is NO hex literal in this file.
+ */
+
+.glyphspek-floating-terminal {
+	display: flex;
+	flex-direction: column;
+	min-width: 320px;
+	border: 1px solid var(--vscode-terminal-ansiGreen);
+	border-radius: 4px;
+	background-color: var(--vscode-editorWidget-background);
+	color: var(--vscode-editorWidget-foreground);
+	box-shadow: 0 2px 8px var(--vscode-widget-shadow);
+	overflow: hidden;
+}
+
+.glyphspek-floating-terminal.degraded {
+	border-color: var(--vscode-editorWarning-foreground);
+}
+
+.glyphspek-floating-terminal-header {
+	display: flex;
+	align-items: center;
+	gap: 6px;
+	padding: 4px 8px;
+	background-color: var(--vscode-editorWidget-background);
+	border-bottom: 1px solid var(--vscode-editorWidget-border);
+}
+
+.glyphspek-floating-terminal-shield {
+	color: var(--vscode-terminal-ansiGreen);
+}
+
+.glyphspek-floating-terminal.degraded .glyphspek-floating-terminal-shield {
+	color: var(--vscode-editorWarning-foreground);
+}
+
+.glyphspek-floating-terminal-posture {
+	flex: 1;
+	font-size: 11px;
+	color: var(--vscode-descriptionForeground);
+}
+
+.glyphspek-floating-terminal-describe {
+	border: 1px solid var(--vscode-button-border, transparent);
+	background-color: var(--vscode-button-secondaryBackground);
+	color: var(--vscode-button-secondaryForeground);
+	border-radius: 2px;
+	padding: 2px 8px;
+	cursor: pointer;
+	font-size: 11px;
+}
+
+.glyphspek-floating-terminal-describe:hover {
+	background-color: var(--vscode-button-secondaryHoverBackground);
+}
+
+.glyphspek-floating-terminal-describe:focus {
+	outline: 1px solid var(--vscode-focusBorder);
+	outline-offset: 1px;
+}
+
+.glyphspek-floating-terminal-host {
+	flex: 1;
+	min-height: 160px;
+}

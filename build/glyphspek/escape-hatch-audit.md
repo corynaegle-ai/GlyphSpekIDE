@@ -213,3 +213,63 @@ defense-in-depth `inspect()` selection + the webview-gesture gate + the hash-pin
 supervisor. The verdict/trace crypto (F2) is solid. The residual risk is overwhelmingly
 **un-governed stock IDE surfaces** (false impression of governance), not a redirectable
 GlyphSpek control.
+
+---
+
+## Addendum G — AI inner-loop + remote surfaces (added 2026-06-03)
+
+> **Scope.** Sections A–F (2026-05-31) predate the AI inner-loop (Tab completion, code-index
+> retrieval/build, Cmd-K inline edit, the governed chat participant) and the
+> remote-control / APNs features. None of `ollama`, `inlineCompletion`, `index/retrieve`,
+> `code-index`, `fimComplete`, `inline-edit`, `remote-gateway`, or `APNs` appears in A–F.
+> This addendum audits exactly those **GlyphSpek-ADDED** surfaces under the same governance
+> claim and the same classification vocabulary. (READ-ONLY audit; `ios/` app code is
+> OUTSIDE-TRUST-SCOPE — owned by a separate agent.)
+>
+> **Why a new-surface hatch matters more than a stock one.** A–F leaned on "these are *stock*
+> capabilities that never *claim* to be governed." That alibi does NOT transfer: these are
+> surfaces GlyphSpek built and brands as its AI DX. An ungoverned one is a self-inflicted
+> false impression of governance — worse than an un-badged stock terminal. The load-bearing
+> distinction throughout is **brokered+traced** (a `model_call` breadcrumb mirrored to the
+> run/event stream) **vs. raw/direct** (a bare `fetch`/transport with no trace event).
+
+### G. AI inner-loop + remote surfaces
+
+| id | hatch | reachable? | classification | notes |
+|----|-------|------------|----------------|-------|
+| **G1** | **Tab completion → loopback Ollama FIM.** `fimComplete()` POSTs the cursor window (prefix+suffix, capped 2000/1000) to `127.0.0.1:11434/api/generate` via a raw `fetch`, NOT through the broker; no `model_call` event emitted (`ollamaFimClient.ts:98-111`, `inlineCompletion.ts:612-618`). | YES (opt-in) | **MITIGATED-SOFT** | Loopback-only (no off-machine egress, works air-gapped), OFF by default (`package.json:395-397`; registered only when true `extension.ts:3208-3211`), honestly labeled + one-time "UNGOVERNED local assist" notice (`inlineCompletion.ts:58-95,566-575`). Residual: when on, an ungoverned model call disclosing the code window that never appears in the governed trace. |
+| **G2** | **Repo-aware FIM injects cross-file source into the FIM prompt.** Retrieves top-k index chunks (other files' source) and prepends them to the same ungoverned loopback call. | YES (opt-in) | **MITIGATED-SOFT** | Default OFF (`package.json:405-407`); retrieval is the session-root-bound `index/retrieve` (G4) over the handshake-bound completion session (`extension.ts:3690-3732`). Same residual as G1; disclosed window now includes neighboring files (local model only, no egress). |
+| **G3** | **Inline edit (Cmd-K) model call.** Sends selection + capped context to a model to rewrite. | YES | **PATCHED (governed)** | Routes through the injected governed gateway — the SAME `openChatSession`→`chat/send` path as chat (`inlineEdit.ts:28-31,218-278`; wired `extension.ts:3127`); `governed-unsandboxed` + metadata-traced, never product-trusted. Stale-buffer fixed: `isEditStillApplicable` re-validates version+URI+text, fails closed (`inlineEdit.ts:199-205,363-392`); applied as an undoable `WorkspaceEdit`. |
+| **G4** | **`index/retrieve` returns raw source snippets** for @Codebase grounding. | YES (gated) | **PATCHED (session-bound)** | Two gates before any file read: completed-handshake (`bridge-server.ts:2834-2837`) + canonical session-root binding — requested `workspaceRoot` is `realpath`'d and must equal the handshake-pinned root; cross-root/non-dir/missing is refused unread (`bindSessionRoot` `:2700-2729`; enforce `:2847-2852`). Cannot read an arbitrary directory. Not separately traced (local-by-construction); snippets reach Codex only via the traced `chat/send`. |
+| **G5** | **`index/build` reads + persists source-derived vectors.** | YES (gated) | **PATCHED** | Same two gates (`:2944-2957`). Persisted snapshot is **AES-256-GCM encrypted** (`index-crypto.ts:1-44,62`), per-workspace key `0600` OUTSIDE the workspace (`:24-38,114-148`), `persist` OFF by default (`package.json:448-450`). |
+| **G6** | **Index embedder egress.** | NO (default) / model-download only | **MITIGATED-SOFT** | Default `OllamaEmbedder` POSTs only to loopback `/api/embed` (`embedder.ts:41,92-97`). In-process `OnnxEmbedder` touches network ONCE to download the model artifact from HF hub (model download, never code egress), cached after; constructor supports `modelPath`/`allowRemoteModels:false` for bundled-pin hardening. No source bytes egress. |
+| **G7** | **Embedder-version mismatch poisons retrieval.** | NO | **PATCHED** | Persisted container records `embedderId` (format `GSI2`); `loadIndex` DISCARDS a snapshot whose `embedderId`/`dims` differ (and legacy `GSI1`) rather than serving wrong vectors (`persisted-store.ts:21-42,71-74,275-300`). |
+| **G8** | **Chat LM provider as a public proxy** (another extension `selectChatModels({vendor:'glyphspek'})` → `sendRequest`). | NO | **PATCHED (fail-closed)** | `provideLanguageModelChatResponse` THROWS on every direct call (`chatParticipant.ts:1077-1096`); the model exists only to satisfy the host default-model resolver. |
+| **G9** | **Chat attachments / @Codebase disclose source.** | NO (governed) | **MITIGATED-SOFT** | Secret-path denylist BEFORE bytes read (`.env`/`*.pem`/`*.key`/`id_rsa*`/`secret`/`.ssh`, `chatParticipant.ts:359-374,648-651`), size caps + max count, truncation markers; disclosure via traced `chat/send`. Residual: not redacted beyond denylist before reaching the user's own Codex (honest, same posture as chat). |
+| **G10** | **Remote-control bridge unauthenticated / remote work ungoverned.** | NO | **PATCHED** | `POST /rpc` requires `Bearer <grant>` + `x-glyphspek-device` (`grants.validateGrant`); every mutating method verifies a signed action vs the pairing's TOFU-bound key + nonce replay cache (`rpc-server.ts:14-44`). Remote builds route the SAME authority gate: `build/start {approved:false}` → pending → signed `approval/respond ALLOW` (`real-supervisor-bridge.ts:67-80,147-169`). Governed + traced identically to local. |
+| **G11** | **APNs push payload leaks raw failure text.** `run_failed` alert body interpolates the raw `failureMessage` (`state_changed.reason` / build `error.message`) with NO redaction or bound (`push-notifications.ts:251-263`; fed `projection-store.ts:369-380,585-587`). | YES | **PATCHED (2026-06-03, `ece1f39`)** | FIXED: the APNs `run_failed` body is now unconditionally coarse (`Run <id> failed.`); the raw `failureMessage` plumbing was removed at both the notifier (`runFailed(input:{runId})`) and `projection-store` (`setRunStatus` param dropped, both call sites updated), + a regression test asserting no path/secret substring reaches the push body and the body is length-bounded. Detailed/redacted failure text remains only on the authenticated dashboard RPC, bounded 4000 chars (`projection-store.ts:570,600,655`). Was open sweeps 62–71. |
+| **G12** | **iOS app client code.** | — | **OUTSIDE-TRUST-SCOPE** | Owned by a separate agent; only the host-side gateway/bridge (G10/G11) audited. |
+| **G13** | **`@Web` governed web context.** `@Web <url>` in chat fetches the public web. | YES (opt-in) | **PATCHED (2026-06-05, `50d08f2`) — traced/governed, content-hashed, untrusted-fenced** | The supervisor performs every fetch through its own governed soft-egress proxy (`web/fetch` bridge method; the extension never fetches directly — architectural test). Each reached `host:port` is recorded on the hash-chained trace as a canonical `tool:'network'`, `decision:'allow'`, `enforcement:'observe-only'` event carrying `sha256(content)` (metadata + content hash only — Option B, no raw body, no credential). Connected-IP SSRF validation pins the resolved public IP (DNS-rebinding-safe; octal/overflow normalizer fixed); fetched bytes are instruction-demoted (`provenanceLabel:'web'`, user/data channel, UNTRUSTED fence) and disclosed as sent onward to the model. Default-OFF/opt-in, machine-scoped caps. Soft/observe only — hard egress remains the Firecracker plane. NOT a new gap. |
+
+### New top open gaps
+
+1. **G11 — raw failure text in APNs alert bodies.** ~~The only genuinely OPEN new-surface gap.~~ **RESOLVED 2026-06-03 (`ece1f39`)** — fixed exactly as recommended: the `run_failed` push body is now coarse + bounded ("Run `<id>` failed."), the raw `failureMessage` plumbing was removed end-to-end, and detailed/redacted failure text remains only inside the authenticated dashboard/trace views. With this landed, **no new-surface gap remains open.**
+2. **G1/G2 — opt-in local FIM is trace-silent.** Not a leak (loopback, no egress) but, when enabled, a model call disclosing the code window (G2: neighboring files) that never appears in the Model-Calls trace. Keep the honest framing; never let UI imply Tab completion is governed/traced.
+
+### New CIO-level flags
+
+- **CIO-FLAG-G1 (= G11).** A trust product that pushes raw failure text (possible local paths) to Apple push + lock screens undercuts the disclosure-discipline claim. Open since sweep 62 — explicitly accept-with-ship-date or fix before any remote-control GA.
+- **CIO-FLAG-G2 (= G6).** The ONNX embedder's first-run HF model download contradicts a "fully air-gapped indexing" claim on a cold machine. Either bundle+hash-pin the model (`allowRemoteModels:false`) before that claim, or scope the claim to "no code egress" (true today).
+
+### What is honestly closed (new surfaces — do not re-flag)
+
+Inline edit (G3) and chat (G8/G9) route through the governed, traced gateway, fail-closed against proxy abuse, and apply a secret denylist + caps before disclosure. Code-index (G4/G5) is session-root-bound behind a handshake and AES-256-GCM encrypted at rest with the key outside the workspace; the embedder-version guard (G7) prevents stale-vector serving. Embedder egress (G6) is loopback/in-process — no code egresses. The remote bridge (G10) is authenticated and remote builds are governed by the same authority gate + signed-verdict trace as local.
+
+### Verdict
+
+The new AI-DX/remote surfaces do **not** materially widen the escape-hatch surface beyond the
+per-run envelope — model paths are governed+traced (chat, Cmd-K) or honestly
+ungoverned-local-and-opt-in (FIM), the code-index is session-root-bound and encrypted at rest,
+and remote work is authenticated and governed by the same authority gate — **with one
+genuinely open item: G11, raw failure text leaking into unredacted APNs push bodies, the single
+highest-priority fix.**

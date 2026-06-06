@@ -71,10 +71,13 @@ const nodePtyBaseDirs_1 = require("./nodePtyBaseDirs");
 const inlineScript_1 = require("./inlineScript");
 const chatParticipant_1 = require("./chatParticipant");
 const inlineEdit_1 = require("./inlineEdit");
+const terminalCmdK_1 = require("./terminalCmdK");
 const indexStatusBar_1 = require("./indexStatusBar");
 const indexProgress_1 = require("./indexProgress");
 const inlineCompletion_1 = require("./inlineCompletion");
 const ungovernedTerminalNotice_1 = require("./ungovernedTerminalNotice");
+const ungovernedTerminalOpenNotice_1 = require("./ungovernedTerminalOpenNotice");
+const governedFloatingTerminal_1 = require("./governedFloatingTerminal");
 const autoImport_1 = require("./autoImport");
 const bridgeProtocol_1 = require("./bridgeProtocol");
 const policyHash_1 = require("./policyHash");
@@ -2389,6 +2392,33 @@ function activate(context) {
     // is NOT routed through the trusted-run gesture gate below (there is no product-
     // trust lever to protect). The command opens the governed terminal directly.
     context.subscriptions.push(vscode.commands.registerCommand('glyphspek.openGovernedTerminal', () => openGovernedTerminal(context, supervisorOutput)));
+    // GOVERNED FLOATING TERMINAL SEAM (⌃⌘K, Option A — the FORK calls these). The fork
+    // hosts a cursor-anchored floating governed terminal in the renderer and drives its
+    // lifecycle over this command bridge (it cannot spawn the supervisor/proxy or build
+    // the governed env — all ext-side). startSession does the terminal/start handshake +
+    // buildGovernedTerminalEnv and RETURNS the governed {runId, env, strictEnv, proxyUrl,
+    // cwd, name} for the fork to host VERBATIM (B1a/AD8); stopSession finalizes the run
+    // (idempotent, runId-scoped); registerOwned records the run as governed-owned (B2a).
+    context.subscriptions.push(vscode.commands.registerCommand('glyphspek.governedTerminal.startSession', () => startGovernedFloatingTerminalSession(context, supervisorOutput)), vscode.commands.registerCommand('glyphspek.governedTerminal.stopSession', (runId) => stopGovernedFloatingTerminalSession(runId)), vscode.commands.registerCommand('glyphspek.governedTerminal.registerOwned', (runId) => {
+        // B2a defence-in-depth: record the run as governed-owned. The PRIMARY A1
+        // notice-suppression key is the terminal-NAME marker (onDidOpenTerminal hands a
+        // Terminal, not a runId); this is a secondary, run-scoped ownership record. Inert
+        // + best-effort; never throws.
+        if (typeof runId === 'string' && runId.length > 0) {
+            governedFloatingOwnedRunIds.add(runId);
+        }
+    }));
+    // EXPLICITLY UNGOVERNED TERMINAL (⌃⌘U). A first-class, deliberate accelerator for a
+    // PLAIN host shell — full host env, NO supervisor proxy, command + network egress NOT
+    // traced. This is NOT a new escape hatch: stock/ungoverned terminals already exist
+    // (Ctrl+`) and the A1 audit already labels them; ⌃⌘U is just an HONESTLY-LABELED
+    // accelerator ("friction follows authority": a plain shell is a deliberate choice). The
+    // INVARIANT: it is VISIBLY, honestly ungoverned — a neutral/amber badge, NEVER the
+    // governed shield/green, and it is deliberately NOT added to glyphSpekOwnedTerminals.
+    // It IS recorded in deliberatelyUngovernedTerminals so the A1 onDidOpenTerminal listener
+    // skips it (its own one-time confirming notice is the single honest signal — no
+    // double-nag). The command is also palette-invokable.
+    context.subscriptions.push(vscode.commands.registerCommand('glyphspek.openUngovernedTerminal', () => openUngovernedTerminal(context)));
     // GOVERNANCE-BOUNDARY LEGIBILITY (A1, Part 2 — honesty about STOCK terminals). A
     // "GlyphSpek IDE" still exposes ungoverned stock terminals (the integrated terminal,
     // task/debug shells — full host env, untraced egress) that look almost identical to a
@@ -2403,6 +2433,25 @@ function activate(context) {
     if (typeof vscode.window.onDidOpenTerminal === 'function') {
         context.subscriptions.push(vscode.window.onDidOpenTerminal((terminal) => {
             try {
+                // DELIBERATE ⌃⌘U opens are NOT accidental stock terminals: the
+                // openUngovernedTerminal command already shows its own honest one-time
+                // confirming notice, so the A1 "did you mean a governed terminal?" steer must
+                // SKIP them (one honest signal per terminal, not two). A1 STILL fires for
+                // terminals GlyphSpek didn't open (plain Ctrl+`), which are NOT in this set.
+                if (deliberatelyUngovernedTerminals.has(terminal)) {
+                    return;
+                }
+                // B2a / H6 — the FORK's ⌃⌘K floating governed terminal is created in the
+                // RENDERER, so it can NEVER be in glyphSpekOwnedTerminals (a WeakSet of
+                // ext-host Terminal objects the fork has no handle to) — yet it surfaces here
+                // through onDidOpenTerminal. Left alone the A1 notice would MIS-FIRE for a
+                // terminal GlyphSpek itself governs + badges. Suppress it on the cross-process
+                // NAME marker the fork created the terminal with (the seam key, not an
+                // ext-host object). This is the H6 invariant: the notice does NOT fire for the
+                // governed floating terminal.
+                if ((0, governedFloatingTerminal_1.isGovernedFloatingTerminalName)({ terminalName: terminal.name })) {
+                    return;
+                }
                 const isGlyphSpekOwned = glyphSpekOwnedTerminals.has(terminal);
                 const dismissed = Boolean(context.globalState.get(ungovernedTerminalNotice_1.UNGOVERNED_TERMINAL_NOTICE_KEY));
                 if (!(0, ungovernedTerminalNotice_1.shouldAnnounceUngovernedTerminal)({ isGlyphSpekOwned, dismissed })) {
@@ -2482,6 +2531,40 @@ function activate(context) {
     // on the user's own ChatGPT subscription (governed, UNSANDBOXED, never product-trusted;
     // no credential injected). The rewrite is applied as an UNDOABLE WorkspaceEdit (⌘Z).
     (0, inlineEdit_1.registerInlineEdit)(context, buildNativeChatSessionFactory(context, chatOutput), chatOutput);
+    // TERMINAL Cmd-K — the `glyphspek.terminalGenerateCommand` PALETTE command. D4a (unify
+    // transition): it now targets the cursor-anchored FLOATING governed terminal, NOT the
+    // panel terminal. On invoke it DELEGATES to the fork command
+    // `glyphspek.floatingTerminal.describeCommand`, which opens the floating governed terminal
+    // (refuse-not-degrade) and runs its "describe a command" NL fold-in there (generate →
+    // sanitize → PRE-TYPE; operator's Enter launches, never auto-run). The ⌃⌘K accelerator
+    // belongs to the fork's floating-terminal workbench action; this command is the
+    // palette-invokable entry. The underlying generation still flows through the SAME governed
+    // Codex gateway + terminalCommandGen sanitize via glyphspek.governedTerminal.generateCommand.
+    (0, terminalCmdK_1.registerTerminalCmdK)(context, chatOutput);
+    // D1/D2/D3/D4a — HEADLESS NL-generate for the FORK's ⌃⌘K floating terminal's
+    // "describe a command" fold-in. Reuses the SAME governed Codex gateway +
+    // terminalCommandGen sanitize as glyphspek.terminalGenerateCommand, but RETURNS the
+    // single sanitized command STRING (or undefined) for the fork to PRE-TYPE into the
+    // floating terminal — it never auto-runs (D3) and never fabricates on an empty/garbage
+    // reply (D5: returns undefined → the fork pre-types nothing). The fork prompts for the
+    // NL instruction and passes it as the first arg; with no arg the command resolves
+    // undefined (honest no-op). This is the D4a unify target: the palette/floating NL path
+    // generates INTO the floating terminal, not the panel terminal.
+    context.subscriptions.push(vscode.commands.registerCommand('glyphspek.governedTerminal.generateCommand', async (instruction) => {
+        if (typeof instruction !== 'string' || instruction.trim().length === 0) {
+            return undefined;
+        }
+        const req = {
+            instruction,
+            platform: process.platform,
+            shell: typeof vscode.env.shell === 'string'
+                ? vscode.env.shell.replace(/\\/g, '/').split('/').pop()?.replace(/\.exe$/iu, '')
+                : undefined,
+        };
+        const result = await (0, terminalCmdK_1.requestTerminalCommand)(req, buildNativeChatSessionFactory(context, chatOutput), chatOutput);
+        // D5/E9: empty / gateway-error / unparseable ⇒ undefined (no fabricated command).
+        return result.ok ? result.command : undefined;
+    }));
     // FIRST-PARTY WEBVIEW GESTURE GATE (sweep-20 High #3 — rework of sweep-19).
     //
     // ALL THREE trusted-run paths (governed / bridge / live) are PRODUCT-TRUSTED:
@@ -3627,7 +3710,14 @@ async function bridgeCreateRun(context, output, gestures, gestureToken) {
 function withAmbientDevModePosture(context, onRunEvent) {
     const inputs = {
         extensionMode: context.extensionMode,
-        developmentMode: vscode.ExtensionMode.Development,
+        // M5 §14 / H7 GUARD: a minimal host or a unit-test vscode stub may omit the
+        // `ExtensionMode` enum entirely. Read `Development` defensively (`?.`) so the
+        // posture wrapper degrades to a transparent pass-through (developmentMode
+        // undefined ⇒ ambientExtensionsDevModeFailureEvent's predicate is false) instead
+        // of throwing `Cannot read properties of undefined (reading 'Development')` during
+        // a governed-terminal / chat / live-run command. Fixes the 5 pre-existing
+        // openGovernedTerminalCommand stub failures.
+        developmentMode: vscode.ExtensionMode?.Development,
     };
     // Emit the posture warning at most once per runId (de-dup is also enforced
     // webview-side by appendFailure, but emitting once keeps the stream clean).
@@ -3719,6 +3809,117 @@ async function startLiveRun(context, output, gestures, gestureToken) {
  * closed terminal is garbage-collected without us tracking close events (no leak).
  */
 const glyphSpekOwnedTerminals = new WeakSet();
+/**
+ * GOVERNED FLOATING TERMINAL (⌃⌘K, Option A) — the ext-host registry of LIVE governed
+ * sessions opened for the FORK's cursor-anchored floating terminal, keyed by the
+ * supervisor-minted runId.
+ *
+ * WHY A runId-KEYED MAP (AD1/AD8/A4a). The fork hosts the terminal in the renderer and
+ * drives the session lifecycle over a COMMAND seam (`startSession` / `stopSession` /
+ * `registerOwned`) — it never touches an ext-host object. So the session handle (whose
+ * `stop()` finalizes the signed verdict + tears down the bridge child) is held HERE,
+ * runId-scoped: `stopSession(runIdA)` can only finalize run A (window B can never
+ * finalize window A's run). The entry is deleted on stop so a second stop is a clean
+ * idempotent no-op.
+ */
+const governedFloatingSessions = new Map();
+/**
+ * GOVERNED FLOATING TERMINAL (⌃⌘K) — the governance-loss subscriptions, runId-keyed.
+ *
+ * G7/E18 — for each live floating session we subscribe to its {@link
+ * GovernedTerminalSession.onGovernanceLoss} so that if the supervisor child/proxy dies
+ * MID-SESSION (while the shell is still alive) the ext-host can tell the FORK to drop the
+ * green badge + finalize. The detection signal is renderer-UNREACHABLE (the fork has no
+ * handle to the bridge child), so this is the seam that closes the "lying-green" gap the
+ * fork's `onExit`-only detection missed. We retain the subscription here so it is disposed
+ * on stopSession (and never fires after the fork already tore the widget down).
+ */
+const governedFloatingLossSubs = new Map();
+/**
+ * GOVERNED FLOATING TERMINAL (⌃⌘K) — runIds the fork has registered as governed-OWNED
+ * via `glyphspek.governedTerminal.registerOwned`. A secondary, run-scoped ownership
+ * record (the A1 notice's PRIMARY suppression key is the terminal-name marker, since
+ * `onDidOpenTerminal` hands a `Terminal`, not a runId). Kept so the seam is honest
+ * about which runs it owns and so a future ext-side consumer can scope on it.
+ */
+const governedFloatingOwnedRunIds = new Set();
+/**
+ * GOVERNANCE-BOUNDARY LEGIBILITY (⌃⌘U). The set of terminals the user DELIBERATELY opened
+ * as explicitly UNGOVERNED via `glyphspek.openUngovernedTerminal`. These are genuinely NOT
+ * governed (they are NOT in {@link glyphSpekOwnedTerminals}) — but they were opened ON
+ * PURPOSE, so the A1 `onDidOpenTerminal` listener (which exists to catch ACCIDENTAL stock
+ * terminals) must SKIP them: the deliberate-open command already shows its own honest
+ * one-time confirmation, so re-firing the "did you mean a governed terminal?" steer would
+ * be a double-nag. One honest signal per terminal, not two. A WeakSet so a closed terminal
+ * is garbage-collected without us tracking close events (no leak). NOTE: membership here
+ * does NOT imply governance — it only records intentional ungoverned-ness.
+ */
+const deliberatelyUngovernedTerminals = new WeakSet();
+/**
+ * EXPLICITLY UNGOVERNED TERMINAL (⌃⌘U). Open a STOCK VS Code terminal — plain host env,
+ * NO governance: NO supervisor proxy (no HTTPS_PROXY/HTTP_PROXY), NO env sanitization
+ * (no strictEnv), so it is identical to a terminal the user would open with Ctrl+` and
+ * its commands + network egress are NOT traced. This is the honest counterpart to the
+ * Governed Terminal — a deliberate "friction follows authority" choice for a plain shell.
+ *
+ * THE INVARIANT (non-negotiable): this terminal must be VISIBLY, honestly ungoverned and
+ * NEVER mistakable for a governed one. So:
+ *   - the badge is NEUTRAL/AMBER — a `terminal` codicon (NOT the governed `shield`) and
+ *     `terminal.ansiYellow` (a neutral/amber color — NEVER the governed `terminal.ansiGreen`);
+ *   - it is deliberately NOT added to {@link glyphSpekOwnedTerminals} — it genuinely is
+ *     not governed, so the governed/ungoverned distinction holds end-to-end;
+ *   - it IS added to {@link deliberatelyUngovernedTerminals} so the A1 onDidOpenTerminal
+ *     listener skips it (this command already shows its own honest one-time notice; the
+ *     A1 "did you mean governed?" steer would be a redundant second nag).
+ *
+ * Persistence (the VS Code default, isTransient unset) is FINE here: unlike the governed
+ * terminal, there is no supervisor-bound proxy env to go stale across a window reload.
+ *
+ * The icon/color are added ONLY when the ThemeIcon/ThemeColor constructors exist (the A1
+ * guard pattern) so a minimal host/test stub without them degrades to an unbadged stock
+ * terminal instead of throwing. Best-effort + non-fatal end to end.
+ */
+function openUngovernedTerminal(context) {
+    // No env, no strictEnv, no proxy: a plain stock terminal with the full host environment.
+    const terminalOptions = {
+        name: 'Ungoverned Terminal',
+    };
+    if (typeof vscode.ThemeIcon === 'function') {
+        // `terminal` (NOT `shield`) — a neutral glyph that never reads as governed.
+        terminalOptions.iconPath = new vscode.ThemeIcon('terminal');
+    }
+    if (typeof vscode.ThemeColor === 'function') {
+        // `terminal.ansiYellow` (amber/neutral) — NEVER the governed `terminal.ansiGreen`.
+        terminalOptions.color = new vscode.ThemeColor('terminal.ansiYellow');
+    }
+    const terminal = vscode.window.createTerminal(terminalOptions);
+    // Deliberately NOT glyphSpekOwnedTerminals.add(...): this terminal is genuinely NOT
+    // governed. Record it as deliberately-ungoverned so the A1 listener skips the
+    // accidental-terminal steer (its own confirming notice below is the single signal).
+    deliberatelyUngovernedTerminals.add(terminal);
+    terminal.show();
+    // One-time honest CONFIRMING notice. Best-effort + non-fatal: a state-store/UI failure
+    // must never break opening the terminal. Mirrors the A1 notice's read-flag /
+    // show-with-"Don't show again" / persist-on-dismiss shape.
+    try {
+        const dismissed = Boolean(context.globalState.get(ungovernedTerminalOpenNotice_1.UNGOVERNED_TERMINAL_OPENED_NOTICE_KEY));
+        if ((0, ungovernedTerminalOpenNotice_1.shouldAnnounceUngovernedTerminalOpened)({ dismissed })) {
+            void vscode.window
+                .showInformationMessage(ungovernedTerminalOpenNotice_1.UNGOVERNED_TERMINAL_OPENED_NOTICE, 'New Governed Terminal', "Don't show again")
+                .then((choice) => {
+                if (choice === 'New Governed Terminal') {
+                    void vscode.commands.executeCommand('glyphspek.openGovernedTerminal');
+                }
+                else if (choice === "Don't show again") {
+                    void context.globalState.update(ungovernedTerminalOpenNotice_1.UNGOVERNED_TERMINAL_OPENED_NOTICE_KEY, true);
+                }
+            });
+        }
+    }
+    catch {
+        /* best-effort: the honest confirming notice must never break opening a terminal */
+    }
+}
 /* ================================================================== *
  * GOVERNED TERMINAL (M7 — the in-IDE Governed Terminal surface).
  *
@@ -3819,6 +4020,10 @@ function workspaceFolderPaths() {
  * product-trusted.
  */
 async function openGovernedTerminalSurface(context, output, surface, detected) {
+    // Returns the created, GlyphSpek-OWNED `vscode.Terminal` once createTerminal succeeds (so a
+    // caller — e.g. terminal Cmd-K — can acquire the exact governed handle and pre-type into
+    // it), or `undefined` if a governed terminal was not opened (request-assembly failure,
+    // workspace-local binary refusal, or supervisor terminal/start failure).
     output.show(true);
     const actorType = detected?.agent === 'claude'
         ? 'claude-code-cli'
@@ -3827,7 +4032,7 @@ async function openGovernedTerminalSurface(context, output, surface, detected) {
             : 'native';
     const request = assembleGovernedTerminalRequest(context, output, actorType);
     if (!request)
-        return;
+        return undefined;
     // CHAT BINARY-IDENTITY EVIDENCE (sweep-28 High). For the CHAT surface (which
     // AUTO-RUNS the detected agent CLI) resolve the launch and CAPTURE the binary's
     // identity NOW — immediately before launch — so the run records WHICH bytes/version
@@ -3845,7 +4050,7 @@ async function openGovernedTerminalSurface(context, output, surface, detected) {
                 `${chatLaunch.launchPath}, which is INSIDE your workspace. A workspace-local CLI ` +
                 'could be a swapped/planted binary, so GlyphSpek will not launch it for you. ' +
                 'The terminal is open and governed; run a trusted agent in it yourself if you intend to.');
-            return;
+            return undefined;
         }
         // Capture immediately before launch (TOCTOU). Never throws; best-effort fields.
         const binary = (0, agentBinaryIdentity_1.captureAgentBinaryIdentity)(chatLaunch.launchPath);
@@ -3886,7 +4091,7 @@ async function openGovernedTerminalSurface(context, output, surface, detected) {
     const surfaceLabel = surface === 'chat' ? 'governed chat' : 'governed terminal';
     if (!start.started || !start.session || !start.proxyUrl || !start.runId) {
         void vscode.window.showErrorMessage(`GlyphSpek: could not open a ${surfaceLabel} — ${start.message}`);
-        return;
+        return undefined;
     }
     // Build the governed terminal env: FORCE egress through the supervisor's proxy and
     // STRIP ambient host secrets/capability handles (SSH_AUTH_SOCK, DOCKER_HOST, …) by
@@ -4004,7 +4209,7 @@ async function openGovernedTerminalSurface(context, output, surface, detected) {
         }
         // The no-CLI case never reaches here (the command shows the honest message and only
         // optionally opens this terminal; see openGovernedChat).
-        return;
+        return terminal;
     }
     // surface === 'terminal': honest, non-coercive ergonomics. If an agent CLI is
     // installed, PRE-TYPE its BARE name (without sending) so the operator just hits
@@ -4024,15 +4229,131 @@ async function openGovernedTerminalSurface(context, output, surface, detected) {
         void vscode.window.showInformationMessage('GlyphSpek: governed terminal ready. Any command you run here has its egress governed (metadata-only) ' +
             'and streamed LIVE into the Trust Panel. This session is UNSANDBOXED and never product-trusted.');
     }
+    // Return the created, GlyphSpek-owned terminal so a caller (terminal Cmd-K) can pre-type
+    // into the exact governed surface just opened.
+    return terminal;
+}
+/**
+ * HEADLESS governed-terminal start for the fork's ⌃⌘K floating terminal. A variant of
+ * {@link openGovernedTerminalSurface} that performs the bridge handshake +
+ * {@link buildGovernedTerminalEnv} and RETURNS the governed env/proxy/cwd contract
+ * instead of creating a `vscode.Terminal`. The live session handle is retained in
+ * {@link governedFloatingSessions} (runId-keyed) so `stopSession(runId)` can finalize it.
+ *
+ * Resolve-never-reject (AD3/G1): every failure resolves with {ok:false} + an honest
+ * message and opens NOTHING. The session is governed-unsandboxed, never product-trusted.
+ */
+async function startGovernedFloatingTerminalSession(context, output) {
+    // Reuse the SAME non-prompting request assembly (cwd, policy, source-commit) the
+    // panel governed terminal uses. The floating terminal is the SOFT, local-exec,
+    // sovereign-posture surface — identical posture to the panel governed terminal.
+    const request = assembleGovernedTerminalRequest(context, output, 'native');
+    if (!request) {
+        return { ok: false, message: 'GlyphSpek: could not resolve a governed-terminal policy/cwd.' };
+    }
+    // Open + reveal the Trust Panel FIRST so the live run/event stream renders (B2/B3).
+    const panel = TrustPanel.createOrShow(context.extensionUri, getWebviewGestureGate());
+    panel.reveal();
+    const start = await (0, supervisorBridgeRunner_1.startGovernedTerminalSession)({
+        bridgeServerPath: resolveBundledBridgeServerPath(context),
+        extensionVersion: resolveExtensionVersion(context),
+        runsBase: resolveRunsBase(),
+        request,
+        output,
+        onRunEvent: withAmbientDevModePosture(context, (raw) => panel.postRunEvent(raw)),
+    });
+    // REFUSE-NOT-DEGRADE: a failed/partial handshake returns NO env/proxy. The fork must
+    // open NO terminal (never an ungoverned shell in the floating window).
+    if (!start.started || !start.session || !start.proxyUrl || !start.runId) {
+        return { ok: false, message: start.message || 'governed terminal did not start.' };
+    }
+    // Build the governed env ext-side over the EXT-HOST process.env (the secret firewall
+    // is default-deny via strictEnv). The fork passes this VERBATIM (B1a/AD8).
+    const { env: terminalEnv, strictEnv } = (0, governedTerminalEnv_1.buildGovernedTerminalEnv)({
+        proxyUrl: start.proxyUrl,
+        baseEnv: process.env,
+    });
+    // Stamp the floating-owned env marker (= runId) so the surface is identifiable as
+    // governed-owned even via env (secondary to the name marker). Inert; carried through
+    // strictEnv. The fork never has to read renderer env to add this — it is already here.
+    terminalEnv[governedFloatingTerminal_1.FLOATING_GOVERNED_TERMINAL_ENV_MARKER] = start.runId;
+    // Retain the live session handle, runId-keyed (A4a/B4). stopSession(runId) finalizes it.
+    governedFloatingSessions.set(start.runId, start.session);
+    governedFloatingOwnedRunIds.add(start.runId);
+    // G7/E18 — MID-SESSION governance loss. If the supervisor child/proxy dies while the
+    // shell is still alive, the egress proxy is gone and the session can no longer claim to
+    // be governed. The detection lives ext-side (the bridge child-exit); the FORK can't see
+    // it (no handle to the bridge child), so the ext-host tells the fork over the command
+    // seam — mirroring the registerOwned/showError direction. The fork's controller then
+    // drops the green badge (markDegraded) and finalizes via stopSession. We forget the live
+    // handle here too so the fork's subsequent stopSession is a clean idempotent no-op (the
+    // run was already finalized by the supervisor exit). Best-effort; never throws.
+    const runId = start.runId;
+    const lossSub = start.session.onGovernanceLoss(() => {
+        // Drop + DISPOSE the subscription so the loss can only be reported once (no leak, no
+        // double-fire), then tell the fork over the command seam. The session HANDLE is left
+        // live so the fork's degraded+teardown path (markDegraded → stopSession) still
+        // finalizes the run as a DEGRADED verdict (AD5 always-finalize / B4a).
+        governedFloatingLossSubs.get(runId)?.dispose();
+        governedFloatingLossSubs.delete(runId);
+        void vscode.commands.executeCommand('glyphspek.floatingTerminal.governanceLost', runId);
+    });
+    governedFloatingLossSubs.set(runId, lossSub);
+    return {
+        ok: true,
+        runId: start.runId,
+        env: terminalEnv,
+        strictEnv,
+        proxyUrl: start.proxyUrl,
+        cwd: request.workspaceRoot,
+        name: governedFloatingTerminal_1.FLOATING_GOVERNED_TERMINAL_NAME,
+        envMarker: governedFloatingTerminal_1.FLOATING_GOVERNED_TERMINAL_ENV_MARKER,
+        message: '',
+    };
+}
+/**
+ * HEADLESS finalize for the fork's ⌃⌘K floating terminal. IDEMPOTENT + runId-SCOPED
+ * (A4a/B4/B4a/AD5/G6): every fork teardown path (Esc, editor close/move, window
+ * unload, mid-session governance loss, throw-after-runId) calls this. An unknown /
+ * already-finalized runId resolves cleanly (not finalized), never throws — so a
+ * double-stop or a window-B stop of a window-A runId is a safe no-op. The underlying
+ * `session.stop()` is itself idempotent.
+ */
+async function stopGovernedFloatingTerminalSession(runId) {
+    if (typeof runId !== 'string' || runId.length === 0) {
+        return { finalized: false, message: 'stopSession: a runId string is required.' };
+    }
+    const session = governedFloatingSessions.get(runId);
+    if (!session) {
+        // Unknown / already-stopped: idempotent no-op (the entry was deleted on a prior stop).
+        return { finalized: false, message: `no live governed floating session for runId ${runId}.` };
+    }
+    // Drop the handle BEFORE awaiting so a concurrent second stop sees no session (idempotent).
+    governedFloatingSessions.delete(runId);
+    governedFloatingOwnedRunIds.delete(runId);
+    // Drop the governance-loss subscription so it can never fire after teardown (G7 cleanup).
+    governedFloatingLossSubs.get(runId)?.dispose();
+    governedFloatingLossSubs.delete(runId);
+    const stop = await session.stop();
+    if (!stop.finalized || !stop.verdict) {
+        return { finalized: false, message: stop.message };
+    }
+    return {
+        finalized: true,
+        assurance: stop.verdict.assurance,
+        overallVerdict: stop.verdict.overallVerdict,
+        message: '',
+    };
 }
 /**
  * Open the in-IDE Governed Terminal: the user-driven surface. Detects an agent CLI
  * (to tag the actor identity + pre-type the command) and delegates to the shared
  * governed-terminal core. The detected CLI is PRE-TYPED for the operator to run —
- * never force-run.
+ * never force-run. Returns the created governed `vscode.Terminal` (or `undefined` if one
+ * could not be opened) so terminal Cmd-K can acquire its handle.
  */
 async function openGovernedTerminal(context, output) {
-    await openGovernedTerminalSurface(context, output, 'terminal', (0, agentCli_1.detectAgentCli)());
+    return openGovernedTerminalSurface(context, output, 'terminal', (0, agentCli_1.detectAgentCli)());
 }
 /**
  * Open GlyphSpek CHAT = a governed terminal running INTERACTIVE Claude Code.

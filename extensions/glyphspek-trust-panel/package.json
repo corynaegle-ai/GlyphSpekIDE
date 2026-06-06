@@ -40,6 +40,7 @@
     "onCommand:glyphspek.previewAgenticBuildReview",
     "onCommand:glyphspek.promoteChatToBuild",
     "onCommand:glyphspek.openGovernedTerminal",
+    "onCommand:glyphspek.openUngovernedTerminal",
     "onCommand:glyphspek.openChat",
     "onCommand:glyphspek.openNativeChat",
     "onCommand:glyphspek.inlineEdit",
@@ -114,6 +115,10 @@
         "title": "GlyphSpek: Open Governed Terminal"
       },
       {
+        "command": "glyphspek.openUngovernedTerminal",
+        "title": "GlyphSpek: Open Ungoverned Terminal"
+      },
+      {
         "command": "glyphspek.runs.newGovernedTerminal",
         "title": "GlyphSpek: New Governed Terminal",
         "category": "GlyphSpek",
@@ -148,6 +153,10 @@
       {
         "command": "glyphspek.verifyAutoTest",
         "title": "GlyphSpek: Verify (Auto Test)"
+      },
+      {
+        "command": "glyphspek.terminalGenerateCommand",
+        "title": "GlyphSpek: Generate Terminal Command"
       }
     ],
     "keybindings": [
@@ -156,6 +165,11 @@
         "command": "glyphspek.inlineEdit",
         "key": "cmd+k cmd+i",
         "when": "editorTextFocus"
+      },
+      {
+        "comment": "Explicitly UNGOVERNED terminal accelerator. Opens a STOCK shell (full host env, NO supervisor proxy, command + network egress NOT traced) honestly labeled 'Ungoverned Terminal' with a neutral/amber badge — NEVER the governed shield/green, never mistakable for governed. This is NOT a new escape hatch: stock terminals already exist (Ctrl+`) and the A1 audit already labels them; this is a deliberate, first-class accelerator ('friction follows authority' — a plain shell is a legitimate choice). Mirrors the governed accelerator's key choice: ctrl+cmd+k is the governed (now FLOATING) terminal — owned by the FORK's floating-terminal workbench action (KeyMod.WinCtrl | KeyMod.CtrlCmd | KeyCode.KeyK) — and ctrl+cmd+u is the ungoverned one (parallel + mnemonic 'U' for ungoverned). VERIFIED FREE: 0 hits for `WinCtrl | CtrlCmd | KeyU` in the fork (the only KeyU fork bindings are Cmd+Shift+U output, Cmd+U cursor-undo, and the Cmd+K U / Cmd+K Cmd+U chords — none is ctrl+cmd+u) and 0 hits in this package.json. The command is ALSO palette-invokable; the keybinding is purely an accelerator.",
+        "command": "glyphspek.openUngovernedTerminal",
+        "key": "ctrl+cmd+u"
       }
     ],
     "viewsContainers": {
@@ -635,7 +649,7 @@
           "minimum": 1,
           "maximum": 10,
           "scope": "machine",
-          "description": "Maximum concurrent @Web fetches allowed for a chat turn. P0 currently fetches sequentially, which stays under this cap; the setting is machine-scoped so a workspace cannot widen future web egress concurrency."
+          "description": "Maximum concurrent @Web fetches in flight for a chat turn. Enforced: at most this many web/fetch calls run at once and results stay in reference order. Machine-scoped so a workspace cannot widen web egress concurrency."
         },
         "glyphspek.chat.alignInstructionFilesToModel": {
           "type": "boolean",
@@ -680,7 +694,7 @@
     "verify-tracked-refs": "node ../tools/verify-tracked-refs.mjs",
     "compile": "npm run bundle:supervisor && tsc -p .",
     "//test": "Explicit curated list (NOT a glob \u2014 a broad glob has caused env inspector-port hangs here). When you add a new test/*.test.mjs, ADD IT TO THIS LIST or CI stays green without it.",
-    "test": "npm run bundle:supervisor && tsc -p . && node --test test/inlineScript.test.mjs test/configScope.test.mjs test/supervisorRunner.test.mjs test/policyHash.test.mjs test/bridgeProtocol.test.mjs test/bridgeContractConformance.test.mjs test/bridge.test.mjs test/bridgeServerSpawn.test.mjs test/liveRunStream.test.mjs test/runEventProtocol.test.mjs test/liveRunModel.test.mjs test/mockRunStream.test.mjs test/liveReducerGolden.test.mjs test/chatViewModel.test.mjs test/chatDemoState.test.mjs test/chatModelSelection.test.mjs test/operatorGesture.test.mjs test/runGovernedTaskGate.test.mjs test/webviewGestureGate.test.mjs test/liveSchemaGate.test.mjs test/m5FailureEmission.test.mjs test/governedTerminalEnv.test.mjs test/governedTerminalSession.test.mjs test/openGovernedTerminalCommand.test.mjs test/openChatCommand.test.mjs test/governedTerminalResolution.test.mjs test/agentCliCodex.test.mjs test/iconSpriteInjection.test.mjs test/livePanelLabels.test.mjs test/liveRunTrustIngestion.test.mjs test/runTrustBadge.test.mjs test/governedRunsModel.test.mjs test/governedRunsView.test.mjs test/governedRunsCard.test.mjs test/governedRunsCardView.test.mjs test/agentLaunch.test.mjs test/openChatBinaryPin.test.mjs test/agentBinaryIdentity.test.mjs test/ptyHost.test.mjs test/chatTerminalView.test.mjs test/loginShellResolve.test.mjs test/nodePtyBaseDirs.test.mjs test/chatSendBridge.test.mjs test/nativeChatCommand.test.mjs test/chatParticipantAgent.test.mjs test/chatProviderFailClosed.test.mjs test/chatTurnSerialization.test.mjs test/agenticBuildReview.test.mjs test/agenticBuildBridge.test.mjs test/agenticBuildPromotion.test.mjs test/promoteChatToBuildCommand.test.mjs test/frictionSurface.test.mjs test/statusBarSegments.test.mjs test/haloChrome.test.mjs test/authorityLadder.test.mjs test/provenanceGutter.test.mjs test/agentRunSnapshot.test.mjs test/agentRunDetail.test.mjs test/evidenceSummary.test.mjs test/liveEvidenceSummary.test.mjs test/liveEvidenceRibbon.test.mjs test/codeContextInjection.test.mjs test/fileAttachmentContext.test.mjs test/attachmentCap.test.mjs test/bridgeIndexRetrieve.test.mjs test/bridgeWebFetch.test.mjs test/webContextParsing.test.mjs test/inlineCompletionContext.test.mjs test/ollamaFimClient.test.mjs test/bridgeRunsBaseMkdir.test.mjs test/chatBuildIntent.test.mjs test/inlineEdit.test.mjs test/inlineEditStaleBuffer.test.mjs test/definitionWorkspaceScope.test.mjs test/inlineCompletionNotice.test.mjs test/ungovernedTerminalNotice.test.mjs test/repoAwareFim.test.mjs test/repoAwareQuery.test.mjs test/indexStatusBar.test.mjs test/indexProgress.test.mjs test/bridgeIndexBuildStream.test.mjs test/foreignInstructionFilter.test.mjs test/scopeContextCache.test.mjs test/fimRequestBody.test.mjs test/autoImport.test.mjs test/alternatesDedup.test.mjs test/compileGate.test.mjs test/compileGateProvider.test.mjs test/autoChunkLoop.test.mjs test/autoChunkProvider.test.mjs test/verifyTestGen.test.mjs test/verifyExtract.test.mjs test/verifyRunner.test.mjs test/verifyCard.test.mjs test/autoChunkResultCache.test.mjs test/verifyRepair.test.mjs test/verifyCardFix.test.mjs",
+    "test": "npm run bundle:supervisor && tsc -p . && node --test test/inlineScript.test.mjs test/configScope.test.mjs test/supervisorRunner.test.mjs test/policyHash.test.mjs test/bridgeProtocol.test.mjs test/bridgeContractConformance.test.mjs test/bridge.test.mjs test/bridgeServerSpawn.test.mjs test/liveRunStream.test.mjs test/runEventProtocol.test.mjs test/liveRunModel.test.mjs test/mockRunStream.test.mjs test/liveReducerGolden.test.mjs test/chatViewModel.test.mjs test/chatDemoState.test.mjs test/chatModelSelection.test.mjs test/operatorGesture.test.mjs test/runGovernedTaskGate.test.mjs test/webviewGestureGate.test.mjs test/liveSchemaGate.test.mjs test/m5FailureEmission.test.mjs test/governedTerminalEnv.test.mjs test/governedTerminalSession.test.mjs test/openGovernedTerminalCommand.test.mjs test/openChatCommand.test.mjs test/governedTerminalResolution.test.mjs test/agentCliCodex.test.mjs test/iconSpriteInjection.test.mjs test/livePanelLabels.test.mjs test/liveRunTrustIngestion.test.mjs test/runTrustBadge.test.mjs test/governedRunsModel.test.mjs test/governedRunsView.test.mjs test/governedRunsCard.test.mjs test/governedRunsCardView.test.mjs test/agentLaunch.test.mjs test/openChatBinaryPin.test.mjs test/agentBinaryIdentity.test.mjs test/ptyHost.test.mjs test/chatTerminalView.test.mjs test/loginShellResolve.test.mjs test/nodePtyBaseDirs.test.mjs test/chatSendBridge.test.mjs test/nativeChatCommand.test.mjs test/chatParticipantAgent.test.mjs test/chatProviderFailClosed.test.mjs test/chatTurnSerialization.test.mjs test/agenticBuildReview.test.mjs test/agenticBuildBridge.test.mjs test/agenticBuildPromotion.test.mjs test/promoteChatToBuildCommand.test.mjs test/frictionSurface.test.mjs test/statusBarSegments.test.mjs test/haloChrome.test.mjs test/authorityLadder.test.mjs test/provenanceGutter.test.mjs test/agentRunSnapshot.test.mjs test/agentRunDetail.test.mjs test/evidenceSummary.test.mjs test/liveEvidenceSummary.test.mjs test/liveEvidenceRibbon.test.mjs test/codeContextInjection.test.mjs test/fileAttachmentContext.test.mjs test/attachmentCap.test.mjs test/bridgeIndexRetrieve.test.mjs test/bridgeWebFetch.test.mjs test/webContextParsing.test.mjs test/inlineCompletionContext.test.mjs test/ollamaFimClient.test.mjs test/bridgeRunsBaseMkdir.test.mjs test/chatBuildIntent.test.mjs test/inlineEdit.test.mjs test/inlineEditStaleBuffer.test.mjs test/definitionWorkspaceScope.test.mjs test/inlineCompletionNotice.test.mjs test/ungovernedTerminalNotice.test.mjs test/terminalCommandGen.test.mjs test/terminalCmdKTarget.test.mjs test/repoAwareFim.test.mjs test/repoAwareQuery.test.mjs test/indexStatusBar.test.mjs test/indexProgress.test.mjs test/bridgeIndexBuildStream.test.mjs test/foreignInstructionFilter.test.mjs test/scopeContextCache.test.mjs test/fimRequestBody.test.mjs test/autoImport.test.mjs test/alternatesDedup.test.mjs test/compileGate.test.mjs test/compileGateProvider.test.mjs test/autoChunkLoop.test.mjs test/autoChunkProvider.test.mjs test/verifyTestGen.test.mjs test/verifyExtract.test.mjs test/verifyRunner.test.mjs test/verifyCard.test.mjs test/autoChunkResultCache.test.mjs test/verifyRepair.test.mjs test/verifyCardFix.test.mjs test/webContextHardening.test.mjs test/webMarkerContract.test.mjs test/webEgressGate.test.mjs test/ungovernedTerminalOpenNotice.test.mjs test/governedFloatingTerminalMarker.test.mjs test/governedFloatingTerminalSeam.test.mjs test/floatingTerminalUnify.test.mjs",
     "package": "npm run bundle:supervisor && tsc -p . && vsce package --no-dependencies"
   },
   "devDependencies": {

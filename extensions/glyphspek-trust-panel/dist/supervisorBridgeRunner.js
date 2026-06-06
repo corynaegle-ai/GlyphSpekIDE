@@ -414,13 +414,40 @@ async function startGovernedTerminalSession(opts) {
         // KEEP THE CHILD ALIVE for the session's lifetime. The session handle's stop()
         // calls terminal/stop and disposes the child.
         let stopped = false;
+        // G7/E18 — the governance-loss listeners. The bridge fires its child-exit handler
+        // ONCE on an UNEXPECTED child/proxy death; we fan it out to subscribers. A graceful
+        // stop() CLEARS the bridge handler first so an intentional teardown does not look like
+        // governance loss.
+        const lossListeners = new Set();
+        let lossFired = false;
+        bridge.setChildExitHandler(() => {
+            if (lossFired || stopped) {
+                return;
+            }
+            lossFired = true;
+            for (const l of [...lossListeners]) {
+                try {
+                    l();
+                }
+                catch {
+                    /* best-effort: a governance-loss subscriber must never break teardown */
+                }
+            }
+        });
         const session = {
             runId: start.runId,
+            onGovernanceLoss(listener) {
+                lossListeners.add(listener);
+                return { dispose: () => { lossListeners.delete(listener); } };
+            },
             async stop() {
                 if (stopped) {
                     return { finalized: false, message: 'terminal session already stopped.' };
                 }
                 stopped = true;
+                // An intentional teardown must NOT surface as governance loss: clear the bridge's
+                // child-exit handler so the disposeOnce() below cannot fire G7.
+                bridge.clearChildExitHandler();
                 try {
                     const fin = await bridge.terminalStop({ runId: start.runId });
                     if (!fin.ok) {
