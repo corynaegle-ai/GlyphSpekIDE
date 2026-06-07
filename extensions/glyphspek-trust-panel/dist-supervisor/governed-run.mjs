@@ -1432,6 +1432,106 @@ import {
   createPrivateKey,
   createPublicKey as createPublicKey2
 } from "node:crypto";
+
+// ../spikes/p0-model-gateway/agentic-backend.ts
+import { spawn as spawn3 } from "node:child_process";
+import { execFile } from "node:child_process";
+import { isAbsolute as isAbsolute2 } from "node:path";
+import { promisify } from "node:util";
+
+// ../spikes/p0-model-gateway/codex-backend.ts
+import { spawn as spawn2 } from "node:child_process";
+import { isAbsolute } from "node:path";
+
+// ../spikes/p0-model-gateway/agentic-backend.ts
+var execFileAsync = promisify(execFile);
+async function git(cwd, env, args) {
+  const { stdout } = await execFileAsync("git", ["-C", cwd, ...args], {
+    env,
+    maxBuffer: 64 * 1024 * 1024
+    // diffs can be large
+  });
+  return stdout;
+}
+function porcelainStatus(xy) {
+  const x = xy[0] ?? " ";
+  const y = xy[1] ?? " ";
+  if (x === "?" || y === "?") return "?";
+  if (y !== " ") return y;
+  if (x !== " ") return x;
+  return "?";
+}
+function parsePorcelain(porcelain) {
+  const out = [];
+  for (const line of porcelain.split("\n")) {
+    if (line.length === 0) continue;
+    const xy = line.slice(0, 2);
+    let pathPart = line.slice(3);
+    const arrow = pathPart.indexOf(" -> ");
+    if (arrow !== -1) pathPart = pathPart.slice(arrow + 4);
+    let p = pathPart.trim();
+    if (p.startsWith('"') && p.endsWith('"')) {
+      try {
+        p = JSON.parse(p);
+      } catch {
+      }
+    }
+    if (p.length > 0) out.push({ path: p, status: porcelainStatus(xy) });
+  }
+  return out;
+}
+async function gitAllowNonZero(cwd, env, args) {
+  try {
+    return await git(cwd, env, args);
+  } catch (err) {
+    const out = err.stdout;
+    return typeof out === "string" ? out : "";
+  }
+}
+async function diffUntrackedFile(cwd, env, relPath) {
+  const out = await gitAllowNonZero(cwd, env, ["diff", "--no-index", "--", "/dev/null", relPath]);
+  return out;
+}
+async function listUntrackedFiles(cwd, env) {
+  const out = await gitAllowNonZero(cwd, env, ["ls-files", "--others", "--exclude-standard"]);
+  return out.split("\n").map((l) => l.trim()).filter((l) => l.length > 0);
+}
+async function captureGitEvidence(cwd, env) {
+  const [porcelain, trackedDiff, trackedStat, untracked] = await Promise.all([
+    git(cwd, env, ["status", "--porcelain"]),
+    git(cwd, env, ["diff"]),
+    git(cwd, env, ["diff", "--stat"]),
+    listUntrackedFiles(cwd, env)
+  ]);
+  const changedFiles = parsePorcelain(porcelain);
+  let diff = trackedDiff;
+  let untrackedStatLines = 0;
+  for (const rel of untracked) {
+    const block = await diffUntrackedFile(cwd, env, rel);
+    if (block.trim().length > 0) {
+      if (diff.length > 0 && !diff.endsWith("\n")) diff += "\n";
+      diff += block;
+      untrackedStatLines += 1;
+    }
+  }
+  let diffStat = trackedStat.trimEnd();
+  for (const rel of untracked) {
+    const existing = changedFiles.find((f) => f.path === rel);
+    if (existing) {
+      if (existing.status === "?") existing.status = "A";
+    } else {
+      changedFiles.push({ path: rel, status: "A" });
+    }
+  }
+  if (untrackedStatLines > 0) {
+    const tail = untracked.map((rel) => ` ${rel} | (new file)`).join("\n");
+    diffStat = diffStat.length > 0 ? `${diffStat}
+${tail}` : tail;
+  }
+  return { changedFiles, diff, diffStat };
+}
+
+// ../spikes/p0-supervisor/bundle.ts
 function keyIdForPublicKey2(publicKey) {
   const spki = publicKey.export({ type: "spki", format: "der" });
   return createHash3("sha256").update(spki).digest("hex").slice(0, 16);
@@ -1452,7 +1552,7 @@ function resolveVerifierKeypair(verifierKeyPath) {
   return { privateKey, publicKey, keyId: keyIdForPublicKey2(publicKey) };
 }
 function writeVerifiedBundle(input) {
-  const { outDir, tracePath, verdict, publicKey, actorClaim, readme } = input;
+  const { outDir, tracePath, verdict, publicKey, actorClaim, readme, diff } = input;
   mkdirSync4(outDir, { recursive: true });
   cpSync2(tracePath, path4.join(outDir, "trace.jsonl"), { force: true });
   writeFileSync(
@@ -1468,6 +1568,17 @@ function writeVerifiedBundle(input) {
     "utf8"
   );
   writeFileSync(path4.join(outDir, "README.md"), readme, "utf8");
+  if (typeof diff === "string" && diff.trim().length > 0) {
+    writeFileSync(path4.join(outDir, "diff.patch"), diff, "utf8");
+  }
+}
+async function captureActorDiff(worktreeDir) {
+  try {
+    const { diff } = await captureGitEvidence(worktreeDir, process.env);
+    return diff.trim().length > 0 ? diff : void 0;
+  } catch {
+    return void 0;
+  }
 }
 
 // ../spikes/p0-supervisor/autonomous-capstone.ts
@@ -1480,7 +1591,7 @@ import { fileURLToPath as fileURLToPath2 } from "node:url";
 
 // ../spikes/p0-supervisor/file-broker.ts
 import { readFileSync as readFileSync4, writeFileSync as writeFileSync2, mkdirSync as mkdirSync5, existsSync as existsSync3 } from "node:fs";
-import { resolve, relative, dirname as dirname3, isAbsolute } from "node:path";
+import { resolve, relative, dirname as dirname3, isAbsolute as isAbsolute3 } from "node:path";
 function createFileBroker(opts) {
   const { policy, sink, runId } = opts;
   const root = resolve(opts.worktreeDir);
@@ -1490,7 +1601,7 @@ function createFileBroker(opts) {
   const within = (relPath) => {
     const abs = resolve(root, relPath);
     const rel = relative(root, abs);
-    if (rel === "" || rel.startsWith("..") || isAbsolute(rel)) return void 0;
+    if (rel === "" || rel.startsWith("..") || isAbsolute3(rel)) return void 0;
     return abs;
   };
   const broker = (tool, relPath, provenanceLabel, act) => {
@@ -2112,6 +2223,7 @@ async function runAutonomousCapstone(options = {}) {
   const keypair = resolveVerifierKeypair(verifierKeyPath);
   const privateKey = keypair.privateKey;
   let verdict;
+  let actorDiff;
   try {
     verdict = await runVerification({
       repoPath,
@@ -2120,6 +2232,7 @@ async function runAutonomousCapstone(options = {}) {
       tracePath,
       privateKey
     });
+    actorDiff = await captureActorDiff(worktreeDir);
   } finally {
     await teardown();
   }
@@ -2145,7 +2258,8 @@ async function runAutonomousCapstone(options = {}) {
     verdict,
     publicKey: keypair.publicKey,
     actorClaim,
-    readme
+    readme,
+    ...actorDiff ? { diff: actorDiff } : {}
   });
   return {
     runId,

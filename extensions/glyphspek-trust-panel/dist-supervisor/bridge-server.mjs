@@ -326,10 +326,10 @@ var init_chunk = __esm({
 });
 
 // ../spikes/p0-supervisor/bridge-server.ts
-import { createHash as createHash7 } from "node:crypto";
-import { readFileSync as readFileSync5, statSync as statSync3, realpathSync } from "node:fs";
+import { createHash as createHash8 } from "node:crypto";
+import { readFileSync as readFileSync6, statSync as statSync3, realpathSync } from "node:fs";
 import { spawnSync as spawnSync2 } from "node:child_process";
-import { join as join11, resolve as resolve4 } from "node:path";
+import { join as join12, resolve as resolve4 } from "node:path";
 
 // ../spikes/p0-supervisor/run.ts
 import { randomUUID } from "node:crypto";
@@ -392,10 +392,10 @@ function isStringArray(v) {
 function isStringMatrix(v) {
   return Array.isArray(v) && v.every((row) => isStringArray(row));
 }
-function validateDefaultVerb(value, path5, errors) {
+function validateDefaultVerb(value, path6, errors) {
   if (typeof value !== "string" || !POLICY_DEFAULT_VERBS.includes(value)) {
     errors.push(
-      `${path5} must be one of ${POLICY_DEFAULT_VERBS.join(" | ")}, got ${describe(value)}`
+      `${path6} must be one of ${POLICY_DEFAULT_VERBS.join(" | ")}, got ${describe(value)}`
     );
   }
 }
@@ -932,9 +932,9 @@ function createTraceWriter(traceFilePath) {
   };
   return { path: traceFilePath, append };
 }
-function readTrace(path5) {
-  if (!existsSync(path5)) return [];
-  const raw = readFileSync(path5, "utf8");
+function readTrace(path6) {
+  if (!existsSync(path6)) return [];
+  const raw = readFileSync(path6, "utf8");
   const events = [];
   const lines = raw.split("\n");
   for (let i = 0; i < lines.length; i++) {
@@ -945,7 +945,7 @@ function readTrace(path5) {
       parsed = JSON.parse(line);
     } catch (err) {
       throw new Error(
-        `readTrace: invalid JSON on line ${i + 1} of ${path5}: ${err.message}`
+        `readTrace: invalid JSON on line ${i + 1} of ${path6}: ${err.message}`
       );
     }
     events.push(parsed);
@@ -1011,24 +1011,24 @@ function signVerdict(core, privateKey, keyId) {
 // ../spikes/p0-supervisor/policy/load.ts
 import { readFileSync as readFileSync2 } from "node:fs";
 import { extname } from "node:path";
-function loadPolicy(path5) {
-  const ext = extname(path5).toLowerCase();
+function loadPolicy(path6) {
+  const ext = extname(path6).toLowerCase();
   if (ext === ".yml" || ext === ".yaml") {
-    throw new Error(`P0 uses JSON policy; convert ${path5}`);
+    throw new Error(`P0 uses JSON policy; convert ${path6}`);
   }
   let text;
   try {
-    text = readFileSync2(path5, "utf8");
+    text = readFileSync2(path6, "utf8");
   } catch (err) {
     const reason = err instanceof Error ? err.message : String(err);
-    return { errors: [`could not read policy file ${path5}: ${reason}`] };
+    return { errors: [`could not read policy file ${path6}: ${reason}`] };
   }
   let raw;
   try {
     raw = JSON.parse(text);
   } catch (err) {
     const reason = err instanceof Error ? err.message : String(err);
-    return { errors: [`policy file ${path5} is not valid JSON: ${reason}`] };
+    return { errors: [`policy file ${path6} is not valid JSON: ${reason}`] };
   }
   return parsePolicy(raw);
 }
@@ -1229,18 +1229,18 @@ function decide(policy, request) {
 function decideRaw(policy, request) {
   switch (request.tool) {
     case "file_read": {
-      const path5 = readPath(request.payload);
-      if (path5 !== void 0) {
-        if (anyGlobMatch(policy.deny.read_paths, path5)) return "deny";
-        if (anyGlobMatch(policy.allow.read_paths, path5)) return "allow";
+      const path6 = readPath(request.payload);
+      if (path6 !== void 0) {
+        if (anyGlobMatch(policy.deny.read_paths, path6)) return "deny";
+        if (anyGlobMatch(policy.allow.read_paths, path6)) return "allow";
       }
       return verbToDecision(policy.defaults.file_read);
     }
     case "file_write": {
-      const path5 = readPath(request.payload);
-      if (path5 !== void 0) {
-        if (anyGlobMatch(policy.deny.write_paths, path5)) return "deny";
-        if (anyGlobMatch(policy.allow.write_paths, path5)) return "allow";
+      const path6 = readPath(request.payload);
+      if (path6 !== void 0) {
+        if (anyGlobMatch(policy.deny.write_paths, path6)) return "deny";
+        if (anyGlobMatch(policy.allow.write_paths, path6)) return "allow";
       }
       return verbToDecision(policy.defaults.file_write);
     }
@@ -1434,8 +1434,8 @@ async function driveScriptedRun(opts) {
 function sinkEvents(sink) {
   const maybe = sink.events;
   if (Array.isArray(maybe)) return maybe;
-  const path5 = sink.path;
-  if (typeof path5 === "string") return readTrace(path5);
+  const path6 = sink.path;
+  if (typeof path6 === "string") return readTrace(path6);
   return [];
 }
 function signEphemeral(checks, overallVerdict, traceRootHash, injectedKey) {
@@ -2286,8 +2286,8 @@ function finalizeTerminalRun(opts) {
 function sinkEvents2(sink) {
   const maybe = sink.events;
   if (Array.isArray(maybe)) return maybe;
-  const path5 = sink.path;
-  if (typeof path5 === "string") return readTrace(path5);
+  const path6 = sink.path;
+  if (typeof path6 === "string") return readTrace(path6);
   return [];
 }
 function signTerminalVerdict(core, injectedKey) {
@@ -2881,14 +2881,14 @@ function serializeChunks(chunks, embedderId) {
       );
     }
     const id = Buffer.from(chunk.id, "utf8");
-    const path5 = Buffer.from(chunk.path, "utf8");
+    const path6 = Buffer.from(chunk.path, "utf8");
     const hash = Buffer.from(chunk.hash, "utf8");
     const text = Buffer.from(chunk.text, "utf8");
     const fixed = Buffer.allocUnsafe(4 * 6);
     let o = 0;
     fixed.writeUInt32LE(id.length, o);
     o += 4;
-    fixed.writeUInt32LE(path5.length, o);
+    fixed.writeUInt32LE(path6.length, o);
     o += 4;
     fixed.writeUInt32LE(chunk.startLine >>> 0, o);
     o += 4;
@@ -2902,7 +2902,7 @@ function serializeChunks(chunks, embedderId) {
     for (let i = 0; i < dims; i++) {
       vec.writeFloatLE(chunk.vector[i], i * 4);
     }
-    parts.push(fixed, id, path5, hash, text, vec);
+    parts.push(fixed, id, path6, hash, text, vec);
   }
   return Buffer.concat(parts);
 }
@@ -2947,7 +2947,7 @@ function deserializeChunks(buf) {
     const id = buf.toString("utf8", off, off + idLen);
     off += idLen;
     need(pathLen);
-    const path5 = buf.toString("utf8", off, off + pathLen);
+    const path6 = buf.toString("utf8", off, off + pathLen);
     off += pathLen;
     need(hashLen);
     const hash = buf.toString("utf8", off, off + hashLen);
@@ -2961,7 +2961,7 @@ function deserializeChunks(buf) {
       vector[i] = buf.readFloatLE(off + i * 4);
     }
     off += dims * 4;
-    chunks.push({ id, path: path5, startLine, endLine, hash, text, vector });
+    chunks.push({ id, path: path6, startLine, endLine, hash, text, vector });
   }
   return { embedderId, dims, chunks };
 }
@@ -3082,10 +3082,10 @@ async function buildIndex(opts) {
     }
   }
   const pathsToRemove = [];
-  for (const [path5, priorIds] of manifestIdsByPath) {
-    const freshIds = freshIdsByPath.get(path5);
+  for (const [path6, priorIds] of manifestIdsByPath) {
+    const freshIds = freshIdsByPath.get(path6);
     if (freshIds === void 0) {
-      pathsToRemove.push(path5);
+      pathsToRemove.push(path6);
       continue;
     }
     let hasOrphan = false;
@@ -3096,10 +3096,10 @@ async function buildIndex(opts) {
       }
     }
     if (hasOrphan) {
-      pathsToRemove.push(path5);
+      pathsToRemove.push(path6);
       const already = new Set(toEmbed.map((c) => c.id));
       for (const chunk of freshChunks) {
-        if (chunk.path === path5 && !already.has(chunk.id)) {
+        if (chunk.path === path6 && !already.has(chunk.id)) {
           toEmbed.push(chunk);
           reused--;
         }
@@ -3334,7 +3334,7 @@ function projectedMergedChars(run) {
   return buildMergedText(run).length;
 }
 function mergeRegion(run) {
-  const path5 = run[0].chunk.path;
+  const path6 = run[0].chunk.path;
   const startLine = Math.min(...run.map((h) => h.chunk.startLine));
   const endLine = Math.max(...run.map((h) => h.chunk.endLine));
   const text = buildMergedText(run);
@@ -3342,8 +3342,8 @@ function mergeRegion(run) {
   const relevances = run.map((h) => h.relevance).filter((r) => r !== void 0);
   const relevance = relevances.length > 0 ? Math.max(...relevances) : void 0;
   const chunk = {
-    id: `${path5}:${startLine}-${endLine}`,
-    path: path5,
+    id: `${path6}:${startLine}-${endLine}`,
+    path: path6,
     startLine,
     endLine,
     text,
@@ -4619,8 +4619,18 @@ var CodexChatBackend = class {
 // ../spikes/p0-model-gateway/governed-agentic-run.ts
 import { execFile as execFile2 } from "node:child_process";
 import { promisify as promisify2 } from "node:util";
-import { join as join9 } from "node:path";
-import { mkdirSync as mkdirSync5, writeFileSync as writeFileSync2 } from "node:fs";
+import { join as join10 } from "node:path";
+import { existsSync as existsSync5, mkdirSync as mkdirSync6, writeFileSync as writeFileSync3 } from "node:fs";
+import { createPublicKey as createPublicKey3 } from "node:crypto";
+
+// ../spikes/p0-supervisor/bundle.ts
+import { cpSync as cpSync2, mkdirSync as mkdirSync5, readFileSync as readFileSync4, writeFileSync as writeFileSync2 } from "node:fs";
+import * as path5 from "node:path";
+import {
+  createHash as createHash6,
+  createPrivateKey,
+  createPublicKey as createPublicKey2
+} from "node:crypto";
 
 // ../spikes/p0-verifier/verifier.ts
 import { cpSync, existsSync as existsSync4, readdirSync, rmSync as rmSync2, statSync as statSync2 } from "node:fs";
@@ -4998,48 +5008,6 @@ async function runVerification(input) {
   return { ...core, signature };
 }
 
-// ../spikes/p0-supervisor/verifier-runner.ts
-var INDEPENDENT_VERIFIER_ERROR_CHECK_NAME = "independent verifier \u2014 could not run (see operator log)";
-async function runIndependentVerification(input) {
-  const log = input.onOperatorLog ?? (() => {
-  });
-  try {
-    const verdict = await runVerification({
-      repoPath: input.repoPath,
-      sourceWorktree: input.sourceWorktree,
-      policyPath: input.policyPath,
-      tracePath: input.tracePath,
-      privateKey: input.privateKey,
-      ...input.runtime ? { runtime: input.runtime } : {},
-      ...input.runsBaseDir !== void 0 ? { runsBaseDir: input.runsBaseDir } : {}
-    });
-    return { verdict, ran: verdict.overallVerdict !== "error" };
-  } catch (err) {
-    const reason = err instanceof Error ? err.message : String(err);
-    log(`independent-verifier: could not run \u2014 ${reason}`);
-    return {
-      verdict: synthesizeErrorVerdict(input.tracePath, input.privateKey),
-      ran: false
-    };
-  }
-}
-function synthesizeErrorVerdict(tracePath, privateKey) {
-  let traceRootHash = GENESIS_HASH;
-  try {
-    const events = readTrace(tracePath);
-    if (events.length > 0 && verifyChain(events).ok) {
-      traceRootHash = computeTraceRoot(events);
-    }
-  } catch {
-  }
-  const checks = [
-    { name: INDEPENDENT_VERIFIER_ERROR_CHECK_NAME, command: [], status: "error" }
-  ];
-  const core = { checks, overallVerdict: "error", traceRootHash };
-  const signature = signVerdict(core, privateKey);
-  return { ...core, signature };
-}
-
 // ../spikes/p0-model-gateway/agentic-backend.ts
 import { spawn as spawn4 } from "node:child_process";
 import { execFile } from "node:child_process";
@@ -5238,11 +5206,11 @@ async function* runAgenticBuild(req, opts = {}) {
       }
     } else if (evt.type === "item.completed" && item?.type === "file_change") {
       for (const ch of item.changes ?? []) {
-        const path5 = asStr(ch.path);
+        const path6 = asStr(ch.path);
         const kind = asStr(ch.kind) ?? "unknown";
-        if (path5) {
-          fileChangeReports.push({ path: path5, kind });
-          push({ type: "file_change", path: path5, kind });
+        if (path6) {
+          fileChangeReports.push({ path: path6, kind });
+          push({ type: "file_change", path: path6, kind });
         }
       }
     } else if (evt.type === "turn.completed" && evt.usage) {
@@ -5382,6 +5350,90 @@ async function* runAgenticBuild(req, opts = {}) {
   }
 }
 
+// ../spikes/p0-supervisor/bundle.ts
+function keyIdForPublicKey2(publicKey) {
+  const spki = publicKey.export({ type: "spki", format: "der" });
+  return createHash6("sha256").update(spki).digest("hex").slice(0, 16);
+}
+function resolveVerifierKeypair(verifierKeyPath2) {
+  if (verifierKeyPath2 === void 0) {
+    return generateVerifierKeypair();
+  }
+  let privateKey;
+  try {
+    privateKey = createPrivateKey(readFileSync4(verifierKeyPath2, "utf8"));
+  } catch (err) {
+    throw new Error(
+      `bundle: failed to load verifier private key from ${verifierKeyPath2}: ${err instanceof Error ? err.message : String(err)}`
+    );
+  }
+  const publicKey = createPublicKey2(privateKey);
+  return { privateKey, publicKey, keyId: keyIdForPublicKey2(publicKey) };
+}
+function writeVerifiedBundle(input) {
+  const { outDir, tracePath, verdict, publicKey, actorClaim, readme, diff } = input;
+  mkdirSync5(outDir, { recursive: true });
+  cpSync2(tracePath, path5.join(outDir, "trace.jsonl"), { force: true });
+  writeFileSync2(
+    path5.join(outDir, "verdict.json"),
+    JSON.stringify(verdict, null, 2) + "\n",
+    "utf8"
+  );
+  const publicKeyPem = publicKey.export({ type: "spki", format: "pem" }).toString();
+  writeFileSync2(path5.join(outDir, "verifier-public-key.pem"), publicKeyPem, "utf8");
+  writeFileSync2(
+    path5.join(outDir, "actor-claims.json"),
+    JSON.stringify(actorClaim, null, 2) + "\n",
+    "utf8"
+  );
+  writeFileSync2(path5.join(outDir, "README.md"), readme, "utf8");
+  if (typeof diff === "string" && diff.trim().length > 0) {
+    writeFileSync2(path5.join(outDir, "diff.patch"), diff, "utf8");
+  }
+}
+
+// ../spikes/p0-supervisor/verifier-runner.ts
+var INDEPENDENT_VERIFIER_ERROR_CHECK_NAME = "independent verifier \u2014 could not run (see operator log)";
+async function runIndependentVerification(input) {
+  const log = input.onOperatorLog ?? (() => {
+  });
+  try {
+    const verdict = await runVerification({
+      repoPath: input.repoPath,
+      sourceWorktree: input.sourceWorktree,
+      policyPath: input.policyPath,
+      tracePath: input.tracePath,
+      privateKey: input.privateKey,
+      ...input.runtime ? { runtime: input.runtime } : {},
+      ...input.runsBaseDir !== void 0 ? { runsBaseDir: input.runsBaseDir } : {}
+    });
+    return { verdict, ran: verdict.overallVerdict !== "error" };
+  } catch (err) {
+    const reason = err instanceof Error ? err.message : String(err);
+    log(`independent-verifier: could not run \u2014 ${reason}`);
+    return {
+      verdict: synthesizeErrorVerdict(input.tracePath, input.privateKey),
+      ran: false
+    };
+  }
+}
+function synthesizeErrorVerdict(tracePath, privateKey) {
+  let traceRootHash = GENESIS_HASH;
+  try {
+    const events = readTrace(tracePath);
+    if (events.length > 0 && verifyChain(events).ok) {
+      traceRootHash = computeTraceRoot(events);
+    }
+  } catch {
+  }
+  const checks = [
+    { name: INDEPENDENT_VERIFIER_ERROR_CHECK_NAME, command: [], status: "error" }
+  ];
+  const core = { checks, overallVerdict: "error", traceRootHash };
+  const signature = signVerdict(core, privateKey);
+  return { ...core, signature };
+}
+
 // ../spikes/p0-model-gateway/governed-agentic-run.ts
 var execFileAsync2 = promisify2(execFile2);
 var AGENTIC_RUN_POSTURE = "governed-unsandboxed";
@@ -5438,10 +5490,10 @@ async function runVerifyCheck(command, cwd, env, timeoutMs, signal) {
   }
 }
 function writeEphemeralVerifyPolicy(verifyCommand, runDir) {
-  const dir = join9(runDir, "verifier-policy");
-  mkdirSync5(dir, { recursive: true });
-  const policyPath = join9(dir, "verify-policy.json");
-  writeFileSync2(
+  const dir = join10(runDir, "verifier-policy");
+  mkdirSync6(dir, { recursive: true });
+  const policyPath = join10(dir, "verify-policy.json");
+  writeFileSync3(
     policyPath,
     JSON.stringify(
       {
@@ -5459,6 +5511,32 @@ function writeEphemeralVerifyPolicy(verifyCommand, runDir) {
   );
   return policyPath;
 }
+function buildAgenticBundleReadme(info) {
+  const independent = info.verifierIsolation === "independent-sandboxed";
+  const isolationNote = independent ? "(independent sandboxed product verifier \u2014 may reach assurance:full)." : "(inline check over the actor worktree \u2014 a real but NOT independent signal; it can NEVER reach assurance:full).";
+  const diffLine = info.hasDiff ? '- `diff.patch` \u2014 the per-run unified git diff (the IDE binds a "Verified:" trailer against this; content-fingerprint match vs the staged diff).' : "- (no `diff.patch`: verify-only / non-git / no edit \u2014 no trailer is claimed.)";
+  return [
+    "# GlyphSpek verified-evidence bundle (governed agentic build)",
+    "",
+    `- run id: ${info.runId}`,
+    `- intent: ${info.intent.slice(0, 200)}`,
+    `- posture: ${AGENTIC_RUN_POSTURE} (the actor edited the real working tree; the git diff is the review surface, NOT a sandbox \u2014 this run is NOT product-trusted).`,
+    `- overall verdict: ${info.overallVerdict}`,
+    `- verifier isolation: ${info.verifierIsolation} ${isolationNote}`,
+    `- real build/test check ran: ${info.verifyRan ? "yes" : "no"}`,
+    `- trace root hash: ${info.traceRootHash}`,
+    `- signing key id: ${info.keyId}`,
+    "",
+    "## Files",
+    "- `trace.jsonl` \u2014 the actor's append-only, hash-chained trace (verbatim).",
+    "- `verdict.json` \u2014 the SIGNED VerifierVerdict (authoritative outcome).",
+    "- `verifier-public-key.pem` \u2014 the verifier's SPKI public key (resolve out-of-band).",
+    "- `actor-claims.json` \u2014 the actor's SELF-REPORTED claim (NOT authoritative).",
+    diffLine,
+    "- `README.md` \u2014 this file.",
+    ""
+  ].join("\n");
+}
 async function runGovernedAgenticBuild(opts) {
   const now = opts.now ?? Date.now;
   const emit = opts.emit ?? (() => {
@@ -5473,12 +5551,12 @@ async function runGovernedAgenticBuild(opts) {
     runId = opts.existingRun.runId;
     tracePath = opts.existingRun.tracePath;
     sink = opts.sink ?? opts.existingRun.sink;
-    runDir = join9(tracePath, "..", "..");
+    runDir = join10(tracePath, "..", "..");
   } else {
     const created = createRun(opts.runsBaseDir);
     runId = created.runId;
     runDir = created.dir;
-    tracePath = join9(runSubdirPath(runDir, "trace"), "trace.jsonl");
+    tracePath = join10(runSubdirPath(runDir, "trace"), "trace.jsonl");
     sink = opts.sink ?? createTraceWriter(tracePath);
   }
   let lastTraceHash;
@@ -5702,6 +5780,42 @@ async function runGovernedAgenticBuild(opts) {
   }
   emit({ type: "verdict", verdict });
   emit({ type: "run_closed", runId, ok: verdict.overallVerdict === "pass" });
+  try {
+    if (existsSync5(tracePath)) {
+      const verifierPublicKey = createPublicKey3(verifierKey);
+      const actorClaim = {
+        actor: AGENTIC_AGENT_BACKEND,
+        intent: opts.prompt.slice(0, 200),
+        summary: agentic?.summary ?? "",
+        claimedChangedFiles: (agentic?.changedFiles ?? []).map((f) => f.path),
+        commandsRun: (agentic?.commands ?? []).map((c) => c.cmd)
+      };
+      const readme = buildAgenticBundleReadme({
+        runId,
+        intent: opts.prompt,
+        overallVerdict: verdict.overallVerdict,
+        traceRootHash: verdict.traceRootHash,
+        keyId: verdict.signature?.keyId ?? "(unsigned)",
+        verifierIsolation,
+        verifyRan,
+        hasDiff: typeof agentic?.diff === "string" && agentic.diff.trim().length > 0
+      });
+      writeVerifiedBundle({
+        outDir: runDir,
+        tracePath,
+        verdict,
+        publicKey: verifierPublicKey,
+        actorClaim,
+        readme,
+        ...agentic?.diff && agentic.diff.trim().length > 0 ? { diff: agentic.diff } : {}
+      });
+    }
+  } catch (err) {
+    (opts.onOperatorLog ?? (() => {
+    }))(
+      `bundle persist skipped (best-effort): ${err instanceof Error ? err.message : String(err)}`
+    );
+  }
   return {
     runId,
     runDir,
@@ -5722,13 +5836,13 @@ async function runGovernedAgenticBuild(opts) {
 }
 
 // ../spikes/p0-model-gateway/verify-command.ts
-import { existsSync as existsSync5, readFileSync as readFileSync4, readdirSync as readdirSync2 } from "node:fs";
-import { join as join10 } from "node:path";
+import { existsSync as existsSync6, readFileSync as readFileSync5, readdirSync as readdirSync2 } from "node:fs";
+import { join as join11 } from "node:path";
 import { execFileSync as execFileSync2 } from "node:child_process";
 var VERIFY_OVERRIDE_PATH = ".glyphspek/verify.json";
 var defaultVerifyResolverDeps = {
-  fileExists: (p) => existsSync5(p),
-  readFile: (p) => readFileSync4(p, "utf8"),
+  fileExists: (p) => existsSync6(p),
+  readFile: (p) => readFileSync5(p, "utf8"),
   listDir: (dir) => {
     try {
       return readdirSync2(dir);
@@ -5759,11 +5873,11 @@ function asStringArray(v) {
   return void 0;
 }
 function readOverride(cwd, deps) {
-  const path5 = join10(cwd, VERIFY_OVERRIDE_PATH);
-  if (!deps.fileExists(path5)) return void 0;
+  const path6 = join11(cwd, VERIFY_OVERRIDE_PATH);
+  if (!deps.fileExists(path6)) return void 0;
   let raw;
   try {
-    raw = JSON.parse(deps.readFile(path5));
+    raw = JSON.parse(deps.readFile(path6));
   } catch {
     return void 0;
   }
@@ -5816,7 +5930,7 @@ function resolveVerifyCommand(cwd, deps = defaultVerifyResolverDeps) {
     return { command: override, label: override.join(" "), source: "override" };
   }
   const entries = deps.listDir(cwd);
-  const has = (name) => deps.fileExists(join10(cwd, name));
+  const has = (name) => deps.fileExists(join11(cwd, name));
   if (has("Package.swift")) {
     return { command: ["swift", "test"], label: "swift test", source: "swiftpm" };
   }
@@ -5844,7 +5958,7 @@ function resolveVerifyCommand(cwd, deps = defaultVerifyResolverDeps) {
   }
   if (has("package.json")) {
     try {
-      const pkg = JSON.parse(deps.readFile(join10(cwd, "package.json")));
+      const pkg = JSON.parse(deps.readFile(join11(cwd, "package.json")));
       if (pkg.scripts && typeof pkg.scripts.test === "string" && pkg.scripts.test.trim()) {
         return { command: ["npm", "test"], label: "npm test", source: "npm" };
       }
@@ -5861,7 +5975,7 @@ function resolveVerifyCommand(cwd, deps = defaultVerifyResolverDeps) {
 }
 
 // ../spikes/p0-supervisor/web-fetch.ts
-import { createHash as createHash6 } from "node:crypto";
+import { createHash as createHash7 } from "node:crypto";
 import { lookup as dnsLookup } from "node:dns/promises";
 import { request as httpRequest2 } from "node:http";
 import { request as httpsRequest } from "node:https";
@@ -6283,7 +6397,7 @@ async function governedWebFetch(opts) {
     const truncated = fullBytes > maxContextBytes;
     const text = truncated ? `${Buffer.from(fullText).subarray(0, maxContextBytes).toString("utf8")}
 ... [truncated]` : fullText;
-    const sha256 = createHash6("sha256").update(fullText, "utf8").digest("hex");
+    const sha256 = createHash7("sha256").update(fullText, "utf8").digest("hex");
     opts.onAttempt?.({ url: url.toString(), host, port, contentSha256: sha256 });
     return {
       ok: true,
@@ -6369,7 +6483,7 @@ function selfHashCheck(selfPath, pinnedSha) {
   }
   let actual;
   try {
-    actual = createHash7("sha256").update(readFileSync5(selfPath)).digest("hex");
+    actual = createHash8("sha256").update(readFileSync6(selfPath)).digest("hex");
   } catch (err) {
     return {
       ok: false,
@@ -6399,7 +6513,7 @@ function captureCodexBinaryIdentity(codexPath) {
   }
   if (sizeBytes === void 0 || sizeBytes <= CODEX_HASH_CAP_BYTES) {
     try {
-      const hash = createHash7("sha256").update(readFileSync5(codexPath)).digest("hex");
+      const hash = createHash8("sha256").update(readFileSync6(codexPath)).digest("hex");
       identity.sha256 = hash;
     } catch {
     }
@@ -7273,7 +7387,7 @@ var BridgeServer = class {
     const lifecycle = new RunLifecycle(created.state);
     this.remoteTracePaths.set(
       created.runId,
-      join11(runSubdirPath(created.dir, "trace"), "trace.jsonl")
+      join12(runSubdirPath(created.dir, "trace"), "trace.jsonl")
     );
     const namesApprovedRuntime = isApprovedIsolationRuntime(request.runtimeProfile);
     const runtimeIsolated = false;
@@ -7532,7 +7646,7 @@ var BridgeServer = class {
       return;
     }
     const run = this.runs.get(governed.runId);
-    const tracePath = run?.created?.dir ? join11(runSubdirPath(run.created.dir, "trace"), "trace.jsonl") : void 0;
+    const tracePath = run?.created?.dir ? join12(runSubdirPath(run.created.dir, "trace"), "trace.jsonl") : void 0;
     const sink = tracePath ? createTraceWriter(tracePath) : void 0;
     const seen = /* @__PURE__ */ new Set();
     const recordAttempt = (attempt) => {
@@ -7650,7 +7764,7 @@ var BridgeServer = class {
     if (params.pendingApproval === true) {
       const approvalId = `apr-${runId}`;
       const pendingRun = createRun(this.agentic?.runsBaseDir ?? this.runsBaseDir);
-      const pendingTracePath = join11(runSubdirPath(pendingRun.dir, "trace"), "trace.jsonl");
+      const pendingTracePath = join12(runSubdirPath(pendingRun.dir, "trace"), "trace.jsonl");
       this.remoteTracePaths.set(runId, pendingTracePath);
       this.pendingBuilds.set(approvalId, {
         approvalId,
@@ -7687,7 +7801,7 @@ var BridgeServer = class {
     const abort = new AbortController();
     try {
       const buildRun = existing ? { runId, dir: existing.runDir, state: "created" } : createRun(this.agentic?.runsBaseDir ?? this.runsBaseDir);
-      const tracePath = existing ? existing.tracePath : join11(runSubdirPath(buildRun.dir, "trace"), "trace.jsonl");
+      const tracePath = existing ? existing.tracePath : join12(runSubdirPath(buildRun.dir, "trace"), "trace.jsonl");
       const sink = this.remoteTraceWriters.get(runId) ?? createTraceWriter(tracePath);
       this.remoteTraceWriters.set(runId, sink);
       this.remoteTracePaths.set(runId, tracePath);
@@ -7773,6 +7887,13 @@ var BridgeServer = class {
         // finalizes honestly rather than hanging.
         signal: abort.signal,
         ...this.agentic?.runsBaseDir ? { runsBaseDir: this.agentic.runsBaseDir } : this.runsBaseDir ? { runsBaseDir: this.runsBaseDir } : {},
+        // TRUSTED SIGNING KEY (the chat→build "Verified:" trailer fix): when the
+        // operator's machine keystore key was forwarded to this supervisor, sign the
+        // verdict with it so its already-pinned public key earns signatureVerified:true
+        // in the IDE. Absent ⇒ the runner falls back to a per-run ephemeral key. This
+        // key reaches ONLY the verifier here; the actor's env is firewalled (see the
+        // AgenticBuildConfig.verifierPrivateKey doc + cli-agent-launcher sanitizeBaseEnv).
+        ...this.agentic?.verifierPrivateKey ? { verifierPrivateKey: this.agentic.verifierPrivateKey } : {},
         ...verifyCommand ? { verifyCommand, verifyCommandSource } : {},
         ...this.agentic?.denyDirectIp !== void 0 ? { denyDirectIp: this.agentic.denyDirectIp } : {},
         // Stream each governed-run event out as a build/event tagged with our runId.
@@ -8251,7 +8372,7 @@ var BridgeServer = class {
     let tracePath = this.remoteTracePaths.get(runId);
     if (!tracePath) {
       const created = createRun(this.agentic?.runsBaseDir ?? this.runsBaseDir);
-      tracePath = join11(runSubdirPath(created.dir, "trace"), "trace.jsonl");
+      tracePath = join12(runSubdirPath(created.dir, "trace"), "trace.jsonl");
       this.remoteTracePaths.set(runId, tracePath);
     }
     const writer = createTraceWriter(tracePath);
@@ -8588,9 +8709,15 @@ function serveStdio(proc, options = {}) {
 // ../spikes/p0-supervisor/bridge-server-cli.ts
 var supervisorVersion = process.env.GLYPHSPEK_SUPERVISOR_VERSION;
 var runsBaseDir = process.env.GLYPHSPEK_RUNS_BASE;
+var verifierKeyPath = process.env.GLYPHSPEK_VERIFIER_KEY;
+var verifierPrivateKey;
+if (verifierKeyPath) {
+  verifierPrivateKey = resolveVerifierKeypair(verifierKeyPath).privateKey;
+}
 var server = serveStdio(process, {
   ...supervisorVersion ? { supervisorVersion } : {},
-  ...runsBaseDir ? { runsBaseDir } : {}
+  ...runsBaseDir ? { runsBaseDir } : {},
+  ...verifierPrivateKey ? { agentic: { verifierPrivateKey } } : {}
 });
 process.stdin.resume();
 process.stdin.on("end", () => {

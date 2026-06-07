@@ -104,6 +104,10 @@ const BUNDLE_FILE_NAMES = [
     'verdict.json',
     'verifier-public-key.pem',
     'actor-claims.json',
+    // OPTIONAL per-run unified git diff (present only when the run edited files). The
+    // commit-message feature binds a "Verified:" trailer against it; the bundle loader
+    // recognizes it here so it surfaces alongside the other bundle files when present.
+    'diff.patch',
 ];
 /**
  * Per-file size cap (bytes). A single bundle file larger than this aborts the
@@ -3582,6 +3586,23 @@ async function promoteChatToBuild(context, gate, output, intentArg) {
     output.appendLine('');
     output.appendLine(`[host] governed agentic build APPROVED for ${cwd}.`);
     output.appendLine(`[host] intent: ${prompt}`);
+    // TRUSTED VERIFIER KEY (the chat→build "Verified:" trailer). Ensure the out-of-band
+    // keystore and forward its STABLE PRIVATE-key PATH so the supervisor SIGNS this build's
+    // verdict with the operator's trusted key (whose public half the panel already pins) —
+    // the bridge mirror of the governed-run CLI's `--verifier-key`. BEST-EFFORT: a keystore
+    // failure must NOT block the build the operator just approved — we log and fall back to
+    // the per-run ephemeral key (the build still runs + reviews; only the IDE's "Verified:"
+    // trailer is withheld, which is the correct fail-safe). The actor is firewalled from this
+    // key regardless (cli-agent-launcher sanitizeBaseEnv strips GLYPHSPEK_VERIFIER_KEY).
+    let verifierKeyPath;
+    try {
+        verifierKeyPath = ensureVerifierKeystore().privateKeyPath;
+    }
+    catch (err) {
+        output.appendLine(`[host] verifier keystore unavailable (${String(err?.message ?? err)}) — ` +
+            'this build will sign with a per-run ephemeral key; the IDE will NOT emit a "Verified:" ' +
+            'commit-message trailer (correct fail-safe).');
+    }
     // Open + reveal the Trust Panel FIRST so it is ready to receive the review.
     const panel = TrustPanel.createOrShow(context.extensionUri, gate);
     panel.reveal();
@@ -3595,6 +3616,7 @@ async function promoteChatToBuild(context, gate, output, intentArg) {
         bridgeServerPath: resolveBundledBridgeServerPath(context),
         extensionVersion: resolveExtensionVersion(context),
         runsBase: resolveRunsBase(),
+        ...(verifierKeyPath ? { verifierKeyPath } : {}),
         prompt,
         cwd,
         approved: true,

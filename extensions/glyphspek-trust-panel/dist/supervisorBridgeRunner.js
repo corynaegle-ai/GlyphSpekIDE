@@ -146,6 +146,15 @@ function buildBridgeEnv(opts) {
     };
     if (opts.supervisorVersion)
         env.GLYPHSPEK_SUPERVISOR_VERSION = opts.supervisorVersion;
+    // TRUSTED VERIFIER KEY (the chat→build "Verified:" trailer): forward the keystore
+    // PRIVATE-key PATH to the supervisor so it SIGNS the agentic-build verdict with the
+    // operator's STABLE key (whose public half the IDE already pins as trusted). This is the
+    // bridge mirror of the governed-run CLI's `--verifier-key <absPath>`. It rides in the
+    // bridge-server's OWN env (the verifier/supervisor side) ONLY — the runner re-derives a
+    // SANITIZED env for the codex actor that strips this var (cli-agent-launcher
+    // sanitizeBaseEnv), so the actor can never read the key. Omit ⇒ ephemeral fallback.
+    if (opts.verifierKeyPath)
+        env.GLYPHSPEK_VERIFIER_KEY = opts.verifierKeyPath;
     if (src.PATH !== undefined)
         env.PATH = src.PATH;
     if (src.HOME !== undefined)

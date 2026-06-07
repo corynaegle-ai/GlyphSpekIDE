@@ -251,10 +251,28 @@ function diffContentFingerprint(diff) {
     return sha256Hex(norm);
 }
 /**
+ * The per-project namespace segment under the runs root. BYTE-FOR-BYTE mirror of
+ * extension.ts workspaceRunsKey() — `${basename}-${sha256(folder).slice(0,12)}` for a
+ * workspace, `_no-workspace` otherwise. This MUST match exactly: the bundled supervisor
+ * writes its run dirs (and now the flat verified bundle) under `<root>/<workspaceRunsKey>/`,
+ * so a mismatched namespace here means the commit-message feature scans the WRONG directory
+ * and finds no bundle to bind — no trailer ever fires. (Previously this used a 16-hex hash
+ * of the folder with no basename prefix and `no-workspace`, which never matched the dir the
+ * supervisor actually wrote to.)
+ */
+function workspaceRunsKeyForCommit() {
+    const ws = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+    if (!ws)
+        return '_no-workspace';
+    const base = path.basename(ws).replace(/[^A-Za-z0-9._-]/g, '-').slice(0, 40) || 'workspace';
+    const hash = sha256Hex(ws).slice(0, 12);
+    return `${base}-${hash}`;
+}
+/**
  * The path to the runs base for the current workspace. Mirrors extension.ts resolveRunsBase()'s
  * shape (the machine `glyphspek.runOutputRoot` setting, else ~/.glyphspek/runs), namespaced by
- * a stable hash of the first workspace folder so a project sees only its own runs. Best-effort;
- * returns undefined when no base can be resolved.
+ * the SAME per-project key the supervisor writes under (workspaceRunsKeyForCommit) so a project
+ * reads exactly its own runs. Best-effort; returns undefined when no base can be resolved.
  */
 function resolveRunsBaseForCommit() {
     let root;
@@ -267,11 +285,7 @@ function resolveRunsBaseForCommit() {
     }
     if (!root)
         return undefined;
-    const folder = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
-    // workspaceRunsKey() in extension.ts namespaces by a hash of the folder path; mirror with a
-    // short sha256 prefix so we read the SAME per-project base.
-    const key = folder ? sha256Hex(folder).slice(0, 16) : 'no-workspace';
-    return path.join(root, key);
+    return path.join(root, workspaceRunsKeyForCommit());
 }
 /**
  * Discover candidate run bundles under the workspace runs base. A bundle directory has a
