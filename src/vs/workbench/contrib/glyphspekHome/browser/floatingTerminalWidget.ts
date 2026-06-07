@@ -190,72 +190,76 @@ export class FloatingTerminalWidget extends Disposable implements IContentWidget
 		return { width: layout.contentWidth, height: layout.height };
 	}
 
+	/**
+	 * Shared pointer-drag plumbing. POINTER CAPTURE is the load-bearing bit: capturing the
+	 * pointer on `el` routes every pointermove/up to it for the whole gesture EVEN when the
+	 * pointer crosses the terminal canvas — plain mouse/window listeners lose those moves to
+	 * the xterm canvas (the resize bug: move worked because the header drag stays over the
+	 * editor, resize failed because the grip drag crosses the terminal). Torn down on
+	 * up/cancel OR widget dispose (activeGesture is a registered MutableDisposable).
+	 */
+	private trackPointer(el: HTMLElement, e: PointerEvent, onMove: (ev: PointerEvent) => void): void {
+		el.setPointerCapture(e.pointerId);
+		const gesture = new DisposableStore();
+		this.activeGesture.value = gesture;
+		const end = () => this.activeGesture.clear();
+		el.addEventListener('pointermove', onMove);
+		el.addEventListener('pointerup', end);
+		el.addEventListener('pointercancel', end);
+		gesture.add(toDisposable(() => {
+			try { el.releasePointerCapture(e.pointerId); } catch { /* already released */ }
+			el.removeEventListener('pointermove', onMove);
+			el.removeEventListener('pointerup', end);
+			el.removeEventListener('pointercancel', end);
+		}));
+	}
+
 	/** Move — dragging the header applies a CLAMPED px offset over the anchored position. */
 	private installDrag(handle: HTMLElement): void {
-		const onDown = (e: MouseEvent) => {
+		const onDown = (e: PointerEvent) => {
 			// Left-button only, and never start a drag from an interactive child (the
 			// Describe / Close buttons keep their own click behavior).
 			if (e.button !== 0 || (e.target instanceof HTMLElement && e.target.closest('button'))) {
 				return;
 			}
 			e.preventDefault();
-			const targetWindow = getWindow(this.domNode);
 			const startX = e.clientX, startY = e.clientY;
 			const startOffset = { ...this.userOffset };
 			const rect = this.domNode.getBoundingClientRect();
 			// The editor-placed base rect = current rect MINUS the current user offset.
 			const base: FloatingRect = { left: rect.left - this.userOffset.x, top: rect.top - this.userOffset.y, width: rect.width, height: rect.height };
 			const bounds = this.editorBounds();
-			const gesture = new DisposableStore();
-			this.activeGesture.value = gesture;
-			const onMove = (ev: MouseEvent) => {
+			this.trackPointer(handle, e, (ev) => {
 				const proposed = { x: startOffset.x + (ev.clientX - startX), y: startOffset.y + (ev.clientY - startY) };
 				const clamped = clampDragOffset({ proposed, base, bounds });
 				this.userOffset.x = clamped.x;
 				this.userOffset.y = clamped.y;
 				this.applyOffset();
-			};
-			const onUp = () => this.activeGesture.clear();
-			targetWindow.addEventListener('mousemove', onMove);
-			targetWindow.addEventListener('mouseup', onUp);
-			gesture.add(toDisposable(() => {
-				targetWindow.removeEventListener('mousemove', onMove);
-				targetWindow.removeEventListener('mouseup', onUp);
-			}));
+			});
 		};
-		handle.addEventListener('mousedown', onDown);
-		this._register(toDisposable(() => handle.removeEventListener('mousedown', onDown)));
+		handle.addEventListener('pointerdown', onDown);
+		this._register(toDisposable(() => handle.removeEventListener('pointerdown', onDown)));
 	}
 
 	/** Resize — dragging the corner grip sets a CLAMPED size and re-lays out the terminal. */
 	private installResize(grip: HTMLElement): void {
-		const onDown = (e: MouseEvent) => {
+		const onDown = (e: PointerEvent) => {
 			if (e.button !== 0) {
 				return;
 			}
 			e.preventDefault();
 			e.stopPropagation(); // do not also begin a drag / focus the terminal.
-			const targetWindow = getWindow(this.domNode);
 			const startX = e.clientX, startY = e.clientY;
 			const startDims = this.computeDims();
-			const gesture = new DisposableStore();
-			this.activeGesture.value = gesture;
-			const onMove = (ev: MouseEvent) => {
+			this.trackPointer(grip, e, (ev) => {
 				const proposed: FloatingDimension = { width: startDims.width + (ev.clientX - startX), height: startDims.height + (ev.clientY - startY) };
 				this.userDims = clampFloatingDims(proposed, this.maxDims());
 				this.applyDims();
 				this.onResize(this.userDims); // re-layout the live terminal to the new size.
-			};
-			const onUp = () => this.activeGesture.clear();
-			targetWindow.addEventListener('mousemove', onMove);
-			targetWindow.addEventListener('mouseup', onUp);
-			gesture.add(toDisposable(() => {
-				targetWindow.removeEventListener('mousemove', onMove);
-				targetWindow.removeEventListener('mouseup', onUp);
-			}));
+			});
 		};
-		grip.addEventListener('mousedown', onDown);
-		this._register(toDisposable(() => grip.removeEventListener('mousedown', onDown)));
+		grip.addEventListener('pointerdown', onDown);
+		this._register(toDisposable(() => grip.removeEventListener('pointerdown', onDown)));
 	}
 
 	/** Update the green/governed badge → degraded (G7): drop the claim of being governed. */

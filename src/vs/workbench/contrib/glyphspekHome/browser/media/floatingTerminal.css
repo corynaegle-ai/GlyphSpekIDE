@@ -40,6 +40,7 @@
 	/* Drag handle: the header moves the floating terminal. */
 	cursor: move;
 	user-select: none;
+	touch-action: none;
 }
 
 .glyphspek-floating-terminal-shield {
@@ -101,13 +102,34 @@
 	min-height: 160px;
 }
 
-/* Resize grip — bottom-right corner; a subtle diagonal wedge (theme token, no hex). */
+/* Resize grip — bottom-right corner; two diagonal grip lines (theme token, no hex). The
+   generous hit area + pointer capture make it easy to grab and drag over the terminal. */
 .glyphspek-floating-terminal-resize {
 	position: absolute;
 	right: 0;
 	bottom: 0;
-	width: 14px;
-	height: 14px;
+	width: 18px;
+	height: 18px;
 	cursor: nwse-resize;
-	background: linear-gradient(135deg, transparent 50%, var(--vscode-editorWidget-border) 50%);
+	touch-action: none;
+	z-index: 1;
+	background: linear-gradient(
+		135deg,
+		transparent 0%, transparent 38%,
+		var(--vscode-editorWidget-border) 38%, var(--vscode-editorWidget-border) 50%,
+		transparent 50%, transparent 62%,
+		var(--vscode-editorWidget-border) 62%, var(--vscode-editorWidget-border) 74%,
+		transparent 74%
+	);
+}
+
+.glyphspek-floating-terminal-resize:hover {
+	background: linear-gradient(
+		135deg,
+		transparent 0%, transparent 38%,
+		var(--vscode-focusBorder) 38%, var(--vscode-focusBorder) 50%,
+		transparent 50%, transparent 62%,
+		var(--vscode-focusBorder) 62%, var(--vscode-focusBorder) 74%,
+		transparent 74%
+	);
 }
