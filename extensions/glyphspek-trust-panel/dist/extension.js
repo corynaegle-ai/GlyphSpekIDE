@@ -72,6 +72,7 @@ const inlineScript_1 = require("./inlineScript");
 const chatParticipant_1 = require("./chatParticipant");
 const inlineEdit_1 = require("./inlineEdit");
 const terminalCmdK_1 = require("./terminalCmdK");
+const commitMessage_1 = require("./commitMessage");
 const indexStatusBar_1 = require("./indexStatusBar");
 const indexProgress_1 = require("./indexProgress");
 const inlineCompletion_1 = require("./inlineCompletion");
@@ -2531,6 +2532,19 @@ function activate(context) {
     // on the user's own ChatGPT subscription (governed, UNSANDBOXED, never product-trusted;
     // no credential injected). The rewrite is applied as an UNDOABLE WorkspaceEdit (⌘Z).
     (0, inlineEdit_1.registerInlineEdit)(context, buildNativeChatSessionFactory(context, chatOutput), chatOutput);
+    // EVIDENCE-GROUNDED AI COMMIT MESSAGE — "GlyphSpek: Generate Commit Message" (SCM input
+    // sparkle + palette). Pre-fills the commit input with an AI message GROUNDED in the staged
+    // diff, carrying a machine-parseable provenance trailer ONLY when a verdict's signature
+    // verifies AND the staged content binds to what that verdict actually verified. Reuses the
+    // EXACT SAME governed Codex session factory chat/inline-edit/terminal-Cmd-K use (a brokered,
+    // metadata-TRACED model call on the user's own subscription — governed, UNSANDBOXED, never
+    // product-trusted; no credential injected). The trust-critical decisions live in the pure,
+    // headless-tested commitMessageLogic.ts. NEVER commits/stages/pushes; never clobbers existing
+    // commit text on failure.
+    (0, commitMessage_1.registerGenerateCommitMessage)(context, {
+        sessionFactory: buildNativeChatSessionFactory(context, chatOutput),
+        output: chatOutput,
+    });
     // TERMINAL Cmd-K — the `glyphspek.terminalGenerateCommand` PALETTE command. D4a (unify
     // transition): it now targets the cursor-anchored FLOATING governed terminal, NOT the
     // panel terminal. On invoke it DELEGATES to the fork command

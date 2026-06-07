@@ -44,6 +44,7 @@
     "onCommand:glyphspek.openChat",
     "onCommand:glyphspek.openNativeChat",
     "onCommand:glyphspek.inlineEdit",
+    "onCommand:glyphspek.generateCommitMessage",
     "onCommand:glyphspek.indexWorkspace",
     "onChatParticipant:glyphspek.codex",
     "onLanguageModelChatProvider:glyphspek"
@@ -157,6 +158,12 @@
       {
         "command": "glyphspek.terminalGenerateCommand",
         "title": "GlyphSpek: Generate Terminal Command"
+      },
+      {
+        "command": "glyphspek.generateCommitMessage",
+        "title": "GlyphSpek: Generate Commit Message",
+        "category": "GlyphSpek",
+        "icon": "$(sparkle)"
       }
     ],
     "keybindings": [
@@ -356,11 +363,27 @@
           "when": "editorHasSelection && (editorLangId == typescript || editorLangId == typescriptreact || editorLangId == javascript || editorLangId == javascriptreact)",
           "group": "glyphspek@1"
         }
+      ],
+      "scm/inputBox": [
+        {
+          "command": "glyphspek.generateCommitMessage",
+          "when": "scmProvider == git"
+        }
       ]
     },
     "configuration": {
       "title": "GlyphSpek",
       "properties": {
+        "glyphspek.commitMessage.verifiedTrailer": {
+          "type": "boolean",
+          "default": true,
+          "description": "Append a machine-parseable provenance trailer to an AI-generated commit message (`Verified: <pass|fail|degraded> · run <id>` plus a `Trace: <hash>` line). The trailer is emitted ONLY when a governed run's verdict signature verifies AND the staged content matches what that verdict actually verified (a content binding, not just matching filenames) — never for hand edits, stale, partial-mismatch, or unsigned/tampered evidence. Turn off to never add a trailer."
+        },
+        "glyphspek.commitMessage.conventionalCommits": {
+          "type": "boolean",
+          "default": false,
+          "description": "Shape the AI commit-message subject as Conventional Commits (`type(scope): summary`). When off (default) the subject is free-form. When on, a non-conforming subject is conservatively prefixed (e.g. `chore: …`) — GlyphSpek never invents a scope or a more specific type."
+        },
         "glyphspek.trustedVerifierKeys": {
           "type": "array",
           "items": {
