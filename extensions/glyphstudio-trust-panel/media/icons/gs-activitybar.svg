@@ -1,0 +1,9 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" width="24" height="24" aria-hidden="true">
+  <!-- Solid GlyphStudio verifier-shield for the activity bar. VS Code renders
+       activity-bar icons as a single-color MASK, so this is a filled silhouette
+       (a thin stroke line icon masks nearly invisibly). The check is an evenodd
+       knockout so the shape reads as a verified shield. The line gs-verifier.svg
+       stays the icon used inside the webviews. -->
+  <path fill="currentColor" fill-rule="evenodd" clip-rule="evenodd"
+    d="M12 2.2 20 5.4V11.7C20 16.6 16.7 19.9 12 21.8 7.3 19.9 4 16.6 4 11.7V5.4L12 2.2ZM10.85 15.45 16 10.05 14.5 8.65 10.85 12.5 9.4 11 7.95 12.45 10.85 15.45Z"/>
+</svg>

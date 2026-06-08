@@ -17,10 +17,10 @@
 		"useDefineForClassFields": false,
 		"paths": {
 			"@github/copilot-sdk": [
-				"../build/glyphcode/copilot-stubs/github-copilot-sdk/dist/index.d.ts"
+				"../build/glyphstudio/copilot-stubs/github-copilot-sdk/dist/index.d.ts"
 			],
 			"@vscode/copilot-api": [
-				"../build/glyphcode/copilot-stubs/vscode-copilot-api/dist/index.d.ts"
+				"../build/glyphstudio/copilot-stubs/vscode-copilot-api/dist/index.d.ts"
 			]
 		},
 		"lib": [

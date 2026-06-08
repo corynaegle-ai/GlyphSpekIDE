@@ -19,14 +19,14 @@ suite('ExtHostLanguageModels', function () {
 
 	const store = ensureNoDisposablesAreLeakedInTestSuite();
 
-	const GLYPHCODE_VENDOR = 'glyphcode';
-	const GLYPHCODE_MODEL_ID = 'glyphcode-codex-gateway';
+	const GLYPHSTUDIO_VENDOR = 'glyphstudio';
+	const GLYPHSTUDIO_MODEL_ID = 'glyphstudio-codex-gateway';
 
 	function makeLanguageModels(): ExtHostLanguageModels {
 		// `$selectChatModels` must return an array: when no chat-default is cached,
 		// `getDefaultLanguageModel` re-resolves via `selectLanguageModels`, which maps over the
 		// main-thread result. Default the proxy call to an empty list so the fail-closed path
-		// (no GlyphCode/Copilot default) re-resolves cleanly and still returns undefined.
+		// (no GlyphStudio/Copilot default) re-resolves cleanly and still returns undefined.
 		const proxy: Pick<MainThreadLanguageModelsShape, '$selectChatModels'> = {
 			$selectChatModels: async () => [],
 		};
@@ -50,7 +50,7 @@ suite('ExtHostLanguageModels', function () {
 			async provideLanguageModelChatInformation() {
 				return [{
 					id: modelId,
-					name: 'GlyphCode (Codex Gateway)',
+					name: 'GlyphStudio (Codex Gateway)',
 					family: 'codex',
 					version: '1',
 					maxInputTokens: 128000,
@@ -68,58 +68,58 @@ suite('ExtHostLanguageModels', function () {
 	}
 
 	/**
-	 * The GlyphCode fork strips Copilot and ships a FIRST-PARTY non-Copilot chat-default
+	 * The GlyphStudio fork strips Copilot and ships a FIRST-PARTY non-Copilot chat-default
 	 * model (the governed Codex gateway). This is the regression guard for the stock chat
 	 * panel's "Language model unavailable" break: `getDefaultLanguageModel` must resolve the
-	 * GlyphCode-vendor model that is marked `isDefault` for the Chat location.
+	 * GlyphStudio-vendor model that is marked `isDefault` for the Chat location.
 	 */
-	test('getDefaultLanguageModel resolves the first-party GlyphCode chat-default model', async function () {
+	test('getDefaultLanguageModel resolves the first-party GlyphStudio chat-default model', async function () {
 		const extHostLanguageModels = makeLanguageModels();
-		await registerChatDefaultProvider(extHostLanguageModels, GLYPHCODE_VENDOR, GLYPHCODE_MODEL_ID);
+		await registerChatDefaultProvider(extHostLanguageModels, GLYPHSTUDIO_VENDOR, GLYPHSTUDIO_MODEL_ID);
 
 		const model = await extHostLanguageModels.getDefaultLanguageModel(extension);
 
 		assert.ok(model, 'a default chat model resolves (no "Language model unavailable")');
 		assert.deepStrictEqual(
 			{ id: model.id, vendor: model.vendor, isCopilot: model.vendor === COPILOT_VENDOR_ID },
-			{ id: GLYPHCODE_MODEL_ID, vendor: GLYPHCODE_VENDOR, isCopilot: false },
+			{ id: GLYPHSTUDIO_MODEL_ID, vendor: GLYPHSTUDIO_VENDOR, isCopilot: false },
 			'the resolved default is our first-party non-Copilot Codex-gateway model',
 		);
 	});
 
 	/**
 	 * Adversarial: a SECOND non-Copilot `isDefault` provider (a future proposal-granted or
-	 * developer provider) registers BEFORE the GlyphCode one. The tightened resolver must
-	 * still pick the GlyphCode-vendor model, never let registration order hand "Auto" to a
-	 * non-GlyphCode vendor.
+	 * developer provider) registers BEFORE the GlyphStudio one. The tightened resolver must
+	 * still pick the GlyphStudio-vendor model, never let registration order hand "Auto" to a
+	 * non-GlyphStudio vendor.
 	 */
-	test('getDefaultLanguageModel prefers the GlyphCode vendor over an earlier non-Copilot default', async function () {
+	test('getDefaultLanguageModel prefers the GlyphStudio vendor over an earlier non-Copilot default', async function () {
 		const extHostLanguageModels = makeLanguageModels();
 		// Register the foreign chat-default FIRST so insertion order favors it.
 		await registerChatDefaultProvider(extHostLanguageModels, 'other', 'other-default-model');
-		await registerChatDefaultProvider(extHostLanguageModels, GLYPHCODE_VENDOR, GLYPHCODE_MODEL_ID);
+		await registerChatDefaultProvider(extHostLanguageModels, GLYPHSTUDIO_VENDOR, GLYPHSTUDIO_MODEL_ID);
 
 		const model = await extHostLanguageModels.getDefaultLanguageModel(extension);
 
 		assert.ok(model, 'a default chat model resolves');
 		assert.deepStrictEqual(
 			{ id: model.id, vendor: model.vendor },
-			{ id: GLYPHCODE_MODEL_ID, vendor: GLYPHCODE_VENDOR },
-			'the GlyphCode vendor wins even though "other" registered its chat-default first',
+			{ id: GLYPHSTUDIO_MODEL_ID, vendor: GLYPHSTUDIO_VENDOR },
+			'the GlyphStudio vendor wins even though "other" registered its chat-default first',
 		);
 	});
 
 	/**
-	 * Fail-closed: with ONLY a non-GlyphCode, non-Copilot default registered, the resolver
+	 * Fail-closed: with ONLY a non-GlyphStudio, non-Copilot default registered, the resolver
 	 * returns undefined (→ honest "Language model unavailable") rather than resolving some
-	 * other vendor's governed model. Proves a non-GlyphCode default can never win "Auto".
+	 * other vendor's governed model. Proves a non-GlyphStudio default can never win "Auto".
 	 */
-	test('getDefaultLanguageModel returns undefined when only a non-GlyphCode default exists', async function () {
+	test('getDefaultLanguageModel returns undefined when only a non-GlyphStudio default exists', async function () {
 		const extHostLanguageModels = makeLanguageModels();
 		await registerChatDefaultProvider(extHostLanguageModels, 'other', 'other-default-model');
 
 		const model = await extHostLanguageModels.getDefaultLanguageModel(extension);
 
-		assert.strictEqual(model, undefined, 'fails closed: no GlyphCode (or Copilot) chat-default → no default resolved');
+		assert.strictEqual(model, undefined, 'fails closed: no GlyphStudio (or Copilot) chat-default → no default resolved');
 	});
 });

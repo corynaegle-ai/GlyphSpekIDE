@@ -81,12 +81,12 @@ export class ChatStatusBarEntry extends Disposable implements IWorkbenchContribu
 	}
 
 	private update(): void {
-		// GlyphCode PATCH-007: suppress the vestigial Copilot status-bar affordance.
+		// GlyphStudio PATCH-007: suppress the vestigial Copilot status-bar affordance.
 		// This entry renders the GitHub Copilot glyph ($(copilot)) plus Copilot
 		// quota / sign-in / "Copilot Status" labels and is the honesty leak GATE-002
 		// is meant to close. It is NOT the entry point to our native Codex-backed
 		// chat (that is the chat ViewPane registered separately), so hiding it does
-		// not affect chat. The GlyphCode build configures no `defaultChatAgent`, so
+		// not affect chat. The GlyphStudio build configures no `defaultChatAgent`, so
 		// the Copilot entitlement system this indicator reflects is inert anyway and
 		// the entry is pure dead Copilot branding. Gate on the absence of a default
 		// chat agent so the affordance never renders here; fully reversible by

@@ -56,9 +56,9 @@ import './browser/parts/paneCompositePartService.js';
 import './browser/parts/banner/bannerPart.js';
 import './browser/parts/statusbar/statusbarPart.js';
 import './browser/parts/titlebar/menubar.contribution.js';
-import './browser/parts/glyphcodeAuthorityHalo.js'; // GlyphCode PATCH-003: whole-frame Authority Halo ring (assurance axis)
-import './browser/parts/glyphcodeTierChrome.js'; // GlyphCode PATCH-008: friction-tier editor recede (Ask) — orthogonal friction axis
-import './browser/parts/glyphcodeTitleLadder.js'; // GlyphCode PATCH-009: title-bar Authority Ladder (friction axis, canonical control)
+import './browser/parts/glyphstudioAuthorityHalo.js'; // GlyphStudio PATCH-003: whole-frame Authority Halo ring (assurance axis)
+import './browser/parts/glyphstudioTierChrome.js'; // GlyphStudio PATCH-008: friction-tier editor recede (Ask) — orthogonal friction axis
+import './browser/parts/glyphstudioTitleLadder.js'; // GlyphStudio PATCH-009: title-bar Authority Ladder (friction axis, canonical control)
 
 //#endregion
 
@@ -388,9 +388,9 @@ import './contrib/welcomeViews/common/newFile.contribution.js';
 // Welcome Onboarding
 import './contrib/welcomeOnboarding/browser/welcomeOnboarding.contribution.js';
 
-// GlyphCode Home (PATCH-004): the full-window landing surface the IDE opens on at startup.
-import './contrib/glyphcodeHome/browser/glyphcodeHome.contribution.js';
-import './contrib/glyphcodeHome/browser/floatingTerminal.contribution.js';
+// GlyphStudio Home (PATCH-004): the full-window landing surface the IDE opens on at startup.
+import './contrib/glyphstudioHome/browser/glyphstudioHome.contribution.js';
+import './contrib/glyphstudioHome/browser/floatingTerminal.contribution.js';
 
 // Call Hierarchy
 import './contrib/callHierarchy/browser/callHierarchy.contribution.js';

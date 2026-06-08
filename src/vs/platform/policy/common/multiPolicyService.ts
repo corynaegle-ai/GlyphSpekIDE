@@ -11,9 +11,9 @@ import { isObject } from '../../../base/common/types.js';
 import { IPolicyService, PolicyDefinition, PolicyValue } from './policy.js';
 
 /**
- * GlyphCode PATCH-001 — layered policy source.
+ * GlyphStudio PATCH-001 — layered policy source.
  *
- * Merges a GlyphCode-bundled file policy (the baseline that travels inside the signed
+ * Merges a GlyphStudio-bundled file policy (the baseline that travels inside the signed
  * Sovereign app) with the OS native/MDM policy. Native policy may *tighten* the baseline but
  * must never *loosen* it: for the `AllowedExtensions` policy this is enforced with a
  * dictionary-aware intersection (an entry stays in the effective allowlist only if both
@@ -28,7 +28,7 @@ export class MultiPolicyService extends Disposable implements IPolicyService {
 
 	readonly _serviceBrand: undefined;
 
-	/** The policy whose value carries the GlyphCode-curated extension allowlist. */
+	/** The policy whose value carries the GlyphStudio-curated extension allowlist. */
 	private static readonly ALLOWED_EXTENSIONS_POLICY: PolicyName = 'AllowedExtensions';
 
 	private readonly _onDidChange = this._register(new Emitter<readonly PolicyName[]>());
@@ -97,7 +97,7 @@ type AllowedExtensionsDict = IStringDictionary<boolean | string | string[]>;
  * Intersects two `AllowedExtensions` policy values so the result is no looser than either:
  * an extension/publisher is allowed only if *both* sources allow it, and a deny (or absence)
  * in either source removes it. This lets a native/MDM administrator tighten — never loosen —
- * the GlyphCode-bundled baseline.
+ * the GlyphStudio-bundled baseline.
  *
  * Values arrive from the policy layer either as already-parsed objects (FilePolicyService) or
  * as JSON strings (NativePolicyService); both are normalized here. A non-object value is

@@ -213,7 +213,7 @@ export const OPTIONS: OptionDescriptions<Required<NativeParsedArgs>> = {
 	'disable-gpu-sandbox': { type: 'boolean' },
 	'logsPath': { type: 'string' },
 	'__enable-file-policy': { type: 'boolean' },
-	'glyphcode-policy-file': { type: 'string' },
+	'glyphstudio-policy-file': { type: 'string' },
 	'editSessionId': { type: 'string' },
 	'continueOn': { type: 'string' },
 	'enable-coi': { type: 'boolean' },

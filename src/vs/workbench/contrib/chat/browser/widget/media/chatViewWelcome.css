@@ -67,8 +67,8 @@ div.chat-welcome-view {
 		-webkit-mask-size: 40px;
 	}
 
-	/* GlyphCode: full-color brand logo empty-state graphic (raster img); no color/mask treatment so brand colors are preserved. */
-	& > .chat-welcome-view-icon.glyphcode-logo {
+	/* GlyphStudio: full-color brand logo empty-state graphic (raster img); no color/mask treatment so brand colors are preserved. */
+	& > .chat-welcome-view-icon.glyphstudio-logo {
 		display: flex;
 		align-items: center;
 		justify-content: center;
@@ -76,7 +76,7 @@ div.chat-welcome-view {
 		margin-bottom: 24px;
 	}
 
-	& > .chat-welcome-view-icon.glyphcode-logo img {
+	& > .chat-welcome-view-icon.glyphstudio-logo img {
 		width: auto;
 		height: 104px;
 	}

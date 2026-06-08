@@ -1,7 +1,7 @@
 {
-	// GlyphCode is a clean, de-Microsoft Code-OSS distribution and does NOT ship
+	// GlyphStudio is a clean, de-Microsoft Code-OSS distribution and does NOT ship
 	// Microsoft/GitHub extension recommendations. Intentionally empty — see
-	// build/glyphcode/SECURITY-PATCHES.md (de-Microsoft posture). Add only
+	// build/glyphstudio/SECURITY-PATCHES.md (de-Microsoft posture). Add only
 	// vendor-neutral, Open-VSX-available recommendations here if ever needed.
 	"recommendations": []
 }

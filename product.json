@@ -1,39 +1,39 @@
 {
-	"nameShort": "GlyphCode",
-	"nameLong": "GlyphCode",
-	"applicationName": "glyphcode",
-	"dataFolderName": ".glyphcode",
-	"sharedDataFolderName": ".glyphcode-shared",
-	"win32MutexName": "glyphcode",
+	"nameShort": "GlyphStudio",
+	"nameLong": "GlyphStudio",
+	"applicationName": "glyphstudio",
+	"dataFolderName": ".glyphstudio",
+	"sharedDataFolderName": ".glyphstudio-shared",
+	"win32MutexName": "glyphstudio",
 	"licenseName": "MIT",
-	"licenseUrl": "https://github.com/corynaegle-ai/GlyphCodeIDE/blob/main/LICENSE.txt",
-	"serverLicenseUrl": "https://github.com/corynaegle-ai/GlyphCodeIDE/blob/main/LICENSE.txt",
+	"licenseUrl": "https://github.com/corynaegle-ai/GlyphStudioIDE/blob/main/LICENSE.txt",
+	"serverLicenseUrl": "https://github.com/corynaegle-ai/GlyphStudioIDE/blob/main/LICENSE.txt",
 	"serverGreeting": [],
 	"serverLicense": [],
 	"serverLicensePrompt": "",
-	"serverApplicationName": "glyphcode-server",
-	"serverDataFolderName": ".glyphcode-server",
-	"tunnelApplicationName": "glyphcode-tunnel",
-	"win32DirName": "GlyphCode",
-	"win32NameVersion": "GlyphCode",
-	"win32RegValueName": "GlyphCode",
+	"serverApplicationName": "glyphstudio-server",
+	"serverDataFolderName": ".glyphstudio-server",
+	"tunnelApplicationName": "glyphstudio-tunnel",
+	"win32DirName": "GlyphStudio",
+	"win32NameVersion": "GlyphStudio",
+	"win32RegValueName": "GlyphStudio",
 	"win32x64AppId": "{{3F1CBFD4-07D0-4995-8A8C-AE071E5266B7}",
 	"win32arm64AppId": "{{4D26A795-EE0D-4A0A-B25F-7812D70E3B83}",
 	"win32x64UserAppId": "{{6FACD052-C4C7-4F02-AF0F-B5C3B000373E}",
 	"win32arm64UserAppId": "{{835ECAAE-52C7-4A63-8641-B09D158AACA2}",
-	"win32AppUserModelId": "GlyphCode.GlyphCode",
-	"win32ShellNameShort": "&GlyphCode",
-	"win32TunnelServiceMutex": "glyphcode-tunnelservice",
-	"win32TunnelMutex": "glyphcode-tunnel",
-	"darwinBundleIdentifier": "dev.glyphcode.app",
+	"win32AppUserModelId": "GlyphStudio.GlyphStudio",
+	"win32ShellNameShort": "&GlyphStudio",
+	"win32TunnelServiceMutex": "glyphstudio-tunnelservice",
+	"win32TunnelMutex": "glyphstudio-tunnel",
+	"darwinBundleIdentifier": "dev.glyphstudio.app",
 	"darwinProfileUUID": "47827DD9-4734-49A0-AF80-7E19B11495CC",
 	"darwinProfilePayloadUUID": "CF808BE7-53F3-46C6-A7E2-7EDB98A5E959",
-	"glyphcodeSovereignPolicyFile": true,
-	"linuxIconName": "glyphcode",
+	"glyphstudioSovereignPolicyFile": true,
+	"linuxIconName": "glyphstudio",
 	"licenseFileName": "LICENSE.txt",
-	"reportIssueUrl": "https://github.com/corynaegle-ai/GlyphCodeIDE/issues/new",
+	"reportIssueUrl": "https://github.com/corynaegle-ai/GlyphStudioIDE/issues/new",
 	"nodejsRepository": "https://nodejs.org",
-	"urlProtocol": "glyphcode",
+	"urlProtocol": "glyphstudio",
 	"extensionsGallery": {
 		"serviceUrl": "https://open-vsx.org/vscode/gallery",
 		"itemUrl": "https://open-vsx.org/vscode/item",
@@ -131,9 +131,9 @@
 	],
 	"onboardingThemes": [
 		{
-			"id": "glyphcode-dark",
-			"label": "GlyphCode Dark",
-			"themeId": "GlyphCode Dark",
+			"id": "glyphstudio-dark",
+			"label": "GlyphStudio Dark",
+			"themeId": "GlyphStudio Dark",
 			"type": "dark"
 		},
 		{
@@ -175,13 +175,13 @@
 	],
 	"sessionsWindowAllowedExtensions": [],
 	"extensionEnabledApiProposals": {
-		"glyphcode.glyphcode": [
+		"glyphstudio.glyphstudio": [
 			"defaultChatParticipant",
 			"chatProvider"
 		]
 	},
 	"configurationDefaults": {
 		"extensions.ignoreRecommendations": true,
-		"workbench.colorTheme": "GlyphCode Dark"
+		"workbench.colorTheme": "GlyphStudio Dark"
 	}
 }

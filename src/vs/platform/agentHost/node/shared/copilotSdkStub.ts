@@ -4,11 +4,11 @@
  *--------------------------------------------------------------------------------------------*/
 
 /**
- * GlyphCode-owned inert compatibility layer for `@github/copilot-sdk`.
+ * GlyphStudio-owned inert compatibility layer for `@github/copilot-sdk`.
  *
- * GlyphCode ships NO GitHub Copilot runtime (see SECURITY-PATCHES.md GATE-002).
+ * GlyphStudio ships NO GitHub Copilot runtime (see SECURITY-PATCHES.md GATE-002).
  * Microsoft's Agent Host (`vs/platform/agentHost/node/copilot/**`) imports the
- * Copilot SDK as a load-bearing runtime dependency, but GlyphCode does not use
+ * Copilot SDK as a load-bearing runtime dependency, but GlyphStudio does not use
  * that Copilot-backed agent path — it has its own brokered/trust layer and the
  * Claude agent. The agent host still imports these symbols, so this module
  * provides INERT runtime values whose every Copilot-touching entry point throws
@@ -64,7 +64,7 @@ export type {
 	CopilotSession,
 } from '@github/copilot-sdk';
 
-const COPILOT_UNAVAILABLE = 'Copilot is not available in GlyphCode (the Copilot runtime is intentionally removed; GlyphCode ships no GitHub Copilot).';
+const COPILOT_UNAVAILABLE = 'Copilot is not available in GlyphStudio (the Copilot runtime is intentionally removed; GlyphStudio ships no GitHub Copilot).';
 
 function unavailable(): never {
 	throw new Error(COPILOT_UNAVAILABLE);

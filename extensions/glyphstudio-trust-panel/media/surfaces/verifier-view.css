@@ -1,0 +1,112 @@
+/*
+ * GlyphStudio INDEPENDENT VERIFIER rail surface — stylesheet (Spec §5.9 "Verifier",
+ * §5.8 verdict pane, §2.2 honesty).
+ *
+ * Mirrors the blended trust-token VALUES from media/styles.css (it does NOT import
+ * the shared sheet — the a11y agent owns styles.css). Kept self-contained for this
+ * surface only.
+ *
+ * COLOR DOCTRINE (§2.3): amber = actor-claimed / unverified; blue (--verdict) =
+ * independently signature-verified; red (--fail) = tamper / untrusted / missing
+ * signature. A verdict NEVER reaches blue from a stream claim — only the in-webview
+ * Ed25519 gate flips it. NON-COLOR redundancy (§3.4): each verdict state carries a
+ * leading glyph + an UPPERCASE label so it survives grayscale / color-blindness.
+ */
+
+:root {
+  --plane-0:#0f1419; --plane-1:#161c24; --plane-2:#1d2530;
+  --border:#2a333f; --border-lit:#36424f;
+  --text:#d7dde5; --text-2:#aeb9c7; --text-dim:#8b97a6;
+  --claim:#d9a441; --claim-bg:#2a2113;
+  --verdict:#5b9cf0; --verdict-bg:#13243a;
+  --pass:#3fb568; --pass-bg:#11251a;
+  --fail:#ef6a60; --fail-bg:#2a1413;
+  --demo:#6fb3d6; --demo-bg:#11202a;
+  --soft:#a98bff;
+  --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  --sans: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+  --r-sm:6px; --r-md:9px; --r-pill:999px;
+}
+
+* { box-sizing: border-box; }
+body { margin:0; padding:10px 8px 16px; background:var(--plane-1); color:var(--text); font-family:var(--sans); font-size:13px; }
+
+.surface-h { font-size:10.5px; letter-spacing:.8px; text-transform:uppercase; color:var(--text-dim); padding:2px 4px 8px; display:flex; align-items:center; justify-content:space-between; }
+.surface-h .count { font-variant-numeric:tabular-nums; }
+
+/* Isolated-domain banner: the verifier re-runs checks in a separate trust domain. */
+.iso-banner { background:var(--plane-0); border:1px solid var(--border); border-left:3px solid var(--verdict); border-radius:var(--r-md); padding:9px 11px; margin:0 2px 10px; }
+.iso-banner .iso-title { font-size:12px; color:var(--text); font-weight:600; display:flex; align-items:center; gap:6px; }
+.iso-banner .iso-glyph { color:var(--verdict); font-weight:800; }
+.iso-banner p { color:var(--text-2); line-height:1.5; margin:5px 0 0; font-size:11px; }
+
+/* Section headers between blocks. */
+.block { margin:0 2px 12px; }
+.block-h { font-size:10px; letter-spacing:.7px; text-transform:uppercase; color:var(--text-dim); padding:2px 2px 6px; }
+
+/* Verification targets (sourced from Policy.verify — the actor cannot narrow them). */
+.targets { display:flex; flex-direction:column; gap:4px; }
+.target-row { display:flex; align-items:center; gap:8px; background:var(--plane-0); border:1px solid var(--border); border-radius:var(--r-sm); padding:6px 9px; }
+.target-row .t-name { font-size:12px; color:var(--text); }
+.target-row .t-cmd { font-family:var(--mono); font-size:10.5px; color:var(--text-dim); margin-left:auto; }
+.targets-empty, .verdicts-empty { color:var(--text-dim); font-size:11px; line-height:1.5; padding:6px 4px; }
+
+/* Run-verifier affordance — a LABEL only (this surface does not itself launch a run). */
+.run-verifier { display:flex; align-items:center; gap:8px; background:var(--plane-0); border:1px dashed var(--border-lit); border-radius:var(--r-md); padding:9px 11px; margin:0 2px 12px; color:var(--text-2); font-size:11.5px; }
+.run-verifier .rv-glyph { color:var(--verdict); font-weight:800; font-size:13px; }
+.run-verifier .rv-note { color:var(--text-dim); font-size:10.5px; }
+
+/* A recent-verdict card. The whole card de-authoritates when not signature-verified. */
+.verdict-card { background:var(--plane-0); border:1px solid var(--border); border-left:3px solid var(--text-dim); border-radius:var(--r-md); padding:9px 11px; margin-bottom:6px; }
+.verdict-card.state-pending  { border-left-color:var(--text-dim); }
+.verdict-card.state-pass     { border-left-color:var(--pass); }
+.verdict-card.state-demo     { border-left-color:var(--demo); }
+.verdict-card.state-untrusted{ border-left-color:var(--fail); }
+
+.vc-top { display:flex; align-items:center; justify-content:space-between; gap:8px; }
+.vc-run { font-family:var(--mono); font-size:11px; color:var(--text-2); }
+
+/* The verdict state PILL — PENDING → PASS·SIGNED → UNTRUSTED. NON-COLOR glyph + label. */
+.pill { font-size:9.5px; font-weight:700; letter-spacing:.3px; text-transform:uppercase; padding:2px 8px; border-radius:var(--r-pill); white-space:nowrap; display:inline-flex; align-items:center; gap:4px; }
+.pill .pg { font-weight:800; }
+.pill.pending   { color:var(--text-dim); background:var(--plane-2); border:1px solid var(--border-lit); }
+.pill.pass      { color:var(--verdict); background:var(--verdict-bg); border:1px solid var(--verdict); }
+.pill.demo      { color:var(--demo);    background:var(--demo-bg);    border:1px solid var(--demo); }
+.pill.untrusted { color:var(--fail);    background:var(--fail-bg);    border:1px solid var(--fail); }
+
+/* The Ed25519 signature line — the gate, shown directly under the pill. */
+.sig-line { margin-top:7px; font-size:10.5px; line-height:1.5; display:flex; align-items:flex-start; gap:6px; }
+.sig-line .sg { font-weight:800; flex:none; }
+.sig-line.ok       { color:var(--verdict); }
+.sig-line.ok .sg   { color:var(--verdict); }
+.sig-line.demo     { color:var(--demo); }
+.sig-line.demo .sg { color:var(--demo); }
+.sig-line.bad      { color:var(--fail); }
+.sig-line.bad .sg  { color:var(--fail); }
+.sig-line.pending  { color:var(--text-dim); }
+.sig-line .sig-detail { color:inherit; }
+
+/* Signing-key fingerprint — DISPLAY-ONLY identity (never the basis of trust). */
+.key-fp { margin-top:6px; font-family:var(--mono); font-size:10px; color:var(--text-dim); word-break:break-all; }
+.key-fp .kf-label { color:var(--text-dim); text-transform:uppercase; letter-spacing:.4px; font-family:var(--sans); font-size:9px; margin-right:5px; }
+
+/* Per-check rows inside a verdict. */
+.vc-checks { margin-top:7px; display:flex; flex-direction:column; gap:3px; }
+.check-row { display:flex; align-items:center; gap:8px; font-size:11px; color:var(--text-2); }
+.check-row .c-name { color:var(--text); }
+.check-row .c-cmd { font-family:var(--mono); font-size:10px; color:var(--text-dim); }
+.check-stat { font-size:9px; font-weight:700; letter-spacing:.3px; text-transform:uppercase; padding:1px 6px; border-radius:var(--r-pill); margin-left:auto; }
+.check-stat.pass    { color:var(--pass); background:var(--pass-bg); border:1px solid var(--pass); }
+.check-stat.fail    { color:var(--fail); background:var(--fail-bg); border:1px solid var(--fail); }
+.check-stat.error   { color:var(--fail); background:var(--fail-bg); border:1px solid var(--fail); }
+.check-stat.skipped { color:var(--text-dim); background:var(--plane-2); border:1px solid var(--border-lit); }
+
+.vc-root { margin-top:7px; font-family:var(--mono); font-size:10px; color:var(--text-dim); word-break:break-all; }
+.vc-root .vr-label { font-family:var(--sans); font-size:9px; text-transform:uppercase; letter-spacing:.4px; margin-right:5px; }
+
+/* A failure/degradation chip on a verdict (tamper, stale, missing-sig, non-isolated). */
+.vc-failure { margin-top:7px; font-size:10.5px; color:var(--fail); background:var(--fail-bg); border:1px solid var(--fail); border-radius:var(--r-sm); padding:5px 8px; line-height:1.45; }
+.vc-failure .vf-glyph { font-weight:800; margin-right:5px; }
+
+/* Runtime-trust caveat (a non-isolated / soft run can never reach product-blue). */
+.vc-caveat { margin-top:7px; font-size:10px; color:var(--soft); line-height:1.45; }

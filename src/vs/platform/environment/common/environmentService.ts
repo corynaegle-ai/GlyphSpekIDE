@@ -277,18 +277,18 @@ export abstract class AbstractNativeEnvironmentService implements INativeEnviron
 	}
 
 	/**
-	 * GlyphCode PATCH-001 — path to the Sovereign policy file bundled inside the signed app.
-	 * Resolved (and only resolved) when `product.json` sets `glyphcodeSovereignPolicyFile`,
-	 * so a stock GlyphCode/Developer build is unaffected. The file ships at the app resources
+	 * GlyphStudio PATCH-001 — path to the Sovereign policy file bundled inside the signed app.
+	 * Resolved (and only resolved) when `product.json` sets `glyphstudioSovereignPolicyFile`,
+	 * so a stock GlyphStudio/Developer build is unaffected. The file ships at the app resources
 	 * root (`<appRoot>/policy.json`), placed there at package time. See SECURITY-PATCHES.md
-	 * PATCH-001. An explicit `--glyphcode-policy-file <path>` overrides the bundled location.
+	 * PATCH-001. An explicit `--glyphstudio-policy-file <path>` overrides the bundled location.
 	 */
 	@memoize
-	get glyphcodeSovereignPolicyFile(): URI | undefined {
-		if (!this.productService.glyphcodeSovereignPolicyFile) {
+	get glyphstudioSovereignPolicyFile(): URI | undefined {
+		if (!this.productService.glyphstudioSovereignPolicyFile) {
 			return undefined;
 		}
-		const override = this.args['glyphcode-policy-file'];
+		const override = this.args['glyphstudio-policy-file'];
 		if (override) {
 			return URI.file(resolve(override));
 		}

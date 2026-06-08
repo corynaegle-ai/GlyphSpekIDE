@@ -6,7 +6,7 @@
 /*
 	Keeping name short for faster parsing.
 	cdr = core decorations rendering (div)
-	cdr-wl = whole-line decoration row plane (added for GlyphCode; see below)
+	cdr-wl = whole-line decoration row plane (added for GlyphStudio; see below)
 */
 .monaco-editor .lines-content .cdr {
 	position: absolute;
@@ -14,10 +14,10 @@
 }
 
 /*---------------------------------------------------------------------------------------------
- *  GlyphCode Blended Workbench — whole-line PROVENANCE TINT plane (spec §5.5 / §8).
+ *  GlyphStudio Blended Workbench — whole-line PROVENANCE TINT plane (spec §5.5 / §8).
  *
  *  A whole-line decoration (`isWholeLine`) is a per-ROW background plane. The shipped
- *  GlyphCode extension already drives a calm, low-alpha row tint for line provenance —
+ *  GlyphStudio extension already drives a calm, low-alpha row tint for line provenance —
  *  human / claimed-amber / soft-violet / verified-blue — through a standard
  *  `backgroundColor` whole-line decoration (extension/src/provenanceGutter.ts). The DATA
  *  and the honesty caps live entirely in that extension; this is purely the fork-side

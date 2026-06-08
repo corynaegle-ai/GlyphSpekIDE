@@ -48,6 +48,6 @@ dist
 .agents/skills/.local/
 .github/skills/.local/
 
-# GlyphCode vendored/built overlay artifacts must be tracked (override the global dist/ ignore so a fresh clone builds)
-!build/glyphcode/copilot-stubs/**
-!extensions/glyphcode-trust-panel/dist/**
+# GlyphStudio vendored/built overlay artifacts must be tracked (override the global dist/ ignore so a fresh clone builds)
+!build/glyphstudio/copilot-stubs/**
+!extensions/glyphstudio-trust-panel/dist/**

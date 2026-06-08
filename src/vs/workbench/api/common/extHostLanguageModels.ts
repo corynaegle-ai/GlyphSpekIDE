@@ -34,15 +34,15 @@ export interface IExtHostLanguageModels extends ExtHostLanguageModels { }
 export const IExtHostLanguageModels = createDecorator<IExtHostLanguageModels>('IExtHostLanguageModels');
 
 /**
- * GlyphCode fork: the vendor id of the first-party governed chat-default provider (the
- * Codex gateway published by the embedded GlyphCode extension). The de-Copilot fork strips
+ * GlyphStudio fork: the vendor id of the first-party governed chat-default provider (the
+ * Codex gateway published by the embedded GlyphStudio extension). The de-Copilot fork strips
  * the Copilot provider, so `getDefaultLanguageModel` must resolve the chat-default model of
  * THIS vendor specifically — not an arbitrary non-Copilot vendor — so a future
  * proposal-granted or developer provider cannot win the stock "Auto" picker by registration
  * order. MUST stay in sync with the extension's registered vendor (`CHAT_MODEL_VENDOR` in
  * `extension/src/chatParticipant.ts`).
  */
-const GLYPHCODE_DEFAULT_MODEL_VENDOR = 'glyphcode';
+const GLYPHSTUDIO_DEFAULT_MODEL_VENDOR = 'glyphstudio';
 
 type LanguageModelProviderData = {
 	readonly extension: IExtensionDescription;
@@ -381,16 +381,16 @@ export class ExtHostLanguageModels implements ExtHostLanguageModelsShape {
 			await this.selectLanguageModels(extension, {});
 		}
 
-		// GlyphCode fork: Copilot is stripped from this build, so the chat-default model is the
-		// FIRST-PARTY governed Codex gateway published under the `GLYPHCODE_DEFAULT_MODEL_VENDOR`
+		// GlyphStudio fork: Copilot is stripped from this build, so the chat-default model is the
+		// FIRST-PARTY governed Codex gateway published under the `GLYPHSTUDIO_DEFAULT_MODEL_VENDOR`
 		// vendor. Resolve in two passes: keep upstream's Copilot preference (vestigial — no Copilot
-		// provider ships here), THEN fall back to the chat-default model owned by the GlyphCode
+		// provider ships here), THEN fall back to the chat-default model owned by the GlyphStudio
 		// vendor specifically. We deliberately do NOT fall back to an arbitrary non-Copilot vendor:
 		// a future proposal-granted or developer provider that registers a chat-default earlier must
-		// not win the stock "Auto" picker by insertion order. If neither a Copilot nor a GlyphCode
+		// not win the stock "Auto" picker by insertion order. If neither a Copilot nor a GlyphStudio
 		// chat-default exists we fail closed (return undefined → honest "Language model unavailable")
 		// rather than silently resolving some other vendor's governed model.
-		let glyphcodeDefaultModelId: string | undefined;
+		let glyphstudioDefaultModelId: string | undefined;
 		for (const [modelIdentifier, modelData] of this._localModels) {
 			if (!modelData.metadata.isDefaultForLocation[ChatAgentLocation.Chat]) {
 				continue;
@@ -400,13 +400,13 @@ export class ExtHostLanguageModels implements ExtHostLanguageModelsShape {
 				defaultModelId = modelIdentifier;
 				break;
 			}
-			if (!glyphcodeDefaultModelId && modelData.metadata.vendor === GLYPHCODE_DEFAULT_MODEL_VENDOR) {
-				// Remember the GlyphCode-owned chat-default as the fork's first-party fallback.
-				glyphcodeDefaultModelId = modelIdentifier;
+			if (!glyphstudioDefaultModelId && modelData.metadata.vendor === GLYPHSTUDIO_DEFAULT_MODEL_VENDOR) {
+				// Remember the GlyphStudio-owned chat-default as the fork's first-party fallback.
+				glyphstudioDefaultModelId = modelIdentifier;
 			}
 		}
 		if (!defaultModelId) {
-			defaultModelId = glyphcodeDefaultModelId;
+			defaultModelId = glyphstudioDefaultModelId;
 		}
 		if (!defaultModelId && !forceResolveModels) {
 			// Maybe the default wasn't cached so we will try again with resolving the models too

@@ -96,8 +96,8 @@ const vscodeResourceIncludes = [
 	'out-build/vs/workbench/contrib/welcomeGettingStarted/common/media/**/*.{svg,png}',
 	'out-build/vs/workbench/contrib/welcomeOnboarding/browser/media/*.svg',
 
-	// GlyphCode chat empty-state brand logo
-	'out-build/vs/workbench/contrib/chat/browser/widget/media/glyphcode-chat-logo.png',
+	// GlyphStudio chat empty-state brand logo
+	'out-build/vs/workbench/contrib/chat/browser/widget/media/glyphstudio-chat-logo.png',
 
 	// Sessions
 	'out-build/vs/sessions/contrib/chat/browser/media/*.svg',
@@ -270,12 +270,12 @@ function packageTask(platform: string, arch: string, sourceFolderName: string, d
 			return !set.has(platform);
 		}).map(ext => `!.build/extensions/${ext.name}/**`);
 
-		// GlyphCode: hard exclude the bundled Copilot extension from the packaged app.
+		// GlyphStudio: hard exclude the bundled Copilot extension from the packaged app.
 		// We do not compile it (see vscodeTask), and this is a defense-in-depth guard so a
 		// stale .build/extensions/copilot can never be copied into Resources/app/extensions.
-		const glyphcodeBuiltInExtensionsExclusions = ['!.build/extensions/copilot/**'];
+		const glyphstudioBuiltInExtensionsExclusions = ['!.build/extensions/copilot/**'];
 
-		const extensions = gulp.src(['.build/extensions/**', ...glyphcodeBuiltInExtensionsExclusions, ...platformSpecificBuiltInExtensionsExclusions], { base: '.build', dot: true });
+		const extensions = gulp.src(['.build/extensions/**', ...glyphstudioBuiltInExtensionsExclusions, ...platformSpecificBuiltInExtensionsExclusions], { base: '.build', dot: true });
 
 		const sourceFilterPattern = stripSourceMapsInPackagingTasks
 			? ['**', '!**/*.{js,css}.map']
@@ -340,7 +340,7 @@ function packageTask(platform: string, arch: string, sourceFolderName: string, d
 			.pipe(filter(depFilterPattern))
 			.pipe(util.cleanNodeModules(path.join(import.meta.dirname, '.moduleignore')))
 			.pipe(util.cleanNodeModules(path.join(import.meta.dirname, `.moduleignore.${process.platform}`)));
-		// GlyphCode (SECURITY-PATCHES.md GATE-002): the real GitHub Copilot runtime
+		// GlyphStudio (SECURITY-PATCHES.md GATE-002): the real GitHub Copilot runtime
 		// (@github/copilot*, @github/copilot-sdk) is removed from the build graph, so
 		// there are no Copilot runtime prebuilds to merge and no wrong-arch Copilot
 		// platform packages to filter or force-unpack from node_modules.asar. The
@@ -377,14 +377,14 @@ function packageTask(platform: string, arch: string, sourceFolderName: string, d
 		];
 		let all = es.merge(...mergeStreams);
 
-		// GlyphCode PATCH-001 (Sweep-19 Finding 2): a Sovereign build must SHIP its bundled
+		// GlyphStudio PATCH-001 (Sweep-19 Finding 2): a Sovereign build must SHIP its bundled
 		// `AllowedExtensions` allowlist inside the signed app. The main process loads it from
-		// `<appRoot>/policy.json` (via `glyphcodeSovereignPolicyFile`); without this copy a
+		// `<appRoot>/policy.json` (via `glyphstudioSovereignPolicyFile`); without this copy a
 		// Sovereign build would boot with no policy file, and the fail-closed path would force
 		// the app to UNTRUSTED (deny-all). Gated on the same `product.json` flag the runtime
 		// loader is gated on, so non-Sovereign/Developer builds ship no policy.json (unchanged).
-		if ((product as { glyphcodeSovereignPolicyFile?: boolean }).glyphcodeSovereignPolicyFile) {
-			const sovereignPolicy = gulp.src('build/glyphcode/sovereign-profile/sovereign-policy.json', { base: 'build/glyphcode/sovereign-profile' })
+		if ((product as { glyphstudioSovereignPolicyFile?: boolean }).glyphstudioSovereignPolicyFile) {
+			const sovereignPolicy = gulp.src('build/glyphstudio/sovereign-profile/sovereign-policy.json', { base: 'build/glyphstudio/sovereign-profile' })
 				.pipe(rename('policy.json'));
 			all = es.merge(all, sovereignPolicy);
 		}
@@ -638,7 +638,7 @@ BUILD_TARGETS.forEach(buildTarget => {
 			compileNativeExtensionsBuildTask,
 			util.rimraf(path.join(buildRoot, destinationFolderName)),
 			packageTask(platform, arch, sourceFolderName, destinationFolderName, opts)
-			// GlyphCode: the Copilot ripgrep shim task is intentionally removed - we do not
+			// GlyphStudio: the Copilot ripgrep shim task is intentionally removed - we do not
 			// ship the bundled Copilot extension, so there is no extension dir to shim.
 		];
 
@@ -665,7 +665,7 @@ BUILD_TARGETS.forEach(buildTarget => {
 				copyCodiconsTask,
 				cleanExtensionsBuildTask,
 				compileNonNativeExtensionsBuildTask,
-				// GlyphCode: do NOT compile the bundled Copilot extension into the packaged app.
+				// GlyphStudio: do NOT compile the bundled Copilot extension into the packaged app.
 				compileExtensionMediaBuildTask,
 				writeISODate('out-build'),
 				esbuildBundleTask,
@@ -676,7 +676,7 @@ BUILD_TARGETS.forEach(buildTarget => {
 				minified ? compileBuildWithManglingTask : compileBuildWithoutManglingTask,
 				cleanExtensionsBuildTask,
 				compileNonNativeExtensionsBuildTask,
-				// GlyphCode: do NOT compile the bundled Copilot extension into the packaged app.
+				// GlyphStudio: do NOT compile the bundled Copilot extension into the packaged app.
 				compileExtensionMediaBuildTask,
 				minified ? minifyVSCodeTask : bundleVSCodeTask,
 				vscodeTaskCI

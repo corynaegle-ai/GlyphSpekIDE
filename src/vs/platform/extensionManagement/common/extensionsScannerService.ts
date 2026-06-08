@@ -109,7 +109,7 @@ interface IBuiltInExtensionControl {
 
 function getProductBuiltInExtensionsEnabledWithAutoUpdates(productService: IProductService, environmentService: IEnvironmentService): Set<string> {
 	const result = new Set<string>();
-	// GlyphCode branding ships a product.json without `builtInExtensionsEnabledWithAutoUpdates`.
+	// GlyphStudio branding ships a product.json without `builtInExtensionsEnabledWithAutoUpdates`.
 	// The field is typed as non-optional, but when absent this iteration would throw
 	// ("not iterable") during extension scanning, which silently disables ALL built-in
 	// extensions (markdown preview, git, etc.). Treat a missing list as empty.

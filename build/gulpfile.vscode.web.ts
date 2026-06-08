@@ -73,8 +73,8 @@ export const vscodeWebResourceIncludes = [
 	'out-build/vs/workbench/contrib/welcomeGettingStarted/common/media/**/*.{svg,png}',
 	'out-build/vs/workbench/contrib/welcomeOnboarding/browser/media/*.svg',
 
-	// GlyphCode chat empty-state brand logo
-	'out-build/vs/workbench/contrib/chat/browser/widget/media/glyphcode-chat-logo.png',
+	// GlyphStudio chat empty-state brand logo
+	'out-build/vs/workbench/contrib/chat/browser/widget/media/glyphstudio-chat-logo.png',
 
 	// Extensions
 	'out-build/vs/workbench/contrib/extensions/browser/media/{theme-icon.png,language-icon.svg}',

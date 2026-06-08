@@ -253,12 +253,12 @@ export interface IProductConfiguration {
 	};
 
 	/**
-	 * GlyphCode PATCH-001 — when `true`, a self-contained Sovereign build loads a
-	 * GlyphCode-bundled `policy.json` (the curated `AllowedExtensions` allowlist) from the app
+	 * GlyphStudio PATCH-001 — when `true`, a self-contained Sovereign build loads a
+	 * GlyphStudio-bundled `policy.json` (the curated `AllowedExtensions` allowlist) from the app
 	 * resources dir at startup, layered ahead of the OS native/MDM policy so native policy can
 	 * *tighten* the allowlist but the user cannot loosen it. See `SECURITY-PATCHES.md` PATCH-001.
 	 */
-	readonly glyphcodeSovereignPolicyFile?: boolean;
+	readonly glyphstudioSovereignPolicyFile?: boolean;
 }
 
 export interface IProductOnboardingKeymap {

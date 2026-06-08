@@ -1,0 +1,30 @@
+{
+	"$comment": [
+		"GlyphStudio bundled-extension deny manifest.",
+		"Extension folder ids / patterns that must NOT appear in the packaged app under",
+		"Contents/Resources/app/extensions/ (or resources/app/extensions/ on Linux/Windows).",
+		"These are either proprietary (closed-source, restrictively licensed) Microsoft/GitHub",
+		"extensions we cannot redistribute in a clean Code-OSS build, or telemetry/cloud agents",
+		"GlyphStudio does not ship. verify-bundled-extensions.sh FAILS the build if any folder",
+		"under extensions/ matches a pattern below.",
+		"",
+		"'patterns' are matched case-insensitively against each extensions/<folder> name as a",
+		"shell-style glob (so 'copilot' matches the folder 'copilot' exactly; use 'copilot*' to",
+		"also match 'copilot-chat'). Add a reason to keep this list auditable."
+	],
+	"denylist": [
+		{ "pattern": "copilot", "reason": "GitHub Copilot bundled extension — GlyphStudio ships no Copilot." },
+		{ "pattern": "copilot-*", "reason": "Any Copilot companion (e.g. copilot-chat) — GlyphStudio ships no Copilot." },
+		{ "pattern": "github.copilot*", "reason": "Marketplace-id form of GitHub Copilot." },
+		{ "pattern": "ms-vscode-remote.*", "reason": "Remote Development pack (SSH / WSL / Containers) — proprietary, non-redistributable." },
+		{ "pattern": "ms-vscode-remote*", "reason": "Remote Development extensions — proprietary, non-redistributable." },
+		{ "pattern": "*remote-containers*", "reason": "Dev Containers — proprietary Microsoft extension." },
+		{ "pattern": "*dev-containers*", "reason": "Dev Containers — proprietary Microsoft extension." },
+		{ "pattern": "ms-python.vscode-pylance", "reason": "Pylance — proprietary, closed-source language server." },
+		{ "pattern": "*pylance*", "reason": "Pylance — proprietary, closed-source language server." },
+		{ "pattern": "ms-vscode.cpptools", "reason": "C/C++ tools — proprietary, non-redistributable binaries." },
+		{ "pattern": "*cpptools*", "reason": "C/C++ tools — proprietary, non-redistributable binaries." },
+		{ "pattern": "ms-dotnettools.csharp", "reason": "C# proprietary debugger (vsdbg) — non-redistributable." },
+		{ "pattern": "*csharp*debug*", "reason": "C# proprietary debug adapter (vsdbg) — non-redistributable." }
+	]
+}

@@ -8,7 +8,7 @@ import { FilePolicyService } from './filePolicyService.js';
 import { PolicyValue } from './policy.js';
 
 /**
- * GlyphCode PATCH-001 (Sweep-19 Finding 2) — fail-closed bundled Sovereign policy source.
+ * GlyphStudio PATCH-001 (Sweep-19 Finding 2) — fail-closed bundled Sovereign policy source.
  *
  * A self-contained Sovereign build carries its `AllowedExtensions` allowlist as a bundled
  * `<appRoot>/policy.json`. Stock `FilePolicyService` swallows a missing/unreadable/invalid
@@ -17,7 +17,7 @@ import { PolicyValue } from './policy.js';
  * `'*'` (all extensions allowed), i.e. a silent Sovereign→Developer downgrade.
  *
  * This service is constructed *only* on the Sovereign branch (when `product.json` sets
- * `glyphcodeSovereignPolicyFile`). When the bundled policy file is missing/unreadable/invalid
+ * `glyphstudioSovereignPolicyFile`). When the bundled policy file is missing/unreadable/invalid
  * it does NOT proceed with an empty allowlist: it forces the `AllowedExtensions` policy to a
  * deny-everything floor (`{ "*": false }`). Because `extensions.allowed` is then a policy-set,
  * deny-all value, no third-party extension can be enabled — the build cannot present as
@@ -29,7 +29,7 @@ import { PolicyValue } from './policy.js';
  */
 export class SovereignFilePolicyService extends FilePolicyService {
 
-	/** The policy whose value carries the GlyphCode-curated extension allowlist. */
+	/** The policy whose value carries the GlyphStudio-curated extension allowlist. */
 	private static readonly ALLOWED_EXTENSIONS_POLICY: PolicyName = 'AllowedExtensions';
 
 	/**
@@ -45,7 +45,7 @@ export class SovereignFilePolicyService extends FilePolicyService {
 		// policy IS a security event: it is the difference between an enforced allowlist and an
 		// all-allowed default, so it must always be visible in the log.
 		this.logService.error(
-			`[SovereignFilePolicyService] GlyphCode Sovereign policy file could not be loaded ` +
+			`[SovereignFilePolicyService] GlyphStudio Sovereign policy file could not be loaded ` +
 			`(missing, unreadable, or invalid). FAILING CLOSED: forcing AllowedExtensions to ` +
 			`deny-all so no third-party extension can be enabled. This build is UNTRUSTED until ` +
 			`a valid policy.json is present.`,

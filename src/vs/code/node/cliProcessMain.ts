@@ -181,15 +181,15 @@ class CliMain extends Disposable {
 
 		// Policy
 		let policyService: IPolicyService | undefined;
-		// GlyphCode PATCH-001: mirror main.ts so the CLI (`glyphcode --install-extension`, etc.)
+		// GlyphStudio PATCH-001: mirror main.ts so the CLI (`glyphstudio --install-extension`, etc.)
 		// honors the bundled Sovereign allowlist at install time, with native/MDM layered ahead
 		// to tighten — never loosen. The bundled source FAILS CLOSED (deny-all AllowedExtensions)
 		// when the policy.json is missing/unreadable/invalid, so the CLI cannot install a
 		// non-allowlisted extension into a Sovereign profile that has lost its policy. Gated by
-		// `product.json`'s `glyphcodeSovereignPolicyFile`.
-		const glyphcodeSovereignPolicyFile = environmentService.glyphcodeSovereignPolicyFile;
-		if (glyphcodeSovereignPolicyFile) {
-			const bundledPolicyService = this._register(new SovereignFilePolicyService(glyphcodeSovereignPolicyFile, fileService, logService));
+		// `product.json`'s `glyphstudioSovereignPolicyFile`.
+		const glyphstudioSovereignPolicyFile = environmentService.glyphstudioSovereignPolicyFile;
+		if (glyphstudioSovereignPolicyFile) {
+			const bundledPolicyService = this._register(new SovereignFilePolicyService(glyphstudioSovereignPolicyFile, fileService, logService));
 			let nativePolicyService: IPolicyService | undefined;
 			if (isWindows && productService.win32RegValueName) {
 				nativePolicyService = this._register(new NativePolicyService(logService, productService.win32RegValueName));

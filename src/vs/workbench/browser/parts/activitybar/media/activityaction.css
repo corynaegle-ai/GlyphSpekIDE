@@ -230,12 +230,12 @@
 }
 
 /* ---------------------------------------------------------------------------------------------
- *  GlyphCode activity-item accent (PATCH-005, chrome polish).
+ *  GlyphStudio activity-item accent (PATCH-005, chrome polish).
  *
  *  Gives the rail icons a softly-rounded hover/active background and a crisper active indicator,
- *  matching the rounded rail buttons in design/ide-concept/glyphcode-workbench-blended.html
+ *  matching the rounded rail buttons in design/ide-concept/glyphstudio-workbench-blended.html
  *  (.rail-btn). Cosmetic only: backgrounds use the theme's activityBar.activeBackground token and
- *  the indicator uses activityBar.activeBorder, so the accent inherits the GlyphCode halo-blue
+ *  the indicator uses activityBar.activeBorder, so the accent inherits the GlyphStudio halo-blue
  *  from the theme without hardcoding a color here. Does not touch sizing/geometry.
  * ------------------------------------------------------------------------------------------- */
 

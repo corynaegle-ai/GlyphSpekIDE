@@ -1,0 +1,16 @@
+{
+	"name": "@glyphstudio/copilot-api-stub",
+	"version": "0.0.0",
+	"description": "GlyphStudio inert stub for @vscode/copilot-api. Ships NO Copilot runtime; every CAPI request throws. See SECURITY-PATCHES.md GATE-002.",
+	"type": "module",
+	"main": "./dist/index.js",
+	"types": "./dist/index.d.ts",
+	"exports": {
+		".": {
+			"types": "./dist/index.d.ts",
+			"default": "./dist/index.js"
+		}
+	},
+	"license": "MIT",
+	"private": true
+}
