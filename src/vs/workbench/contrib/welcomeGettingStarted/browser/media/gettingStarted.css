@@ -65,10 +65,10 @@
 	font-weight: 200;
 }
 
-/* GlyphSpek brand hero: G-mark symbol + two-tone, theme-aware product title. The symbol
+/* GlyphCode brand hero: G-mark symbol + two-tone, theme-aware product title. The symbol
    carries the bracket "GS" mark only (no wordmark) so the product name appears exactly once,
    in the colored title below it. */
-.monaco-workbench .part.editor > .content .gettingStartedContainer .header.glyphspek-hero {
+.monaco-workbench .part.editor > .content .gettingStartedContainer .header.glyphcode-hero {
 	display: flex;
 	flex-direction: column;
 	align-items: flex-start;
@@ -78,11 +78,11 @@
 	padding-top: 48px;
 }
 
-.monaco-workbench .part.editor > .content .gettingStartedContainer .glyphspek-hero .glyphspek-logo {
+.monaco-workbench .part.editor > .content .gettingStartedContainer .glyphcode-hero .glyphcode-logo {
 	width: 74px;
 	height: 53px;
 	margin: 0 0 14px;
-	background-image: url('./glyphspek-mark.png');
+	background-image: url('./glyphcode-mark.png');
 	background-repeat: no-repeat;
 	background-position: center;
 	background-size: contain;
@@ -97,33 +97,33 @@
 	box-sizing: content-box;
 }
 
-.monaco-workbench.hc-black .part.editor > .content .gettingStartedContainer .glyphspek-hero .glyphspek-logo,
-.monaco-workbench.hc-light .part.editor > .content .gettingStartedContainer .glyphspek-hero .glyphspek-logo {
+.monaco-workbench.hc-black .part.editor > .content .gettingStartedContainer .glyphcode-hero .glyphcode-logo,
+.monaco-workbench.hc-light .part.editor > .content .gettingStartedContainer .glyphcode-hero .glyphcode-logo {
 	border-color: var(--vscode-contrastBorder, #6fc3df);
 }
 
-.monaco-workbench .part.editor > .content .gettingStartedContainer .glyphspek-hero .product-name {
+.monaco-workbench .part.editor > .content .gettingStartedContainer .glyphcode-hero .product-name {
 	font-weight: 600;
 	letter-spacing: -0.01em;
 }
 
-.monaco-workbench .part.editor > .content .gettingStartedContainer .glyphspek-hero .product-name .product-name-base {
+.monaco-workbench .part.editor > .content .gettingStartedContainer .glyphcode-hero .product-name .product-name-base {
 	color: var(--vscode-foreground);
 }
 
 /* Brand indigo (sampled from the logo's "Spek"/bracket). Theme-aware so it stays legible on
    light backgrounds, and bright enough for high-contrast themes. */
-.monaco-workbench .part.editor > .content .gettingStartedContainer .glyphspek-hero .product-name .product-name-accent {
+.monaco-workbench .part.editor > .content .gettingStartedContainer .glyphcode-hero .product-name .product-name-accent {
 	color: #6366f1;
 }
 
-.monaco-workbench.vs .part.editor > .content .gettingStartedContainer .glyphspek-hero .product-name .product-name-accent {
+.monaco-workbench.vs .part.editor > .content .gettingStartedContainer .glyphcode-hero .product-name .product-name-accent {
 	/* Slightly deeper indigo so the accent keeps contrast on light backgrounds. */
 	color: #4f46e5;
 }
 
-.monaco-workbench.hc-black .part.editor > .content .gettingStartedContainer .glyphspek-hero .product-name .product-name-accent,
-.monaco-workbench.hc-light .part.editor > .content .gettingStartedContainer .glyphspek-hero .product-name .product-name-accent {
+.monaco-workbench.hc-black .part.editor > .content .gettingStartedContainer .glyphcode-hero .product-name .product-name-accent,
+.monaco-workbench.hc-light .part.editor > .content .gettingStartedContainer .glyphcode-hero .product-name .product-name-accent {
 	color: #818cf8;
 }
 
@@ -232,10 +232,10 @@
 	align-self: end;
 }
 
-/* The GlyphSpek brand hero anchors to the top of its grid band (rather than bottom-aligning like
+/* The GlyphCode brand hero anchors to the top of its grid band (rather than bottom-aligning like
    the stock header) so the padding-top reliably moves the logo + title down a few lines, away from
    the editor tab bar. */
-.monaco-workbench .part.editor > .content .gettingStartedContainer .gettingStartedSlideCategories > .gettingStartedCategoriesContainer > .header.glyphspek-hero {
+.monaco-workbench .part.editor > .content .gettingStartedContainer .gettingStartedSlideCategories > .gettingStartedCategoriesContainer > .header.glyphcode-hero {
 	align-self: start;
 }
 

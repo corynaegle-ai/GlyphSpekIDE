@@ -19,13 +19,13 @@ import { IStringDictionary } from '../../../../base/common/collections.js';
 import { PolicyDefinition } from '../../common/policy.js';
 
 /**
- * GlyphSpek PATCH-001 acceptance test (policy layer).
+ * GlyphCode PATCH-001 acceptance test (policy layer).
  *
  * Verifies that a self-contained Sovereign build's bundled `AllowedExtensions` allowlist is
  * loaded at startup and that an OS native/MDM policy layered ahead of it can *tighten* the
  * allowlist but never *loosen* it (SECURITY-PATCHES.md PATCH-001, acceptance tests #1 and #4).
  */
-suite('MultiPolicyService (GlyphSpek PATCH-001)', () => {
+suite('MultiPolicyService (GlyphCode PATCH-001)', () => {
 
 	const disposables = ensureNoDisposablesAreLeakedInTestSuite();
 
@@ -71,21 +71,21 @@ suite('MultiPolicyService (GlyphSpek PATCH-001)', () => {
 	test('PATCH-001', () => runWithFakedTimers({ useFakeTimers: true }, async () => {
 		// #1 Bundled-only: a standalone Sovereign app boots WITH its allowlist (not "*").
 		await writeFile(bundledFile, {
-			AllowedExtensions: { glyphspek: true, 'redhat.vscode-yaml': ['1.14.0'], '*': false },
+			AllowedExtensions: { glyphcode: true, 'redhat.vscode-yaml': ['1.14.0'], '*': false },
 		});
 		const bundledOnly = await createService(undefined);
 		assert.deepStrictEqual(allowed(bundledOnly), {
-			glyphspek: true,
+			glyphcode: true,
 			'redhat.vscode-yaml': ['1.14.0'],
 			'*': false,
 		});
 
 		// #4 Native tightens: MDM removes the curated id -> it becomes disallowed; default-deny holds.
 		const tightened = await createService({
-			AllowedExtensions: { glyphspek: true, 'redhat.vscode-yaml': false, '*': false },
+			AllowedExtensions: { glyphcode: true, 'redhat.vscode-yaml': false, '*': false },
 		});
 		assert.deepStrictEqual(allowed(tightened), {
-			glyphspek: true,
+			glyphcode: true,
 			'redhat.vscode-yaml': false,
 			'*': false,
 		});
@@ -98,21 +98,21 @@ suite('MultiPolicyService (GlyphSpek PATCH-001)', () => {
 		const effective = allowed(loosenAttempt);
 		assert.strictEqual(effective['*'], false, 'native cannot re-open the default-deny floor');
 		assert.strictEqual(effective['ms-python.python'], false, 'native cannot add an extension the bundle did not allow');
-		assert.strictEqual(effective['glyphspek'], true, 'bundle-allowed first-party stays allowed');
+		assert.strictEqual(effective['glyphcode'], true, 'bundle-allowed first-party stays allowed');
 	}));
 });
 
 /**
- * GlyphSpek PATCH-001 fail-closed acceptance test (Sweep-19 Finding 2).
+ * GlyphCode PATCH-001 fail-closed acceptance test (Sweep-19 Finding 2).
  *
- * A Sovereign build (the `glyphspekSovereignPolicyFile` flag is set, so `SovereignFilePolicyService`
+ * A Sovereign build (the `glyphcodeSovereignPolicyFile` flag is set, so `SovereignFilePolicyService`
  * is constructed) must NOT silently degrade to an all-allowed default when its bundled policy file
  * is missing/invalid. Instead `AllowedExtensions` must resolve to a deny-everything floor
  * (`{ "*": false }`), so no third-party extension can be enabled and the build is effectively
  * UNTRUSTED. A present, valid policy must boot Sovereign-enforced. Native/MDM, layered ahead, must
  * not be able to loosen the failed-closed floor.
  */
-suite('SovereignFilePolicyService fail-closed (GlyphSpek PATCH-001 / Sweep-19 F2)', () => {
+suite('SovereignFilePolicyService fail-closed (GlyphCode PATCH-001 / Sweep-19 F2)', () => {
 
 	const disposables = ensureNoDisposablesAreLeakedInTestSuite();
 
@@ -160,12 +160,12 @@ suite('SovereignFilePolicyService fail-closed (GlyphSpek PATCH-001 / Sweep-19 F2
 	// NOTE: each branch is its OWN `test(...)` so it runs against the FRESH in-memory file
 	// provider built in `setup()` (a clean, empty filesystem with no leftover bundled
 	// `policy.json`). Combining them in one test let the present-valid case's bundled file
-	// survive into the missing-file case, so `glyphspek: true` bled into the deny-all assertion.
+	// survive into the missing-file case, so `glyphcode: true` bled into the deny-all assertion.
 
 	test('present valid policy boots Sovereign-enforced', () => runWithFakedTimers({ useFakeTimers: true }, async () => {
 		// Present + valid -> the real curated allowlist is enforced (NOT all-allowed).
-		const enforced = await createService({ writeBundled: { AllowedExtensions: { glyphspek: true, '*': false } } });
-		assert.deepStrictEqual(allowed(enforced), { glyphspek: true, '*': false });
+		const enforced = await createService({ writeBundled: { AllowedExtensions: { glyphcode: true, '*': false } } });
+		assert.deepStrictEqual(allowed(enforced), { glyphcode: true, '*': false });
 	}));
 
 	test('missing policy file fails closed (deny-all)', () => runWithFakedTimers({ useFakeTimers: true }, async () => {

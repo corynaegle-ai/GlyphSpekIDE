@@ -1,0 +1,53 @@
+<!DOCTYPE html>
+<!--
+  GlyphCode INDEPENDENT VERIFIER rail surface — webview shell (Spec §5.9).
+
+  CSP-locked: default-src 'none'; only the nonce-tagged <style>/<script> run, only
+  same-origin webview assets load. The provider (verifierViewProvider.ts) substitutes
+  the {{nonce}} / {{cssUri}} / {{jsUri}} / {{trustedKeysScript}} tokens at resolve time.
+
+  {{trustedKeysScript}} injects window.GLYPHCODE_TRUSTED_VERIFIER_KEYS — the SAME
+  out-of-band trust root the Trust Panel pins (operator setting + keystore public key).
+  It loads BEFORE verifier-view.js so the in-webview Ed25519 gate has the pinned keys.
+-->
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'nonce-{{nonce}}'; script-src 'nonce-{{nonce}}'; img-src {{cspSource}} https: data:" />
+<link rel="stylesheet" nonce="{{nonce}}" href="{{cssUri}}" />
+</head>
+<body>
+  <div class="surface-h"><span>Independent Verifier</span><span class="count" id="verdictCount">0</span></div>
+
+  <!-- Isolated-domain banner (§5.9): the verifier re-runs the policy's checks in a
+       separate trust domain and SIGNS the verdict. -->
+  <div class="iso-banner">
+    <div class="iso-title"><span class="iso-glyph">&#9670;</span> Isolated verification domain</div>
+    <p>The verifier re-runs the policy&rsquo;s declared checks in a trust domain separate from the actor, then signs the verdict with an Ed25519 key. A verdict reaches verified-blue (PASS&middot;SIGNED) only after this panel verifies that signature against the out-of-band trusted key &mdash; never from the stream&rsquo;s claim.</p>
+  </div>
+
+  <!-- Verification targets (sourced from Policy.verify; the actor cannot narrow them). -->
+  <div class="block">
+    <div class="block-h">Verification targets &mdash; from policy</div>
+    <div class="targets" id="targets"></div>
+  </div>
+
+  <!-- Run-verifier affordance — a LABEL only; this read-only surface does not launch. -->
+  <div class="run-verifier">
+    <span class="rv-glyph">&#9654;</span>
+    <span>
+      Run verifier
+      <span class="rv-note">&mdash; launched per policy from a governed run (Trust Panel / Governed Runs). This surface reads + verifies; it does not itself execute the verifier.</span>
+    </span>
+  </div>
+
+  <!-- Recent verdicts (PENDING -> PASS·SIGNED -> UNTRUSTED), newest first. -->
+  <div class="block">
+    <div class="block-h">Recent verdicts</div>
+    <div id="verdicts"></div>
+  </div>
+
+  {{trustedKeysScript}}
+  <script nonce="{{nonce}}" src="{{jsUri}}"></script>
+</body>
+</html>

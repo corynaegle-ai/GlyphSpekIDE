@@ -1,0 +1,86 @@
+/*---------------------------------------------------------------------------------------------
+ *  Copyright (c) Microsoft Corporation. All rights reserved.
+ *  Licensed under the MIT License. See License.txt in the project root for license information.
+ *--------------------------------------------------------------------------------------------*/
+
+/*
+ * GlyphCode Tier Chrome (PATCH-008) — the FRICTION axis editor-recede.
+ *
+ * Driven ONLY by `data-glyphcode-tier` on `.monaco-workbench`, which mirrors the
+ * `glyphcode.tier` context-key the GlyphCode extension sets (ask | inline | governed |
+ * sensitive | sovereign). This is ORTHOGONAL to the Authority Halo (PATCH-003,
+ * `glyphcodeAuthorityHalo.css`): this file touches ONLY the editor part and NEVER reads
+ * or paints the assurance ring. Receding the editor REDUCES perceived authority — it is
+ * a friction cue, never a trust signal.
+ *
+ * The recede look is ported from the design source
+ * `design/ide-concept/glyphcode-workbench-blended.html` (`html[data-tier="ask"]
+ * .center-main > .editor { filter: grayscale(.35); }` + the `.ask-overlay` scrim).
+ *
+ * LAYOUT SAFETY (mirrors the halo's PATCH-003 non-layout decision): the recede is a
+ * `filter` + opacity on the editor part plus a non-layout, `pointer-events: none`
+ * `::after` scrim. It NEVER changes the JS-computed part dimensions, NEVER alters the
+ * workbench grid, and NEVER intercepts input — so editor focus/click, sash resize, split
+ * layouts, and the ladder/promote affordances all keep working. The cue is visual only;
+ * the user can always click into the editor or promote out of Ask.
+ *
+ * SCOPE: `.part.editor` (the center editor area) ONLY. The title bar, activity bar/rail,
+ * side bar, panel, status bar, and the GlyphCode Trust Panel webview all stay fully
+ * legible at Ask — the ladder + the Ask affordance must remain bright.
+ */
+
+/*
+ * THE EDITOR RECEDE. At the Ask tier the center editor part desaturates + dims behind a
+ * scrim. Calm `.5s` cross-fade (matching the halo) into and out of the receded state.
+ *
+ * `filter` + `opacity` are non-layout paint-only properties: they do not change the
+ * part's box, so the grid/sash math is untouched. We deliberately do NOT add
+ * `pointer-events: none` to the part itself — the user must still be able to click into
+ * the editor (e.g. to read code while asking). The scrim below is the only overlay, and
+ * it is click-through.
+ */
+.monaco-workbench[data-glyphcode-tier='ask']:not(.glyphcode-tier-recede-off) .part.editor {
+	filter: grayscale(0.4) brightness(0.9);
+	opacity: 0.62;
+	transition: filter 0.5s ease, opacity 0.5s ease;
+}
+
+/* The non-receded tiers (and the editor at all tiers) cross-fade BACK with the same
+ * timing, so leaving Ask is as calm as entering it. */
+.monaco-workbench[data-glyphcode-tier] .part.editor {
+	transition: filter 0.5s ease, opacity 0.5s ease;
+}
+
+/*
+ * THE SCRIM. A subtle translucent veil over the editor part, drawn on a non-layout,
+ * click-through `::after` so it is a VISUAL cue and never an interaction trap. `inset: 0`
+ * aligns it to the editor part box; it adds nothing to the layout. Below the halo ring
+ * (z-index 1000) and below modal overlays/notifications.
+ */
+.monaco-workbench[data-glyphcode-tier='ask']:not(.glyphcode-tier-recede-off) .part.editor::after {
+	content: '';
+	position: absolute;
+	inset: 0;
+	z-index: 50;                               /* over editor content, under panels/notifications/halo */
+	pointer-events: none;                      /* click-through: never trap a click, drag, or sash */
+	background: linear-gradient(180deg, rgba(13, 18, 24, 0.34), rgba(13, 18, 24, 0.46));
+	transition: opacity 0.5s ease;
+}
+
+/*
+ * REDUCED MOTION (accessibility, BLENDED-WORKBENCH-SPEC §7). Drop the cross-fade and
+ * keep the STATIC receded state. Honored via BOTH the OS preference and the shared
+ * `glyphcode-halo-reduce-motion` class the Authority Halo contribution toggles from the
+ * `glyphcode.workbench.haloMotion` setting (one preference quiets both GlyphCode chromes).
+ */
+.monaco-workbench.glyphcode-halo-reduce-motion[data-glyphcode-tier] .part.editor,
+.monaco-workbench.glyphcode-halo-reduce-motion[data-glyphcode-tier] .part.editor::after {
+	transition: none;
+}
+
+@media (prefers-reduced-motion: reduce) {
+	.monaco-workbench[data-glyphcode-tier] .part.editor,
+	.monaco-workbench[data-glyphcode-tier] .part.editor::after {
+		transition: none;
+	}
+}

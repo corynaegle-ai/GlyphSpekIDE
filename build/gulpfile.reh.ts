@@ -335,7 +335,7 @@ function packageTask(type: string, platform: string, arch: string, sourceFolderN
 			.pipe(filter(['**', '!**/package-lock.json', '!**/*.{js,css}.map']))
 			.pipe(util.cleanNodeModules(path.join(import.meta.dirname, '.moduleignore')))
 			.pipe(util.cleanNodeModules(path.join(import.meta.dirname, `.moduleignore.${process.platform}`)));
-		// GlyphSpek (SECURITY-PATCHES.md GATE-002): the real GitHub Copilot runtime
+		// GlyphCode (SECURITY-PATCHES.md GATE-002): the real GitHub Copilot runtime
 		// (@github/copilot*, @github/copilot-sdk) is removed from the build graph, so
 		// there are no Copilot runtime prebuilds to merge and no wrong-arch Copilot
 		// platform packages to filter. The Agent Host's Copilot imports are redirected

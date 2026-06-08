@@ -74,10 +74,10 @@
 }
 
 /* ---------------------------------------------------------------------------------------------
- *  GlyphSpek activity-bar restyle (PATCH-005, chrome polish).
+ *  GlyphCode activity-bar restyle (PATCH-005, chrome polish).
  *
  *  Cleans the activity rail to match the design source
- *  (design/ide-concept/glyphspek-workbench-blended.html .rail): a calmer plane with a soft
+ *  (design/ide-concept/glyphcode-workbench-blended.html .rail): a calmer plane with a soft
  *  hairline and a little breathing room at the top, so the rail reads as a governance surface
  *  rather than a stock icon strip. Pure cosmetics — the rail color comes from the active theme
  *  (activityBar.* tokens) and the width stays the layout-driven --activity-bar-width, so layout

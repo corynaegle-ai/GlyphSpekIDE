@@ -1,0 +1,135 @@
+/*---------------------------------------------------------------------------------------------
+ *  Copyright (c) Microsoft Corporation. All rights reserved.
+ *  Licensed under the MIT License. See License.txt in the project root for license information.
+ *--------------------------------------------------------------------------------------------*/
+
+/*
+ * GLYPHCODE FLOATING GOVERNED TERMINAL — cursor-anchored content-widget chrome.
+ *
+ * ACC3 — THEME TOKENS ONLY, no hardcoded hex. Every color is a registered VS Code theme
+ * variable (--vscode-*), so the widget renders correctly in light / dark / high-contrast.
+ * The governed identity uses --vscode-terminal-ansiGreen (the same "governed/traced" green
+ * the panel governed terminal + authority status-bar use); the degraded state drops it for
+ * a neutral/warning token. A CSS-token grep test (floatingTerminalTheme.test) asserts there
+ * is NO hex literal in this file.
+ */
+
+.glyphcode-floating-terminal {
+	display: flex;
+	flex-direction: column;
+	min-width: 320px;
+	border: 1px solid var(--vscode-terminal-ansiGreen);
+	border-radius: 4px;
+	background-color: var(--vscode-editorWidget-background);
+	color: var(--vscode-editorWidget-foreground);
+	box-shadow: 0 2px 8px var(--vscode-widget-shadow);
+	overflow: hidden;
+}
+
+.glyphcode-floating-terminal.degraded {
+	border-color: var(--vscode-editorWarning-foreground);
+}
+
+.glyphcode-floating-terminal-header {
+	display: flex;
+	align-items: center;
+	gap: 6px;
+	padding: 4px 8px;
+	background-color: var(--vscode-editorWidget-background);
+	border-bottom: 1px solid var(--vscode-editorWidget-border);
+	/* Drag handle: the header moves the floating terminal. */
+	cursor: move;
+	user-select: none;
+	touch-action: none;
+}
+
+.glyphcode-floating-terminal-shield {
+	color: var(--vscode-terminal-ansiGreen);
+}
+
+.glyphcode-floating-terminal.degraded .glyphcode-floating-terminal-shield {
+	color: var(--vscode-editorWarning-foreground);
+}
+
+.glyphcode-floating-terminal-posture {
+	flex: 1;
+	font-size: 11px;
+	color: var(--vscode-descriptionForeground);
+}
+
+.glyphcode-floating-terminal-describe {
+	border: 1px solid var(--vscode-button-border, transparent);
+	background-color: var(--vscode-button-secondaryBackground);
+	color: var(--vscode-button-secondaryForeground);
+	border-radius: 2px;
+	padding: 2px 8px;
+	cursor: pointer;
+	font-size: 11px;
+}
+
+.glyphcode-floating-terminal-describe:hover {
+	background-color: var(--vscode-button-secondaryHoverBackground);
+}
+
+.glyphcode-floating-terminal-describe:focus {
+	outline: 1px solid var(--vscode-focusBorder);
+	outline-offset: 1px;
+}
+
+.glyphcode-floating-terminal-close {
+	display: flex;
+	align-items: center;
+	justify-content: center;
+	border: 1px solid var(--vscode-button-border, transparent);
+	background-color: transparent;
+	color: var(--vscode-icon-foreground);
+	border-radius: 2px;
+	padding: 2px 4px;
+	cursor: pointer;
+}
+
+.glyphcode-floating-terminal-close:hover {
+	background-color: var(--vscode-toolbar-hoverBackground);
+}
+
+.glyphcode-floating-terminal-close:focus {
+	outline: 1px solid var(--vscode-focusBorder);
+	outline-offset: 1px;
+}
+
+.glyphcode-floating-terminal-host {
+	flex: 1;
+	min-height: 160px;
+}
+
+/* Resize grip — bottom-right corner; two diagonal grip lines (theme token, no hex). The
+   generous hit area + pointer capture make it easy to grab and drag over the terminal. */
+.glyphcode-floating-terminal-resize {
+	position: absolute;
+	right: 0;
+	bottom: 0;
+	width: 18px;
+	height: 18px;
+	cursor: nwse-resize;
+	touch-action: none;
+	z-index: 1;
+	background: linear-gradient(
+		135deg,
+		transparent 0%, transparent 38%,
+		var(--vscode-editorWidget-border) 38%, var(--vscode-editorWidget-border) 50%,
+		transparent 50%, transparent 62%,
+		var(--vscode-editorWidget-border) 62%, var(--vscode-editorWidget-border) 74%,
+		transparent 74%
+	);
+}
+
+.glyphcode-floating-terminal-resize:hover {
+	background: linear-gradient(
+		135deg,
+		transparent 0%, transparent 38%,
+		var(--vscode-focusBorder) 38%, var(--vscode-focusBorder) 50%,
+		transparent 50%, transparent 62%,
+		var(--vscode-focusBorder) 62%, var(--vscode-focusBorder) 74%,
+		transparent 74%
+	);
+}

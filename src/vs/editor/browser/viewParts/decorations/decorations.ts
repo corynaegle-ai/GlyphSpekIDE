@@ -123,7 +123,7 @@ export class DecorationsOverlay extends DynamicViewOverlay {
 				continue;
 			}
 
-			// GlyphSpek (Blended Workbench §5.5): tag whole-line decoration divs with a
+			// GlyphCode (Blended Workbench §5.5): tag whole-line decoration divs with a
 			// stable structural class `cdr-wl`. A whole-line decoration is a per-row
 			// background plane (the provenance trust tint, findMatch row fill, etc.) and
 			// previously shared the bare `.cdr` rules with column-scoped decorations,

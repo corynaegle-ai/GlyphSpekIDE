@@ -923,7 +923,7 @@ export class GettingStartedPage extends EditorPane {
 			onShowOnStartupChanged();
 		}));
 
-		// GlyphSpek: brand hero. Show the GlyphSpek G-mark symbol (bracket "GS" mark only, no
+		// GlyphCode: brand hero. Show the GlyphCode G-mark symbol (bracket "GS" mark only, no
 		// wordmark) above a two-tone, theme-aware product title ("Glyph" in foreground, "Spek"
 		// in brand indigo) instead of a single flat gray caption. Using the symbol rather than
 		// the full lockup keeps the product name from appearing twice. The title falls back
@@ -940,10 +940,10 @@ export class GettingStartedPage extends EditorPane {
 			titleChildren.push($('span.product-name-base', {}, productName));
 		}
 
-		const header = $('.header.glyphspek-hero', {},
-			$('.glyphspek-logo', { 'role': 'img', 'aria-label': productName }),
+		const header = $('.header.glyphcode-hero', {},
+			$('.glyphcode-logo', { 'role': 'img', 'aria-label': productName }),
 			$('h1.product-name.caption', {}, ...titleChildren),
-			$('p.subtitle.description', {}, localize({ key: 'gettingStarted.trustInfrastructure', comment: ['Shown as subtitle on the Welcome page. GlyphSpek product tagline.'] }, "Trust infrastructure for autonomous coding"))
+			$('p.subtitle.description', {}, localize({ key: 'gettingStarted.trustInfrastructure', comment: ['Shown as subtitle on the Welcome page. GlyphCode product tagline.'] }, "Trust infrastructure for autonomous coding"))
 		);
 
 		const leftColumn = $('.categories-column.categories-column-left', {},);

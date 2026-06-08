@@ -89,7 +89,7 @@ interface IMcpRegistryResponse {
 }
 
 function toDefaultAccountConfig(defaultChatAgent: IDefaultChatAgent | undefined): IDefaultAccountConfig {
-	// GlyphSpek branding strips the Copilot `defaultChatAgent` block from product.json.
+	// GlyphCode branding strips the Copilot `defaultChatAgent` block from product.json.
 	// This service is instantiated during workbench bootstrap, so it must not dereference a
 	// missing chat agent (doing so threw and left the renderer blank). With no chat agent,
 	// there is no default account to configure, so return a neutral empty config.

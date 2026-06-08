@@ -138,7 +138,7 @@ export interface NativeParsedArgs {
 	'sync'?: 'on' | 'off';
 	'logsPath'?: string;
 	'__enable-file-policy'?: boolean;
-	'glyphspek-policy-file'?: string;
+	'glyphcode-policy-file'?: string;
 	editSessionId?: string;
 	continueOn?: string;
 	'locate-shell-integration-path'?: string;

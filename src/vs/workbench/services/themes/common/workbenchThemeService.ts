@@ -39,10 +39,10 @@ export enum ThemeSettings {
 }
 
 export namespace ThemeSettingDefaults {
-	// GlyphSpek: the product default dark color theme (extensions/glyphspek-theme). This is the
+	// GlyphCode: the product default dark color theme (extensions/glyphcode-theme). This is the
 	// source of truth for the desktop `workbench.colorTheme` default + the dark fallback +
-	// legacy-id migration target, so the workbench boots in GlyphSpek Dark on a clean profile.
-	export const COLOR_THEME_DARK = 'GlyphSpek Dark';
+	// legacy-id migration target, so the workbench boots in GlyphCode Dark on a clean profile.
+	export const COLOR_THEME_DARK = 'GlyphCode Dark';
 	export const COLOR_THEME_LIGHT = 'Light 2026';
 	export const COLOR_THEME_HC_DARK = 'Default High Contrast';
 	export const COLOR_THEME_HC_LIGHT = 'Default High Contrast Light';
@@ -72,10 +72,10 @@ export function migrateThemeSettingsId(settingsId: string): string {
 	return settingsId;
 }
 
-// GlyphSpek: pre-theme-load boot splash colors, aligned to the GlyphSpek Dark palette
-// (design/ide-concept/glyphspek-workbench-blended.html :root) so a clean first launch does not
+// GlyphCode: pre-theme-load boot splash colors, aligned to the GlyphCode Dark palette
+// (design/ide-concept/glyphcode-workbench-blended.html :root) so a clean first launch does not
 // flash the stock blue/#1F1F1F chrome before the theme extension resolves. Mirrors the load-bearing
-// surfaces of extensions/glyphspek-theme/themes/glyphspek-dark-color-theme.json.
+// surfaces of extensions/glyphcode-theme/themes/glyphcode-dark-color-theme.json.
 export const COLOR_THEME_DARK_INITIAL_COLORS = {
 	'actionBar.toggledBackground': '#232d3a',
 	'activityBar.activeBorder': '#5b9cf0',

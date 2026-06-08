@@ -1,0 +1,43 @@
+<!DOCTYPE html>
+<!--
+  GlyphCode SETTINGS rail surface — webview shell (Spec §5.9 "Settings").
+
+  Static template; settingsViewProvider.ts substitutes ${CSP}, ${STYLE_URI},
+  ${SCRIPT_URI} and ${NONCE} at resolve time. CSP-locked (default-src 'none'),
+  per-load nonce, no inline handlers, no external network. The provider posts a
+  { type:'render', model } message; settings-view.js draws it with native DOM (no
+  framework, no innerHTML of dynamic data). It fabricates NO state — it reflects the
+  ACTUAL glyphcode.* config values the host read. Machine-scoped trust roots render
+  READ-ONLY (a workspace can never inject a trust root through this surface), and the
+  v2 / not-yet-wired concepts (terminal content-MITM) are labelled honestly, never
+  shown as live toggles.
+-->
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta http-equiv="Content-Security-Policy" content="${CSP}" />
+<link rel="stylesheet" href="${STYLE_URI}" nonce="${NONCE}" />
+</head>
+<body>
+  <div class="surface-h"><span>Settings</span><span class="scope-ref" id="scopeRef"></span></div>
+
+  <!-- Honest intro: this is a reader/writer of LOCAL config, not the run stream. -->
+  <div class="intro" id="intro"></div>
+
+  <!-- Toggleable trust + workbench settings (boolean, operator-writable). -->
+  <div class="sect-h"><span>Trust &amp; workbench toggles</span></div>
+  <div class="toggles" id="toggles"></div>
+
+  <!-- Read-only governance settings (machine-scoped / enum / trust roots). -->
+  <div class="sect-h"><span>Governance (read-only here)</span></div>
+  <div class="readonly" id="readonly"></div>
+
+  <!-- Honest notes on concepts that are NOT yet wired settings (e.g. v2 MITM). -->
+  <div class="sect-h"><span>Not yet a setting</span></div>
+  <div class="future" id="future"></div>
+
+  <div class="foot" id="foot"></div>
+
+  <script nonce="${NONCE}" src="${SCRIPT_URI}"></script>
+</body>
+</html>

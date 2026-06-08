@@ -1,7 +1,7 @@
 {
-	// GlyphSpek is a clean, de-Microsoft Code-OSS distribution and does NOT ship
+	// GlyphCode is a clean, de-Microsoft Code-OSS distribution and does NOT ship
 	// Microsoft/GitHub extension recommendations. Intentionally empty — see
-	// build/glyphspek/SECURITY-PATCHES.md (de-Microsoft posture). Add only
+	// build/glyphcode/SECURITY-PATCHES.md (de-Microsoft posture). Add only
 	// vendor-neutral, Open-VSX-available recommendations here if ever needed.
 	"recommendations": []
 }

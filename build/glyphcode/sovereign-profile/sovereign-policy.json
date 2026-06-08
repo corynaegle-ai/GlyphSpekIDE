@@ -1,0 +1,9 @@
+{
+  "_comment": "GlyphCode SOVEREIGN policy file (STUB). Generated from curated-allowlist.jsonc. This is the POLICY-FILE form consumed by FilePolicyService (src/vs/platform/policy/common/filePolicyService.ts). Place at /etc/vscode/policy.json (Linux), or ~/.glyphcode/policy.json when launched with --__enable-file-policy, or deliver the equivalent values via OS managed prefs (macOS dev.glyphcode.app) / registry (Windows GlyphCode). NOTE: the top-level key is the POLICY NAME 'AllowedExtensions' (extensionManagement.ts:744), NOT the setting id 'extensions.allowed'.",
+  "AllowedExtensions": {
+    "glyphcode": true,
+    "redhat.vscode-yaml": ["1.14.0"],
+    "esbenp.prettier-vscode": ["10.4.0"],
+    "*": false
+  }
+}

@@ -438,8 +438,8 @@ export const TIP_CATALOG: readonly ITipDefinition[] = [
 				: defaultMessage;
 			return new MarkdownString(message);
 		},
-		// GlyphSpek PATCH-006: the upstream "Agents window" is suppressed in the
-		// GlyphSpek UI (its open commands are no longer registered), so this tip
+		// GlyphCode PATCH-006: the upstream "Agents window" is suppressed in the
+		// GlyphCode UI (its open commands are no longer registered), so this tip
 		// would render a dead command: link. Disable the tip outright with a
 		// `false` precondition. Reversible by restoring the original `when`
 		// (ContextKeyExpr.and(IsWebContext.negate(), OPEN_AGENTS_WINDOW_PRECONDITION)).

@@ -1,39 +1,39 @@
 {
-	"nameShort": "GlyphSpek",
-	"nameLong": "GlyphSpek",
-	"applicationName": "glyphspek",
-	"dataFolderName": ".glyphspek",
-	"sharedDataFolderName": ".glyphspek-shared",
-	"win32MutexName": "glyphspek",
+	"nameShort": "GlyphCode",
+	"nameLong": "GlyphCode",
+	"applicationName": "glyphcode",
+	"dataFolderName": ".glyphcode",
+	"sharedDataFolderName": ".glyphcode-shared",
+	"win32MutexName": "glyphcode",
 	"licenseName": "MIT",
-	"licenseUrl": "https://github.com/corynaegle-ai/GlyphSpekIDE/blob/main/LICENSE.txt",
-	"serverLicenseUrl": "https://github.com/corynaegle-ai/GlyphSpekIDE/blob/main/LICENSE.txt",
+	"licenseUrl": "https://github.com/corynaegle-ai/GlyphCodeIDE/blob/main/LICENSE.txt",
+	"serverLicenseUrl": "https://github.com/corynaegle-ai/GlyphCodeIDE/blob/main/LICENSE.txt",
 	"serverGreeting": [],
 	"serverLicense": [],
 	"serverLicensePrompt": "",
-	"serverApplicationName": "glyphspek-server",
-	"serverDataFolderName": ".glyphspek-server",
-	"tunnelApplicationName": "glyphspek-tunnel",
-	"win32DirName": "GlyphSpek",
-	"win32NameVersion": "GlyphSpek",
-	"win32RegValueName": "GlyphSpek",
+	"serverApplicationName": "glyphcode-server",
+	"serverDataFolderName": ".glyphcode-server",
+	"tunnelApplicationName": "glyphcode-tunnel",
+	"win32DirName": "GlyphCode",
+	"win32NameVersion": "GlyphCode",
+	"win32RegValueName": "GlyphCode",
 	"win32x64AppId": "{{3F1CBFD4-07D0-4995-8A8C-AE071E5266B7}",
 	"win32arm64AppId": "{{4D26A795-EE0D-4A0A-B25F-7812D70E3B83}",
 	"win32x64UserAppId": "{{6FACD052-C4C7-4F02-AF0F-B5C3B000373E}",
 	"win32arm64UserAppId": "{{835ECAAE-52C7-4A63-8641-B09D158AACA2}",
-	"win32AppUserModelId": "GlyphSpek.GlyphSpek",
-	"win32ShellNameShort": "&GlyphSpek",
-	"win32TunnelServiceMutex": "glyphspek-tunnelservice",
-	"win32TunnelMutex": "glyphspek-tunnel",
-	"darwinBundleIdentifier": "dev.glyphspek.app",
+	"win32AppUserModelId": "GlyphCode.GlyphCode",
+	"win32ShellNameShort": "&GlyphCode",
+	"win32TunnelServiceMutex": "glyphcode-tunnelservice",
+	"win32TunnelMutex": "glyphcode-tunnel",
+	"darwinBundleIdentifier": "dev.glyphcode.app",
 	"darwinProfileUUID": "47827DD9-4734-49A0-AF80-7E19B11495CC",
 	"darwinProfilePayloadUUID": "CF808BE7-53F3-46C6-A7E2-7EDB98A5E959",
-	"glyphspekSovereignPolicyFile": true,
-	"linuxIconName": "glyphspek",
+	"glyphcodeSovereignPolicyFile": true,
+	"linuxIconName": "glyphcode",
 	"licenseFileName": "LICENSE.txt",
-	"reportIssueUrl": "https://github.com/corynaegle-ai/GlyphSpekIDE/issues/new",
+	"reportIssueUrl": "https://github.com/corynaegle-ai/GlyphCodeIDE/issues/new",
 	"nodejsRepository": "https://nodejs.org",
-	"urlProtocol": "glyphspek",
+	"urlProtocol": "glyphcode",
 	"extensionsGallery": {
 		"serviceUrl": "https://open-vsx.org/vscode/gallery",
 		"itemUrl": "https://open-vsx.org/vscode/item",
@@ -131,9 +131,9 @@
 	],
 	"onboardingThemes": [
 		{
-			"id": "glyphspek-dark",
-			"label": "GlyphSpek Dark",
-			"themeId": "GlyphSpek Dark",
+			"id": "glyphcode-dark",
+			"label": "GlyphCode Dark",
+			"themeId": "GlyphCode Dark",
 			"type": "dark"
 		},
 		{
@@ -175,13 +175,13 @@
 	],
 	"sessionsWindowAllowedExtensions": [],
 	"extensionEnabledApiProposals": {
-		"glyphspek.glyphspek": [
+		"glyphcode.glyphcode": [
 			"defaultChatParticipant",
 			"chatProvider"
 		]
 	},
 	"configurationDefaults": {
 		"extensions.ignoreRecommendations": true,
-		"workbench.colorTheme": "GlyphSpek Dark"
+		"workbench.colorTheme": "GlyphCode Dark"
 	}
 }

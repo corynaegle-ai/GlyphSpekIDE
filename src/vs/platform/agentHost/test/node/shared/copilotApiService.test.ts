@@ -973,7 +973,7 @@ suite('CopilotApiService', () => {
 
 	// #region GATE-002 de-Copilot invariant
 
-	// GATE-002 (de-Copilot): GlyphSpek ships NO Copilot runtime. The inert `@vscode/copilot-api`
+	// GATE-002 (de-Copilot): GlyphCode ships NO Copilot runtime. The inert `@vscode/copilot-api`
 	// compat layer's `CAPIClient.makeRequest` throws COPILOT_UNAVAILABLE, so every live-CAPI call
 	// route (messages, models, utilityChatCompletion) fails closed. The obsolete-by-design live-path
 	// suites above are skipped; THIS suite is the standing regression coverage that the de-Copilot
@@ -982,7 +982,7 @@ suite('CopilotApiService', () => {
 
 		// Endpoint discovery (which uses the injected fetch directly) is allowed to succeed so we
 		// reach the real CAPI request — the throw must come from the inert CAPIClient, not discovery.
-		const COPILOT_UNAVAILABLE = /Copilot is not available in GlyphSpek/;
+		const COPILOT_UNAVAILABLE = /Copilot is not available in GlyphCode/;
 
 		test('messages() (non-streaming) fails closed with COPILOT_UNAVAILABLE', async () => {
 			const { fetch: fetchFn } = routingFetch(() => anthropicResponse([{ type: 'text', text: 'unreachable' }]));

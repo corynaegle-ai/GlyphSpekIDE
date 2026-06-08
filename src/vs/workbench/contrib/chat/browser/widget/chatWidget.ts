@@ -207,11 +207,11 @@ const supportsAllAttachments: Required<IChatAgentAttachmentCapabilities> = {
 const DISCLAIMER = localize('chatDisclaimer', "AI responses may be inaccurate");
 
 /**
- * GlyphSpek empty-state graphic: the full-color GlyphSpek brand mark (white "G"
+ * GlyphCode empty-state graphic: the full-color GlyphCode brand mark (white "G"
  * + blue corner-bracket) rendered as a raster `<img>` on the chat empty state.
- * Source asset: ./media/glyphspek-chat-logo.png
+ * Source asset: ./media/glyphcode-chat-logo.png
  */
-const GLYPHSPEK_CHAT_LOGO_URI = FileAccess.asBrowserUri('vs/workbench/contrib/chat/browser/widget/media/glyphspek-chat-logo.png');
+const GLYPHCODE_CHAT_LOGO_URI = FileAccess.asBrowserUri('vs/workbench/contrib/chat/browser/widget/media/glyphcode-chat-logo.png');
 
 export class ChatWidget extends Disposable implements IChatWidget {
 
@@ -1242,7 +1242,7 @@ export class ChatWidget extends Disposable implements IChatWidget {
 			title,
 			message: new MarkdownString(DISCLAIMER),
 			icon: Codicon.chatSparkle,
-			iconImageUri: GLYPHSPEK_CHAT_LOGO_URI,
+			iconImageUri: GLYPHCODE_CHAT_LOGO_URI,
 			additionalMessage,
 		};
 	}

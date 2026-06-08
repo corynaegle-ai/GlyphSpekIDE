@@ -1,0 +1,838 @@
+{
+  "name": "glyphcode",
+  "displayName": "GlyphCode Trust Panel",
+  "description": "GlyphCode Trust Panel as a plain VS Code / Code-OSS extension: hosts the trust review surface as a webview. Verifies the verifier's Ed25519 signature in-browser before presenting a verdict as authoritative. Open-VSX-distributable; no Microsoft Marketplace dependency; no telemetry.",
+  "version": "0.0.1",
+  "publisher": "glyphcode",
+  "private": true,
+  "license": "SEE LICENSE IN ../LICENSE",
+  "engines": {
+    "vscode": "^1.85.0"
+  },
+  "categories": [
+    "Other"
+  ],
+  "main": "./dist/extension.js",
+  "enabledApiProposals": [
+    "defaultChatParticipant",
+    "chatProvider"
+  ],
+  "activationEvents": [
+    "onStartupFinished",
+    "onView:glyphcode.chat",
+    "onView:glyphcode.runs",
+    "onView:glyphcode.runs.cards",
+    "onView:glyphcode.surface.trace",
+    "onView:glyphcode.surface.policy",
+    "onView:glyphcode.surface.verifier",
+    "onView:glyphcode.surface.egress",
+    "onView:glyphcode.surface.modelcalls",
+    "onView:glyphcode.surface.workspace",
+    "onView:glyphcode.surface.search",
+    "onView:glyphcode.surface.settings",
+    "onView:glyphcode.surface.actor",
+    "onCommand:glyphcode.openTrustPanel",
+    "onCommand:glyphcode.loadRunBundle",
+    "onCommand:glyphcode.runGovernedTask",
+    "onCommand:glyphcode.bridgeSupervisedRun",
+    "onCommand:glyphcode.startLiveRun",
+    "onCommand:glyphcode.demoLiveRun",
+    "onCommand:glyphcode.previewAgenticBuildReview",
+    "onCommand:glyphcode.promoteChatToBuild",
+    "onCommand:glyphcode.openGovernedTerminal",
+    "onCommand:glyphcode.openUngovernedTerminal",
+    "onCommand:glyphcode.openChat",
+    "onCommand:glyphcode.openNativeChat",
+    "onCommand:glyphcode.inlineEdit",
+    "onCommand:glyphcode.generateCommitMessage",
+    "onCommand:glyphcode.indexWorkspace",
+    "onChatParticipant:glyphcode.codex",
+    "onLanguageModelChatProvider:glyphcode"
+  ],
+  "contributes": {
+    "chatParticipants": [
+      {
+        "id": "glyphcode.codex",
+        "name": "glyphcode",
+        "fullName": "GlyphCode",
+        "description": "Build with the governed Codex gateway (metadata-traced, unsandboxed, on your ChatGPT subscription).",
+        "isDefault": true,
+        "modes": [
+          "agent",
+          "ask",
+          "edit"
+        ]
+      }
+    ],
+    "languageModelChatProviders": [
+      {
+        "vendor": "glyphcode",
+        "displayName": "GlyphCode (Codex Gateway)"
+      }
+    ],
+    "commands": [
+      {
+        "command": "glyphcode.openTrustPanel",
+        "title": "GlyphCode: Open Trust Panel"
+      },
+      {
+        "command": "glyphcode.inlineCompletion.addMissingImports",
+        "title": "GlyphCode: Add Missing Imports"
+      },
+      {
+        "command": "glyphcode.loadRunBundle",
+        "title": "GlyphCode: Load Run Bundle\u2026"
+      },
+      {
+        "command": "glyphcode.runGovernedTask",
+        "title": "GlyphCode: Run Governed Task\u2026"
+      },
+      {
+        "command": "glyphcode.bridgeSupervisedRun",
+        "title": "GlyphCode: Create Supervised Run (Bridge)"
+      },
+      {
+        "command": "glyphcode.startLiveRun",
+        "title": "GlyphCode: Start Live Supervised Run (Trust Panel)"
+      },
+      {
+        "command": "glyphcode.demoLiveRun",
+        "title": "GlyphCode: Demo Live Run (Trust Panel)"
+      },
+      {
+        "command": "glyphcode.previewAgenticBuildReview",
+        "title": "GlyphCode: Preview Agentic Build Review (Fixture)"
+      },
+      {
+        "command": "glyphcode.promoteChatToBuild",
+        "title": "GlyphCode: Build This (Governed Run)"
+      },
+      {
+        "command": "glyphcode.revokeBuildAuthority",
+        "title": "GlyphCode: Revoke Governed-Build Authorization (This Workspace)"
+      },
+      {
+        "command": "glyphcode.openGovernedTerminal",
+        "title": "GlyphCode: Open Governed Terminal"
+      },
+      {
+        "command": "glyphcode.openUngovernedTerminal",
+        "title": "GlyphCode: Open Ungoverned Terminal"
+      },
+      {
+        "command": "glyphcode.runs.newGovernedTerminal",
+        "title": "GlyphCode: New Governed Terminal",
+        "category": "GlyphCode",
+        "icon": "media/icons/gs-terminal.svg"
+      },
+      {
+        "command": "glyphcode.runs.openTrustPanel",
+        "title": "GlyphCode: Open Trust Panel",
+        "category": "GlyphCode",
+        "icon": "media/icons/gs-verifier.svg"
+      },
+      {
+        "command": "glyphcode.runs.openRun",
+        "title": "GlyphCode: Open Trust Panel for Run"
+      },
+      {
+        "command": "glyphcode.openChat",
+        "title": "GlyphCode: Chat (Claude Code)"
+      },
+      {
+        "command": "glyphcode.openNativeChat",
+        "title": "GlyphCode: Chat (Codex Gateway)"
+      },
+      {
+        "command": "glyphcode.inlineEdit",
+        "title": "GlyphCode: Inline Edit (Governed)"
+      },
+      {
+        "command": "glyphcode.indexWorkspace",
+        "title": "GlyphCode: Index Workspace"
+      },
+      {
+        "command": "glyphcode.verifyAutoTest",
+        "title": "GlyphCode: Verify (Auto Test)"
+      },
+      {
+        "command": "glyphcode.terminalGenerateCommand",
+        "title": "GlyphCode: Generate Terminal Command"
+      },
+      {
+        "command": "glyphcode.generateCommitMessage",
+        "title": "GlyphCode: Generate Commit Message",
+        "category": "GlyphCode",
+        "icon": "$(sparkle)"
+      }
+    ],
+    "keybindings": [
+      {
+        "comment": "Cmd-K-style inline edit. NOTE: bare `cmd+k` is VS Code's chord LEADER (cmd+k cmd+s open keyboard shortcuts, cmd+k cmd+c add comment, \u2026); binding it alone would shadow every cmd+k chord. We therefore bind a NON-colliding chord under that leader: cmd+k cmd+i ('i' for inline edit). editorTextFocus gates it to an active editor.",
+        "command": "glyphcode.inlineEdit",
+        "key": "cmd+k cmd+i",
+        "when": "editorTextFocus"
+      },
+      {
+        "comment": "Explicitly UNGOVERNED terminal accelerator. Opens a STOCK shell (full host env, NO supervisor proxy, command + network egress NOT traced) honestly labeled 'Ungoverned Terminal' with a neutral/amber badge — NEVER the governed shield/green, never mistakable for governed. This is NOT a new escape hatch: stock terminals already exist (Ctrl+`) and the A1 audit already labels them; this is a deliberate, first-class accelerator ('friction follows authority' — a plain shell is a legitimate choice). Mirrors the governed accelerator's key choice: ctrl+cmd+k is the governed (now FLOATING) terminal — owned by the FORK's floating-terminal workbench action (KeyMod.WinCtrl | KeyMod.CtrlCmd | KeyCode.KeyK) — and ctrl+cmd+u is the ungoverned one (parallel + mnemonic 'U' for ungoverned). VERIFIED FREE: 0 hits for `WinCtrl | CtrlCmd | KeyU` in the fork (the only KeyU fork bindings are Cmd+Shift+U output, Cmd+U cursor-undo, and the Cmd+K U / Cmd+K Cmd+U chords — none is ctrl+cmd+u) and 0 hits in this package.json. The command is ALSO palette-invokable; the keybinding is purely an accelerator.",
+        "command": "glyphcode.openUngovernedTerminal",
+        "key": "ctrl+cmd+u"
+      }
+    ],
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "glyphcode",
+          "title": "Governed Runs",
+          "icon": "media/icons/gs-run-bar.svg"
+        },
+        {
+          "id": "glyphcode-trace",
+          "title": "Trace / Provenance",
+          "icon": "media/icons/gs-trace-bar.svg"
+        },
+        {
+          "id": "glyphcode-policy",
+          "title": "Policy-as-code",
+          "icon": "media/icons/gs-policy-bar.svg"
+        },
+        {
+          "id": "glyphcode-verifier",
+          "title": "Independent Verifier",
+          "icon": "media/icons/gs-activitybar.svg"
+        },
+        {
+          "id": "glyphcode-egress",
+          "title": "Egress / Network",
+          "icon": "media/icons/gs-network-bar.svg"
+        },
+        {
+          "id": "glyphcode-modelcalls",
+          "title": "Model Calls / Actors",
+          "icon": "media/icons/gs-broker-bar.svg"
+        },
+        {
+          "id": "glyphcode-workspace",
+          "title": "Workspace",
+          "icon": "media/icons/gs-worktree-bar.svg"
+        },
+        {
+          "id": "glyphcode-search",
+          "title": "Search",
+          "icon": "media/icons/gs-search-bar.svg"
+        },
+        {
+          "id": "glyphcode-settings",
+          "title": "Settings",
+          "icon": "media/icons/gs-settings.svg"
+        },
+        {
+          "id": "glyphcode-actor",
+          "title": "Bound Actor",
+          "icon": "media/icons/gs-actors.svg"
+        }
+      ]
+    },
+    "views": {
+      "glyphcode": [
+        {
+          "id": "glyphcode.runs.cards",
+          "name": "Governed Runs",
+          "type": "webview",
+          "icon": "media/icons/gs-run.svg",
+          "contextualTitle": "GlyphCode Governed Runs"
+        },
+        {
+          "id": "glyphcode.runs",
+          "name": "Runs (list)",
+          "icon": "media/icons/gs-run.svg",
+          "contextualTitle": "GlyphCode Governed Runs (list)"
+        },
+        {
+          "id": "glyphcode.chat",
+          "name": "Chat",
+          "type": "webview",
+          "icon": "media/icons/gs-activitybar.svg",
+          "contextualTitle": "GlyphCode Chat"
+        }
+      ],
+      "glyphcode-trace": [
+        {
+          "id": "glyphcode.surface.trace",
+          "name": "Trace / Provenance",
+          "type": "webview",
+          "icon": "media/icons/gs-trace.svg",
+          "contextualTitle": "GlyphCode Trace"
+        }
+      ],
+      "glyphcode-policy": [
+        {
+          "id": "glyphcode.surface.policy",
+          "name": "Policy-as-code",
+          "type": "webview",
+          "icon": "media/icons/gs-policy.svg",
+          "contextualTitle": "GlyphCode Policy"
+        }
+      ],
+      "glyphcode-verifier": [
+        {
+          "id": "glyphcode.surface.verifier",
+          "name": "Independent Verifier",
+          "type": "webview",
+          "icon": "media/icons/gs-verifier.svg",
+          "contextualTitle": "GlyphCode Verifier"
+        }
+      ],
+      "glyphcode-egress": [
+        {
+          "id": "glyphcode.surface.egress",
+          "name": "Egress / Network",
+          "type": "webview",
+          "icon": "media/icons/gs-network.svg",
+          "contextualTitle": "GlyphCode Egress"
+        }
+      ],
+      "glyphcode-modelcalls": [
+        {
+          "id": "glyphcode.surface.modelcalls",
+          "name": "Model Calls / Actors",
+          "type": "webview",
+          "icon": "media/icons/gs-broker.svg",
+          "contextualTitle": "GlyphCode Model Calls"
+        }
+      ],
+      "glyphcode-workspace": [
+        {
+          "id": "glyphcode.surface.workspace",
+          "name": "Workspace",
+          "type": "webview",
+          "icon": "media/icons/gs-worktree.svg",
+          "contextualTitle": "GlyphCode Workspace"
+        }
+      ],
+      "glyphcode-search": [
+        {
+          "id": "glyphcode.surface.search",
+          "name": "Search",
+          "type": "webview",
+          "icon": "media/icons/gs-search.svg",
+          "contextualTitle": "GlyphCode Search"
+        }
+      ],
+      "glyphcode-settings": [
+        {
+          "id": "glyphcode.surface.settings",
+          "name": "Settings",
+          "type": "webview",
+          "icon": "media/icons/gs-settings.svg",
+          "contextualTitle": "GlyphCode Settings"
+        }
+      ],
+      "glyphcode-actor": [
+        {
+          "id": "glyphcode.surface.actor",
+          "name": "Bound Actor",
+          "type": "webview",
+          "icon": "media/icons/gs-actors.svg",
+          "contextualTitle": "GlyphCode Bound Actor"
+        }
+      ]
+    },
+    "viewsWelcome": [
+      {
+        "view": "glyphcode.runs",
+        "contents": "No governed runs yet.\n\nGlyphCode governs an agent's egress (metadata-only) and signs a tamper-evident trace. Open a Governed Terminal to start an honest, governed (soft, unsandboxed) session.\n\n[New Governed Terminal](command:glyphcode.runs.newGovernedTerminal)\n\nOr open the Trust Panel to load an existing run bundle.\n[Open Trust Panel](command:glyphcode.runs.openTrustPanel)"
+      }
+    ],
+    "menus": {
+      "view/title": [
+        {
+          "command": "glyphcode.runs.newGovernedTerminal",
+          "when": "view == glyphcode.runs",
+          "group": "navigation@1"
+        },
+        {
+          "command": "glyphcode.runs.openTrustPanel",
+          "when": "view == glyphcode.runs",
+          "group": "navigation@2"
+        }
+      ],
+      "editor/context": [
+        {
+          "command": "glyphcode.verifyAutoTest",
+          "when": "editorHasSelection && (editorLangId == typescript || editorLangId == typescriptreact || editorLangId == javascript || editorLangId == javascriptreact)",
+          "group": "glyphcode@1"
+        }
+      ],
+      "scm/inputBox": [
+        {
+          "command": "glyphcode.generateCommitMessage",
+          "when": "scmProvider == git"
+        }
+      ]
+    },
+    "configuration": {
+      "title": "GlyphCode",
+      "properties": {
+        "glyphcode.commitMessage.verifiedTrailer": {
+          "type": "boolean",
+          "default": true,
+          "description": "Append a machine-parseable provenance trailer to an AI-generated commit message (`Verified: <pass|fail|degraded> · run <id>` plus a `Trace: <hash>` line). The trailer is emitted ONLY when a governed run's verdict signature verifies AND the staged content matches what that verdict actually verified (a content binding, not just matching filenames) — never for hand edits, stale, partial-mismatch, or unsigned/tampered evidence. Turn off to never add a trailer."
+        },
+        "glyphcode.commitMessage.conventionalCommits": {
+          "type": "boolean",
+          "default": false,
+          "description": "Shape the AI commit-message subject as Conventional Commits (`type(scope): summary`). When off (default) the subject is free-form. When on, a non-conforming subject is conservatively prefixed (e.g. `chore: …`) — GlyphCode never invents a scope or a more specific type."
+        },
+        "glyphcode.trustedVerifierKeys": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "default": [],
+          "scope": "machine",
+          "description": "SPKI PEM (or base64) public keys of trusted verifiers, provisioned out-of-band. A verdict is fully AUTHORITATIVE only if signed by one of these (the built-in demo key yields the separate, clearly-labeled DEMO-AUTHORITATIVE state, never product AUTHORITATIVE). A key embedded in a bundle is never trusted. The extension also pins its managed keystore key (~/.glyphcode/verifier/public.pem) in addition to these. Machine-scoped: a workspace/.vscode/settings.json cannot inject a trust root."
+        },
+        "glyphcode.supervisorMode": {
+          "type": "string",
+          "enum": [
+            "verify-only",
+            "autonomous"
+          ],
+          "default": "verify-only",
+          "scope": "machine",
+          "enumDescriptions": [
+            "Govern + run the repo's policy.verify checks in a clean --network none container, hash-chain the trace, and produce an independently signed verdict. No source edits; no model required.",
+            "Run the local-model autonomous capstone path against the repo/policy, then verify."
+          ],
+          "description": "How 'GlyphCode: Run Governed Task' executes. Defaults to verify-only (no source edit, no model needed)."
+        },
+        "glyphcode.policyPath": {
+          "type": "string",
+          "default": "",
+          "description": "Absolute path to the GlyphCode policy file. When empty, 'Run Governed Task' prompts with the bundled capstone-policy fixture as the default."
+        },
+        "glyphcode.supervisorPath": {
+          "type": "string",
+          "default": "",
+          "scope": "machine",
+          "description": "DEV OVERRIDE (optional). Leave empty for normal use: the extension launches the BUNDLED, hash-pinned supervisor shipped in the .vsix (dist-supervisor/governed-run.mjs). Set this to your GlyphCode spikes root ONLY for development \u2014 it runs the UN-BUNDLED, UN-PINNED 'node --import tsx <path>/p0-supervisor/governed-run-cli.ts' instead, withholds the verifier private key unless explicitly opted in (glyphcode.devSupervisorTrustKey), and is the only path that can run autonomous mode this increment. Machine-scoped: a workspace/.vscode/settings.json cannot redirect the supervisor exec path."
+        },
+        "glyphcode.devSupervisorTrustKey": {
+          "type": "boolean",
+          "default": false,
+          "scope": "machine",
+          "description": "DEV OVERRIDE opt-in. Only consulted when glyphcode.supervisorPath is set (the un-bundled, un-pinned dev supervisor). When true, the verifier PRIVATE key is handed to that dev supervisor so its verdicts can pin as AUTHORITATIVE. Leave false (default) to withhold the key from un-pinned code. Has no effect on the bundled path, which always receives the key. Machine-scoped."
+        },
+        "glyphcode.runOutputRoot": {
+          "type": "string",
+          "default": "",
+          "scope": "machine",
+          "description": "Absolute path under which run bundles are written. When empty, defaults to <workspace>/.glyphcode/runs/<timestamp>/. Machine-scoped so a workspace cannot redirect run output."
+        },
+        "glyphcode.runtime": {
+          "type": "string",
+          "enum": [
+            "docker"
+          ],
+          "default": "docker",
+          "scope": "machine",
+          "description": "Sandbox runtime backing governed runs. P0 ships the Docker runtime; the remote (Firecracker) plane is future work. Machine-scoped so a workspace cannot redirect execution."
+        },
+        "glyphcode.halo.tintChrome": {
+          "type": "boolean",
+          "default": false,
+          "description": "Authority Halo fallback (opt-in). When ON, GlyphCode tints real workbench chrome EDGES (title bar, activity-bar / status-bar borders) to the current run's assurance color (slate=read \u00b7 amber=claimed \u00b7 violet=SOFT \u00b7 blue=verified \u00b7 red=denied) via workbench.colorCustomizations \u2014 an honest pre-fork stand-in for the whole-frame halo ring. OFF by default because it persistently recolors your chrome; when off, the status-bar 'authority:' segment + the Trust Panel header accent are the honest backstop. Fully reversible: turning it off (or deactivating the extension) restores your prior color customizations exactly. The same `glyphcode.authority` context-key is set regardless, so the future fork halo ring needs no extension change."
+        },
+        "glyphcode.inlineCompletion.enabled": {
+          "type": "boolean",
+          "default": false,
+          "description": "Local code-completion (Tab) \u2014 an UNGOVERNED, on-device assist: fill-in-the-middle on a loopback Ollama model (http://127.0.0.1:11434). It is NOT routed through the GlyphCode Model broker and does NOT appear in the governed Model-Calls trace. Fully local (no egress, no credential, works offline / air-gapped). Best-effort: if the daemon or the model is unavailable it silently does nothing and never breaks typing. OFF by default \u2014 opt in."
+        },
+        "glyphcode.inlineCompletion.autoImport": {
+          "type": "boolean",
+          "default": true,
+          "description": "When you accept a Tab completion that uses a symbol defined elsewhere in the workspace, automatically add the missing import (via the language server's add-import code action). Only unambiguous imports are applied; ambiguous ones are left for you to resolve with Quick Fix (⌘.). Runs on-device; no egress. Set false to disable."
+        },
+        "glyphcode.inlineCompletion.model": {
+          "type": "string",
+          "default": "qwen2.5-coder:3b-base",
+          "enum": [
+            "qwen2.5-coder:1.5b-base",
+            "qwen2.5-coder:3b-base",
+            "qwen2.5-coder:7b-base",
+            "qwen2.5-coder:7b"
+          ],
+          "enumDescriptions": [
+            "qwen2.5-coder:1.5b-base — fastest, lowest quality (~130-165ms Tab). The *-base / FIM-capable suffix-infill path.",
+            "qwen2.5-coder:3b-base — DEFAULT. Balanced quality / latency (~200-400ms Tab). The *-base / FIM-capable suffix-infill path.",
+            "qwen2.5-coder:7b-base — best local FIM quality, slower (~1-2s). The BASE variant (best for the suffix infill path). Run `ollama pull qwen2.5-coder:7b-base` first.",
+            "qwen2.5-coder:7b — instruct variant; FIM-capable, but the -base is preferred for completion. Run `ollama pull qwen2.5-coder:7b` first."
+          ],
+          "description": "Loopback FIM model tag for the UNGOVERNED local code-completion assist (glyphcode.inlineCompletion.enabled). Must be a *-base / FIM-capable model (the `suffix` infill path). The default qwen2.5-coder:3b-base balances quality and latency (~200-400ms Tab); 1.5b-base is fastest/lowest-quality; 7b-base is the best local FIM quality (slower, ~1-2s) and the preferred large variant; 7b is the instruct variant (FIM-capable but -base is preferred). Pull the chosen tag with `ollama pull <tag>` first. A custom tag NOT in this list still works — VS Code shows a soft warning but honors the value, as long as it is a *-base / FIM-capable suffix-infill model. This local assist is NOT routed through the GlyphCode Model broker and does NOT appear in the governed Model-Calls trace."
+        },
+        "glyphcode.inlineCompletion.temperature": {
+          "type": "number",
+          "default": 0.1,
+          "minimum": 0,
+          "maximum": 2,
+          "description": "PRIMARY sampling temperature for the local Tab completion (glyphcode.inlineCompletion.enabled). This is a VARIETY dial, NOT a quality dial: the default 0.1 gives one confident, likeliest infill (today's behavior/latency); raising it makes the primary more varied but values above ~0.7 start to DEGRADE code. Leave it low unless you want a less deterministic primary — the cyclable ALTERNATES (glyphcode.inlineCompletion.alternatives) are the proper place to get variety. Local-only; no egress."
+        },
+        "glyphcode.inlineCompletion.maxTokens": {
+          "type": "number",
+          "default": 256,
+          "minimum": 16,
+          "maximum": 2048,
+          "description": "The single-shot generation budget (Ollama num_predict) for one Tab completion. This is a CEILING, NOT a target: short and single-line completions still stop early on a blank line and are UNAFFECTED — the extra budget only applies to a BIG block completion. A larger budget (default 256) lets a whole function body finish in ONE Tab instead of truncating partway and needing a second Tab; the trade is that a genuinely large single-shot completion waits a bit longer on that one call. Blocks beyond this budget are covered by the auto-chunk loop (glyphcode.inlineCompletion.autoChunk), which runs in the BACKGROUND and re-grounds in smaller pieces. Local-only; no egress."
+        },
+        "glyphcode.inlineCompletion.alternatives": {
+          "type": "boolean",
+          "default": true,
+          "description": "Cyclable ALTERNATES for local Tab completion (glyphcode.inlineCompletion.enabled). When ON, alongside the confident PRIMARY suggestion the assist ADDITIONALLY generates a few moderate-temperature alternates for the SAME cursor context in the BACKGROUND (off the keystroke path — the primary's latency is unaffected) and offers them via the native inline-suggest controls (Alt+] / Alt+[ on most keymaps), showing '1/N'. The alternates are genuinely different but still mostly-correct implementations to choose from; empties, degenerate stubs, and duplicates of the primary are dropped. Set false to show only the primary. Local-only; no egress."
+        },
+        "glyphcode.inlineCompletion.alternativesCount": {
+          "type": "number",
+          "default": 2,
+          "minimum": 0,
+          "maximum": 5,
+          "description": "How many cyclable ALTERNATES to generate alongside the primary Tab suggestion (glyphcode.inlineCompletion.alternatives). Each alternate is one extra BACKGROUND model call at the alternates temperature, so a higher count gives more choices but more local compute. 0 disables the alternates entirely (same as turning glyphcode.inlineCompletion.alternatives off). Default 2."
+        },
+        "glyphcode.inlineCompletion.alternativesTemperature": {
+          "type": "number",
+          "default": 0.4,
+          "minimum": 0,
+          "maximum": 2,
+          "description": "Sampling temperature for the cyclable ALTERNATES (glyphcode.inlineCompletion.alternatives). Temperature is a VARIETY dial: a MODERATE value (default 0.4) yields alternates that are genuinely different from the primary but still usually correct. Lower it toward the primary temperature for alternates closer to the confident guess; raise it for more variety, but values above ~0.7 start to degrade code. Local-only; no egress."
+        },
+        "glyphcode.inlineCompletion.compileGate": {
+          "type": "boolean",
+          "default": true,
+          "description": "Only suggest a Tab completion if it parses cleanly when inserted (balanced delimiters/quotes, no truncation/garbage). If the first draft fails, GlyphCode searches for a compiling one (a status-bar indicator shows while it looks). Structural check; runs for all languages; no type-checking."
+        },
+        "glyphcode.inlineCompletion.compileGateMaxAttempts": {
+          "type": "number",
+          "default": 3,
+          "minimum": 0,
+          "maximum": 10,
+          "description": "When the first Tab draft fails the compile-check gate (glyphcode.inlineCompletion.compileGate), how many times to REGENERATE (at a raised temperature, for diversity) searching for a completion that is structurally valid when inserted. The first passing draft is suggested; if none of the attempts pass, nothing is suggested (better than offering non-compiling code). Each attempt is one extra local FIM call, so a higher value tries harder at the cost of more on-device compute when the primary fails. 0 disables the search (just suppress a failing primary). Default 3. Local-only; no egress."
+        },
+        "glyphcode.inlineCompletion.autoChunk": {
+          "type": "boolean",
+          "default": true,
+          "description": "Build a Tab completion as a sequence of small, self-grounding chunks (generate → re-read what it wrote → continue), gated and de-duplicated each step, until the block is complete. Off = a single one-shot completion."
+        },
+        "glyphcode.inlineCompletion.autoChunkMaxChunks": {
+          "type": "number",
+          "default": 5,
+          "minimum": 1,
+          "maximum": 20,
+          "description": "When auto-chunk is on (glyphcode.inlineCompletion.autoChunk), the maximum number of small chunks the completion loop will accumulate before stopping. Each chunk is one extra local FIM call, so a higher cap can build longer blocks at the cost of more on-device compute when the body keeps going. Most short completions finish in one chunk. Default 5. Local-only; no egress."
+        },
+        "glyphcode.inlineCompletion.generatingIndicator": {
+          "type": "boolean",
+          "default": true,
+          "description": "Show a faded, animated 'generating code…' spinner at the cursor while a Tab completion is being generated (especially during multi-chunk auto-chunk), hidden the instant the suggestion is ready or cancelled. Set false to disable the cursor indicator. Local-only; view-only."
+        },
+        "glyphcode.inlineCompletion.keepAlive": {
+          "type": "string",
+          "default": "30m",
+          "description": "How long the local Ollama daemon keeps the Tab FIM model RESIDENT in memory between keystrokes (Ollama keep_alive). Keeping the model hot removes the multi-second cold model reload from the keystroke path — the single biggest steady-state Tab latency win. Accepts an Ollama duration ('30m', '1h', '-1' for forever, '0' to unload immediately). Default '30m' comfortably covers a typing session. Local-only; no egress."
+        },
+        "glyphcode.inlineCompletion.repoAware": {
+          "type": "boolean",
+          "default": true,
+          "description": "Repo-aware Tab completion (default ON). Before the local FIM call, retrieve the top-k most relevant code chunks from the workspace's WARM local index and inject them into the FIM prompt as commented context, so completions match types/functions/conventions defined in OTHER files. An UNGOVERNED, on-device local assist \u2014 the retrieval is local-index only (nothing egresses code, no broker, not in the governed trace). Latency-safe: retrieval runs under a HARD timeout (glyphcode.inlineCompletion.repoAwareTimeoutMs) and ALWAYS falls back to plain FIM on a cold/not-warm index, a timeout, an empty result, or any error \u2014 it never blocks typing. The index builds ONCE in the background on first use (a cold build can take ~tens of seconds; until warm, every completion is plain FIM). Set false to force plain-FIM Tab."
+        },
+        "glyphcode.inlineCompletion.repoAwareTopK": {
+          "type": "number",
+          "default": 3,
+          "minimum": 1,
+          "maximum": 10,
+          "description": "Repo-aware Tab completion (glyphcode.inlineCompletion.repoAware): how many top-k code chunks to retrieve from the warm local index and inject as FIM context. Higher = more context but a larger prompt and higher latency. Default 3."
+        },
+        "glyphcode.inlineCompletion.repoAwareTimeoutMs": {
+          "type": "number",
+          "default": 120,
+          "minimum": 0,
+          "maximum": 1000,
+          "description": "Repo-aware Tab completion (glyphcode.inlineCompletion.repoAware): the HARD per-keystroke timeout (ms) for retrieval (embed query + ANN/keyword search). If retrieval does not return in time, the completion falls back to plain FIM. Kept small to protect the Tab latency budget. Default 120ms."
+        },
+        "glyphcode.inlineCompletion.repoAwareMaxContextChars": {
+          "type": "number",
+          "default": 1500,
+          "minimum": 0,
+          "maximum": 8000,
+          "description": "Repo-aware Tab completion (glyphcode.inlineCompletion.repoAware): char cap on the injected repo-context preamble prepended to the FIM prompt (excludes the current file's own prefix/suffix). Chunks are added best-first until the cap is reached; the rest are dropped. A larger cap gives more cross-file context but a longer prompt and higher latency. Default 1500."
+        },
+        "glyphcode.inlineCompletion.queryStrategy": {
+          "type": "string",
+          "default": "auto",
+          "enum": [
+            "window",
+            "symbol",
+            "lsp",
+            "auto"
+          ],
+          "enumDescriptions": [
+            "window — embed the last ~40 lines of the prefix as the retrieval query (the original baseline). Tends to match the CURRENT file (which is excluded), so it lands cross-file context only ~15% of the time.",
+            "symbol — use the identifier under/just-before the cursor as the retrieval query, directing the search at that symbol's cross-file definitions/usages (strong on the keyword/BM25 side). Keeps current-file exclusion.",
+            "lsp — ask the editor's language server for the cursor symbol's DEFINITION (vscode.executeDefinitionProvider) and inject it as the context preamble. Index-free, near-free, and exactly the cross-file signature FIM needs.",
+            "auto — try LSP-directed first; if it yields nothing, fall back to symbol-directed index retrieval; then the window query; then plain FIM. Never blocks."
+          ],
+          "description": "Repo-aware Tab completion (glyphcode.inlineCompletion.repoAware): how to build the RETRIEVAL QUERY that lands cross-file context. The query — not latency — is repo-aware FIM's real weak spot: the 'window' baseline mostly matches the current file (excluded) and surfaces nothing cross-file. 'symbol' directs the index search at the cursor symbol; 'lsp' asks the language server for the symbol's definition index-free; 'auto' (default) tries LSP → symbol → window → plain. All best-effort and bounded by glyphcode.inlineCompletion.repoAwareTimeoutMs — they never block typing."
+        },
+        "glyphcode.index.persist": {
+          "type": "boolean",
+          "default": false,
+          "description": "Persist the local code index ENCRYPTED at rest so it survives a window/session restart (no cold rebuild next time). When ON, 'GlyphCode: Index Workspace' builds with the 'workspace-encrypted' residency: an AES-256-GCM-encrypted snapshot written workspace-LOCAL under <workspace>/.glyphcode/index (never user-global, never server-side; a snapshot built by a different embedder is discarded). Default OFF keeps today's MEMORY-ONLY behavior \u2014 the index lives only in process memory and NOTHING is written to disk, so it is rebuilt each session. The index is local by construction; nothing in the index path egresses code either way."
+        },
+        "glyphcode.index.vectorStore": {
+          "type": "string",
+          "enum": ["brute", "flat", "ann"],
+          "default": "flat",
+          "enumDescriptions": [
+            "brute \u2014 the original Map-based EXACT cosine scan. The always-available fallback; correct at any size but slowest at large-repo scale (p95 ~202ms at 13.5k chunks). Pick this to rule the new stores out.",
+            "flat \u2014 EXACT cosine over one contiguous Float32Array (a cache-friendly tight loop). IDENTICAL ranking + relevance to 'brute' (zero recall loss) but several times faster at scale, clearing the large-repo retrieval cliff. The default.",
+            "ann \u2014 APPROXIMATE IVF (k-means buckets + nprobe): sub-linear search for very large monorepos (100k+ chunks). Faster at extreme scale but may miss a small fraction of true top-k (it exact-scans small corpora). Opt in only if 'flat' is not fast enough."
+          ],
+          "description": "Which LOCAL vector-store implementation backs the code index (@Codebase retrieval + repo-aware Tab). 'flat' (default) is EXACT \u2014 same results as 'brute' \u2014 but kills the large-repo retrieval cliff with a contiguous, cache-friendly scan. 'brute' is the always-available exact fallback. 'ann' is an approximate IVF store for very large monorepos (measure recall before relying on it). All run on-device; the choice never changes the index's local-by-construction property (nothing egresses code). Takes effect on the next index build/rebuild (run 'GlyphCode: Index Workspace' to apply immediately)."
+        },
+        "glyphcode.index.autoIndex": {
+          "type": "boolean",
+          "default": true,
+          "description": "Auto Index: automatically build the on-device code index in the BACKGROUND when you open a folder/workspace, so repo-aware chat and Tab completion are warm immediately. Local \u2014 nothing egresses; it needs the local model runtime (Ollama) running and fails quietly if it is not. Non-blocking: it runs the same 'GlyphCode: Index Workspace' build off the activation path (a cold build can take tens of seconds on a medium repo, minutes on a large one). Turn OFF to index only on demand \u2014 lazily on first chat/completion, or via 'GlyphCode: Index Workspace'."
+        },
+        "glyphcode.index.buildTimeoutMs": {
+          "type": "number",
+          "default": 1800000,
+          "minimum": 30000,
+          "description": "INACTIVITY BACKSTOP (ms) for a 'GlyphCode: Index Workspace' build (default 1800000 = 30 minutes). The build STREAMS progress, and every progress event RESETS this timer \u2014 so a long but PROGRESSING build never times out. This cap only fires if the build STALLS with no progress for the whole window (e.g. the local embedder daemon hung). Raise it for very large repos with a slow embedder; the build still aborts promptly on a genuine stall. This is NOT the global request timeout (chat/run RPCs keep their own 30s)."
+        },
+        "glyphcode.chat.maxAttachmentKB": {
+          "type": "number",
+          "default": 512,
+          "minimum": 16,
+          "description": "Per-file size cap (KB) for a chat ATTACHMENT folded into the governed Codex turn. You explicitly attached the file for review, so the default (512 KB) is generous enough to deliver a large single source file WHOLE \u2014 it comfortably fits the gateway context. A file still larger than the cap is truncated, and the truncation is shown VISIBLY in the chat (e.g. 'Attached: `path` (truncated \u2014 512 of 900 KB)') so you always know. Lower it to protect context on a slow/limited gateway; the floor is 16 KB. The total number of attachments per turn is separately capped at 10."
+        },
+        "glyphcode.chat.web.enabled": {
+          "type": "boolean",
+          "default": false,
+          "scope": "machine",
+          "description": "Opt in to @Web chat context. When enabled, explicit @Web http(s) URLs are fetched by the supervisor through governed/observed soft egress, traced with metadata + content hash, fenced as UNTRUSTED public-web data, and sent onward to the model in that turn. Default OFF; machine-scoped so a workspace cannot silently enable web egress."
+        },
+        "glyphcode.chat.web.forceDisabled": {
+          "type": "boolean",
+          "default": false,
+          "scope": "machine",
+          "description": "Policy/admin kill switch for @Web. When true it wins over glyphcode.chat.web.enabled and all @Web requests emit the policy-disabled marker with zero egress. Machine-scoped so a workspace cannot re-enable web egress."
+        },
+        "glyphcode.chat.web.maxUrlsPerTurn": {
+          "type": "number",
+          "default": 5,
+          "minimum": 1,
+          "maximum": 20,
+          "scope": "machine",
+          "description": "Maximum @Web URLs fetched in one chat turn. Extra URLs are skipped with a visible marker. Machine-scoped so a workspace cannot widen web egress."
+        },
+        "glyphcode.chat.web.maxFetchKB": {
+          "type": "number",
+          "default": 2048,
+          "minimum": 1,
+          "maximum": 16384,
+          "scope": "machine",
+          "description": "Raw compressed/read cap in KB for each @Web fetch. The supervisor aborts reads beyond this limit before extraction. Machine-scoped so a workspace cannot widen web egress."
+        },
+        "glyphcode.chat.web.maxContextKB": {
+          "type": "number",
+          "default": 50,
+          "minimum": 1,
+          "maximum": 1024,
+          "scope": "machine",
+          "description": "Maximum extracted @Web text injected into the model transcript per URL, in KB. Longer fetched text remains visible in the transparency payload but the model context is truncated with a visible fence flag. Machine-scoped."
+        },
+        "glyphcode.chat.web.timeoutMs": {
+          "type": "number",
+          "default": 10000,
+          "minimum": 100,
+          "maximum": 60000,
+          "scope": "machine",
+          "description": "Per-request timeout in ms for @Web supervisor fetches. Machine-scoped so a workspace cannot widen web egress."
+        },
+        "glyphcode.chat.web.maxRedirects": {
+          "type": "number",
+          "default": 5,
+          "minimum": 0,
+          "maximum": 10,
+          "scope": "machine",
+          "description": "Maximum redirect hops followed by @Web. Every hop is revalidated and traced when attempted. Machine-scoped so a workspace cannot widen web egress."
+        },
+        "glyphcode.chat.web.maxConcurrent": {
+          "type": "number",
+          "default": 3,
+          "minimum": 1,
+          "maximum": 10,
+          "scope": "machine",
+          "description": "Maximum concurrent @Web fetches in flight for a chat turn. Enforced: at most this many web/fetch calls run at once and results stay in reference order. Machine-scoped so a workspace cannot widen web egress concurrency."
+        },
+        "glyphcode.chat.docs.enabled": {
+          "type": "boolean",
+          "default": true,
+          "scope": "machine",
+          "description": "Opt in to @Docs chat context. When enabled, a `@docs <name>` reference resolves a NAMED, pre-registered documentation set (glyphcode.chat.docs.sources) and the supervisor fetches its URL(s) through governed/observed soft egress, traces them with metadata + content hash, fences them as UNTRUSTED documentation data, and sends them onward to the model in that turn. A turn only egresses when a registered set is actually named; an unknown/un-named @docs emits an honest marker with zero egress. Default ON. Machine-scoped so a workspace cannot silently widen the @Docs egress posture."
+        },
+        "glyphcode.chat.docs.forceDisabled": {
+          "type": "boolean",
+          "default": false,
+          "scope": "machine",
+          "description": "Policy/admin kill switch for @Docs. When true it wins over glyphcode.chat.docs.enabled and all @Docs requests emit the policy-disabled marker with zero egress. Machine-scoped so a workspace cannot re-enable documentation egress."
+        },
+        "glyphcode.chat.docs.sources": {
+          "type": "object",
+          "default": {},
+          "scope": "machine",
+          "additionalProperties": {
+            "type": "object",
+            "properties": {
+              "url": {
+                "type": "string",
+                "description": "The doc set's base/entry http(s) URL, fetched through governed/observed soft egress and fenced as UNTRUSTED documentation."
+              },
+              "urls": {
+                "type": "array",
+                "items": { "type": "string" },
+                "description": "Optional list of http(s) URLs for a multi-page doc set. Each is fetched (in order) through the same governed soft-egress seam and fenced as UNTRUSTED documentation."
+              }
+            }
+          },
+          "description": "Registry of NAMED documentation sets for @Docs — a map of set-name to { url } (or { urls: [...] } for a multi-page set). Type `@docs <name>` in chat to fetch the set's URL(s) through governed/observed soft egress, fenced as UNTRUSTED documentation. Names are matched case-insensitively. Example: { \"react\": { \"url\": \"https://react.dev/reference/react\" }, \"aws-s3\": { \"urls\": [\"https://docs.aws.amazon.com/AmazonS3/latest/API/Welcome.html\"] } }. Machine-scoped so a workspace cannot register new egress targets."
+        },
+        "glyphcode.chat.docs.maxSourcesPerTurn": {
+          "type": "number",
+          "default": 3,
+          "minimum": 1,
+          "maximum": 20,
+          "scope": "machine",
+          "description": "Maximum @Docs sets fetched in one chat turn. Extra named sets are skipped with a visible marker. Machine-scoped so a workspace cannot widen documentation egress."
+        },
+        "glyphcode.chat.docs.maxFetchKB": {
+          "type": "number",
+          "default": 2048,
+          "minimum": 1,
+          "maximum": 16384,
+          "scope": "machine",
+          "description": "Raw compressed/read cap in KB for each @Docs fetch. The supervisor aborts reads beyond this limit before extraction. Machine-scoped so a workspace cannot widen documentation egress."
+        },
+        "glyphcode.chat.docs.maxContextKB": {
+          "type": "number",
+          "default": 50,
+          "minimum": 1,
+          "maximum": 1024,
+          "scope": "machine",
+          "description": "Maximum extracted @Docs text injected into the model transcript per URL, in KB. Longer fetched text remains visible in the transparency payload but the model context is truncated with a visible fence flag. Machine-scoped."
+        },
+        "glyphcode.chat.docs.timeoutMs": {
+          "type": "number",
+          "default": 10000,
+          "minimum": 100,
+          "maximum": 60000,
+          "scope": "machine",
+          "description": "Per-request timeout in ms for @Docs supervisor fetches. Machine-scoped so a workspace cannot widen documentation egress."
+        },
+        "glyphcode.chat.docs.maxRedirects": {
+          "type": "number",
+          "default": 5,
+          "minimum": 0,
+          "maximum": 10,
+          "scope": "machine",
+          "description": "Maximum redirect hops followed by @Docs. Every hop is revalidated and traced when attempted. Machine-scoped so a workspace cannot widen documentation egress."
+        },
+        "glyphcode.chat.docs.maxConcurrent": {
+          "type": "number",
+          "default": 3,
+          "minimum": 1,
+          "maximum": 10,
+          "scope": "machine",
+          "description": "Maximum concurrent @Docs fetches in flight for a chat turn. Enforced: at most this many web/fetch calls run at once and results stay in reference order. Machine-scoped so a workspace cannot widen documentation egress concurrency."
+        },
+        "glyphcode.rules.enabled": {
+          "type": "boolean",
+          "default": true,
+          "description": "Governed rules: inject your developer-authored rules into chat and inline-edit (Cmd-K) turns. Rules are reusable instructions from TRUSTED local sources — .glyphcode/rules/*.md|*.mdc (project), ~/.glyphcode/rules/* (user), a managed system rules dir, AGENTS.md, and (read-only compat) .cursor/rules/*.mdc — selected per-turn by alwaysApply, a glob matching an attached/active file, or a manual @rule-name mention. Higher-authority scope (system > user > project > AGENTS.md > .cursor) wins conflicts and renders most prominently. Every applied rule is TRACED: a provenance record plus a visible, clickable citation in the chat panel that opens the rule file. Default ON; set false to apply no rules (an honest 'rules disabled' note is shown when a turn would otherwise apply them)."
+        },
+        "glyphcode.rules.loadAgentsMd": {
+          "type": "boolean",
+          "default": true,
+          "description": "Load the repo-root AGENTS.md as an always-applied governed rule (the AGENTS.md / repo-instructions convention). With this ON (default), a plain AGENTS.md is standing guidance injected on every chat/inline-edit turn; an AGENTS.md that declares `globs` in frontmatter is auto-attached for matching files instead. Set false to ignore AGENTS.md for rule injection (it is still attached by the chat's separate instruction-file discovery unless aligned away)."
+        },
+        "glyphcode.rules.cursorCompat": {
+          "type": "boolean",
+          "default": true,
+          "description": "Read .cursor/rules/*.mdc as read-only, LOWEST-precedence compat rules so an existing Cursor rules directory works in GlyphCode unchanged. The `.mdc` frontmatter (description, globs, alwaysApply) is honored. Cursor compat rules are out-ranked by every GlyphCode scope (system/user/project/AGENTS.md) on a conflict. Set false to ignore .cursor/rules entirely."
+        },
+        "glyphcode.rules.userRulesDir": {
+          "type": "string",
+          "default": "",
+          "scope": "machine",
+          "description": "Absolute path override for the USER-scope rules directory. When empty, defaults to ~/.glyphcode/rules. User rules out-rank project/AGENTS.md/.cursor rules but are out-ranked by the managed system rules dir. Machine-scoped so a workspace cannot redirect which user rules are loaded."
+        },
+        "glyphcode.rules.systemRulesDir": {
+          "type": "string",
+          "default": "",
+          "scope": "machine",
+          "description": "Absolute path to a MANAGED, HIGHEST-precedence system rules directory (e.g. provisioned org policy rules). Rules here win every conflict and render most prominently. v1 wires scope + precedence + provenance for these; cryptographic signature ENFORCEMENT of a managed/org rules bundle is future work. Empty disables the system scope. Machine-scoped so a workspace cannot inject or redirect managed rules."
+        },
+        "glyphcode.chat.alignInstructionFilesToModel": {
+          "type": "boolean",
+          "default": true,
+          "description": "Align AUTO-DISCOVERED repo-instruction files to the chat's backing model (the Codex gateway). The IDE auto-attaches every vendor's instruction file (CLAUDE.md, GEMINI.md, AGENTS.md, copilot-instructions.md) to each turn; with this ON (default), a Codex-backed chat DROPS other-vendor ones it positively recognizes \u2014 CLAUDE.md / CLAUDE.local.md / files under .claude/ / GEMINI.md \u2014 so Codex is not shown, or fed, guidance written for another model. KEPT regardless: Codex's own AGENTS.md, the vendor-neutral copilot-instructions.md and *.instructions.md, and any file you EXPLICITLY attach yourself (attach CLAUDE.md on purpose and you still get it). Each drop is logged honestly to the GlyphCode output channel. Set to false to attach every auto-discovered instruction file unchanged."
+        },
+        "glyphcode.verify.model": {
+          "type": "string",
+          "default": "qwen2.5-coder:7b",
+          "description": "LOCAL Ollama INSTRUCT model that 'GlyphCode: Verify (Auto Test)' uses to generate edge-case tests from a function's SPEC (doc-comment + signature ONLY \u2014 never the body, so AI-generated expectations don't inherit the implementation's bug). Called over loopback (127.0.0.1:11434) \u2014 LOCAL only: no egress, no credential, works offline. Must be pulled in your local Ollama. NOT yet routed through the supervisor Model broker (the hardening TODO)."
+        },
+        "glyphcode.verify.maxCases": {
+          "type": "number",
+          "default": 6,
+          "minimum": 1,
+          "maximum": 50,
+          "description": "Maximum number of edge-case tests 'GlyphCode: Verify (Auto Test)' asks the local model to generate (and caps the parsed result to). More cases = broader coverage but a slower run. Each case is executed in the v1 local timed sandbox."
+        },
+        "glyphcode.verify.timeoutMs": {
+          "type": "number",
+          "default": 5000,
+          "minimum": 250,
+          "description": "HARD TIMEOUT (ms) for the 'GlyphCode: Verify (Auto Test)' sandbox child process (default 5000). The child runs the selected function against the generated cases in a separate Node process with a minimal environment; if it exceeds this timeout (e.g. a runaway/infinite loop) it is KILLED and the card reports the timeout. HONEST POSTURE: this is process-isolation + a timeout, NOT yet network/fs isolation."
+        },
+        "glyphcode.verify.fixModel": {
+          "type": "string",
+          "default": "",
+          "description": "LOCAL Ollama INSTRUCT model the 'Fix This' button uses to REPAIR a function that Verify (Auto Test) found broken. Leave EMPTY (the default) to reuse 'glyphcode.verify.model'. The repair loop asks this model for a corrected function, then RE-RUNS the SAME generated cases in the SAME local timed sandbox — only a fix that ACTUALLY PASSES the re-run is shown as 'fixed' (the test oracle). Called over loopback (127.0.0.1:11434): LOCAL only — no egress, no credential, works offline. Must be pulled in your local Ollama."
+        },
+        "glyphcode.verify.fixMaxAttempts": {
+          "type": "number",
+          "default": 3,
+          "minimum": 1,
+          "maximum": 10,
+          "description": "Maximum repair attempts the 'Fix This' loop makes (default 3). Each attempt asks the local model for a corrected function and re-runs the generated cases in the sandbox; the loop STOPS early on a full pass, and after the cap presents the BEST (most-passing) attempt honestly as 'N/M pass — review manually'. A fix that regresses (fewer pass) is never accepted over a better earlier attempt. NOTHING is auto-applied: an explicit 'Apply Fix' click is always required."
+        }
+      }
+    }
+  },
+  "scripts": {
+    "bundle:supervisor": "node scripts/build-supervisor.mjs",
+    "verify-tracked-refs": "node ../tools/verify-tracked-refs.mjs",
+    "compile": "npm run bundle:supervisor && tsc -p .",
+    "//test": "Explicit curated list (NOT a glob \u2014 a broad glob has caused env inspector-port hangs here). When you add a new test/*.test.mjs, ADD IT TO THIS LIST or CI stays green without it.",
+    "test": "npm run bundle:supervisor && tsc -p . && node --test test/inlineScript.test.mjs test/configScope.test.mjs test/supervisorRunner.test.mjs test/policyHash.test.mjs test/bridgeProtocol.test.mjs test/bridgeContractConformance.test.mjs test/bridge.test.mjs test/bridgeServerSpawn.test.mjs test/liveRunStream.test.mjs test/runEventProtocol.test.mjs test/liveRunModel.test.mjs test/mockRunStream.test.mjs test/liveReducerGolden.test.mjs test/chatViewModel.test.mjs test/chatDemoState.test.mjs test/chatModelSelection.test.mjs test/operatorGesture.test.mjs test/runGovernedTaskGate.test.mjs test/webviewGestureGate.test.mjs test/liveSchemaGate.test.mjs test/m5FailureEmission.test.mjs test/governedTerminalEnv.test.mjs test/governedTerminalSession.test.mjs test/openGovernedTerminalCommand.test.mjs test/openChatCommand.test.mjs test/governedTerminalResolution.test.mjs test/agentCliCodex.test.mjs test/iconSpriteInjection.test.mjs test/livePanelLabels.test.mjs test/liveRunTrustIngestion.test.mjs test/runTrustBadge.test.mjs test/governedRunsModel.test.mjs test/governedRunsView.test.mjs test/governedRunsCard.test.mjs test/governedRunsCardView.test.mjs test/agentLaunch.test.mjs test/openChatBinaryPin.test.mjs test/agentBinaryIdentity.test.mjs test/ptyHost.test.mjs test/chatTerminalView.test.mjs test/loginShellResolve.test.mjs test/nodePtyBaseDirs.test.mjs test/chatSendBridge.test.mjs test/nativeChatCommand.test.mjs test/chatParticipantAgent.test.mjs test/chatProviderFailClosed.test.mjs test/chatTurnSerialization.test.mjs test/agenticBuildReview.test.mjs test/agenticBuildBridge.test.mjs test/agenticBuildPromotion.test.mjs test/promoteChatToBuildCommand.test.mjs test/frictionSurface.test.mjs test/statusBarSegments.test.mjs test/haloChrome.test.mjs test/authorityLadder.test.mjs test/provenanceGutter.test.mjs test/agentRunSnapshot.test.mjs test/agentRunDetail.test.mjs test/evidenceSummary.test.mjs test/liveEvidenceSummary.test.mjs test/liveEvidenceRibbon.test.mjs test/codeContextInjection.test.mjs test/fileAttachmentContext.test.mjs test/attachmentCap.test.mjs test/bridgeIndexRetrieve.test.mjs test/bridgeWebFetch.test.mjs test/webContextParsing.test.mjs test/inlineCompletionContext.test.mjs test/ollamaFimClient.test.mjs test/bridgeRunsBaseMkdir.test.mjs test/chatBuildIntent.test.mjs test/inlineEdit.test.mjs test/inlineEditStaleBuffer.test.mjs test/definitionWorkspaceScope.test.mjs test/inlineCompletionNotice.test.mjs test/ungovernedTerminalNotice.test.mjs test/terminalCommandGen.test.mjs test/terminalCmdKTarget.test.mjs test/repoAwareFim.test.mjs test/repoAwareQuery.test.mjs test/indexStatusBar.test.mjs test/indexProgress.test.mjs test/bridgeIndexBuildStream.test.mjs test/foreignInstructionFilter.test.mjs test/scopeContextCache.test.mjs test/fimRequestBody.test.mjs test/autoImport.test.mjs test/alternatesDedup.test.mjs test/compileGate.test.mjs test/compileGateProvider.test.mjs test/autoChunkLoop.test.mjs test/autoChunkProvider.test.mjs test/verifyTestGen.test.mjs test/verifyExtract.test.mjs test/verifyRunner.test.mjs test/verifyCard.test.mjs test/autoChunkResultCache.test.mjs test/verifyRepair.test.mjs test/verifyCardFix.test.mjs test/webContextHardening.test.mjs test/webMarkerContract.test.mjs test/webEgressGate.test.mjs test/ungovernedTerminalOpenNotice.test.mjs test/governedFloatingTerminalMarker.test.mjs test/governedFloatingTerminalSeam.test.mjs test/floatingTerminalUnify.test.mjs test/docsContext.test.mjs test/rulesContext.test.mjs",
+    "package": "npm run bundle:supervisor && tsc -p . && vsce package --no-dependencies"
+  },
+  "devDependencies": {
+    "@types/node": "^22",
+    "@types/vscode": "^1.85.0",
+    "@vscode/vsce": "^3.2.0",
+    "esbuild": "^0.28.0",
+    "ovsx": "^0.10.0",
+    "typescript": "^5.7.0"
+  }
+}

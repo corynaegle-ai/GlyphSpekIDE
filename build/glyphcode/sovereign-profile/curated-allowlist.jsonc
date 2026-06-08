@@ -1,0 +1,53 @@
+// GlyphCode Sovereign — Curated Extension Allowlist (SOURCE OF TRUTH)
+// ---------------------------------------------------------------------------
+// This file is the human-reviewed source. It is NOT consumed by Code-OSS directly.
+// It is transformed into:
+//   - sovereign-policy.json          (policy-file form: { "AllowedExtensions": {…} })
+//   - default-settings.sovereign.json (only references the mode; allowlist travels as policy)
+//
+// Key forms accepted by extensions.allowed (see
+// src/vs/platform/extensionManagement/common/allowedExtensionsService.ts:67-143):
+//   "publisher.name": true | false | "stable" | ["1.2.3", "darwin-arm64@1.2.3", ...]
+//   "publisher":      true | false | "stable"        (all extensions from a publisher)
+//   "*":              true | false                    (catch-all)
+//
+// Sovereign policy: default-DENY. Allow first-party fully; allow curated third-party only at
+// reviewed, pinned versions; deny everything else with "*": false.
+//
+// STATUS: STUB. Only first-party is real; third-party rows are illustrative placeholders.
+// Each curated entry MUST carry: reviewer, review date, version reviewed, source hash.
+{
+  "entries": {
+    // ---- First-party GlyphCode (publisher-wide allow) -------------------------
+    // Our own bundled first-party extension(s). Publisher-wide `true` is acceptable
+    // ONLY for the publisher we sign and control.
+    "glyphcode": {
+      "allow": true,
+      "reason": "First-party GlyphCode extension bundle (Trust Panel, agent UI, bridge).",
+      "reviewer": "TBD",
+      "reviewedOn": "TBD",
+      "sourceHash": "n/a (built in-tree / signed channel)"
+    },
+
+    // ---- Curated, signed third-party (version-pinned) -------------------------
+    // PLACEHOLDERS — replace with actually reviewed entries before any Sovereign ship.
+    // Pin EXACT versions in array form so the allowlist is auditable (§18.14).
+    "redhat.vscode-yaml": {
+      "allow": ["1.14.0"],
+      "reason": "[EXAMPLE] YAML language support; no network/telemetry in reviewed build.",
+      "reviewer": "TBD",
+      "reviewedOn": "TBD",
+      "sourceHash": "sha256:TBD"
+    },
+    "esbenp.prettier-vscode": {
+      "allow": ["10.4.0"],
+      "reason": "[EXAMPLE] Formatter; reviewed for no exec/network in formatting path.",
+      "reviewer": "TBD",
+      "reviewedOn": "TBD",
+      "sourceHash": "sha256:TBD"
+    }
+  },
+
+  // Default-deny floor. Emitted as "*": false into the policy.
+  "catchAll": false
+}

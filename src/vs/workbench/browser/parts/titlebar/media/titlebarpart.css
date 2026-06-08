@@ -501,10 +501,10 @@
 }
 
 /* ---------------------------------------------------------------------------------------------
- *  GlyphSpek title-bar restyle (PATCH-005, chrome polish).
+ *  GlyphCode title-bar restyle (PATCH-005, chrome polish).
  *
  *  Slims and calms the title bar to match the design source
- *  (design/ide-concept/glyphspek-workbench-blended.html .titlebar): a thinner, flatter
+ *  (design/ide-concept/glyphcode-workbench-blended.html .titlebar): a thinner, flatter
  *  bar with a softer hairline and a pill-shaped, rounded command center. Pure cosmetics —
  *  colors come from the active theme (titleBar.* / commandCenter.* tokens), so this stays
  *  theme-agnostic and never changes the JS-computed title-bar height or the drag region.
@@ -521,7 +521,7 @@
 	opacity: 0.92;
 }
 
-/* Command center → a calmer, pill-rounded GlyphSpek search affordance. */
+/* Command center → a calmer, pill-rounded GlyphCode search affordance. */
 .monaco-workbench .part.titlebar > .titlebar-container > .titlebar-center > .window-title > .command-center .action-item.command-center-center {
 	border-radius: 999px;
 	height: 24px;

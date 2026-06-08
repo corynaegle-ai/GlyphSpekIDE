@@ -292,7 +292,7 @@ const desktopResourcePatterns = [
 	'vs/workbench/services/extensionManagement/common/media/*.png',
 	'vs/workbench/browser/parts/editor/media/*.png',
 	'vs/workbench/contrib/debug/browser/media/*.png',
-	'vs/workbench/contrib/chat/browser/widget/media/glyphspek-chat-logo.png',
+	'vs/workbench/contrib/chat/browser/widget/media/glyphcode-chat-logo.png',
 
 	// Sessions - built-in prompts and skills
 	'vs/sessions/prompts/*.prompt.md',
@@ -618,18 +618,18 @@ function inlineMinimistPlugin(): esbuild.Plugin {
 }
 
 /**
- * GlyphSpek (SECURITY-PATCHES.md GATE-002): the real GitHub Copilot runtime
+ * GlyphCode (SECURITY-PATCHES.md GATE-002): the real GitHub Copilot runtime
  * (`@github/copilot-sdk`, `@vscode/copilot-api`) is removed from the build graph
- * because GlyphSpek ships NO Copilot. Microsoft's Agent Host still imports these
+ * because GlyphCode ships NO Copilot. Microsoft's Agent Host still imports these
  * symbols as load-bearing runtime values, so redirect those bare specifiers to
- * GlyphSpek's INERT stubs and inline them into the bundle (otherwise they would
+ * GlyphCode's INERT stubs and inline them into the bundle (otherwise they would
  * be left as external bare specifiers resolving to a now-missing node_modules
  * package at runtime). The stubs keep the Agent Host's Copilot path inert
- * (every Copilot entry point throws "Copilot is not available in GlyphSpek").
+ * (every Copilot entry point throws "Copilot is not available in GlyphCode").
  */
 function inlineCopilotStubsPlugin(): esbuild.Plugin {
-	const sdkStub = path.join(REPO_ROOT, 'build/glyphspek/copilot-stubs/github-copilot-sdk/dist/index.js');
-	const apiStub = path.join(REPO_ROOT, 'build/glyphspek/copilot-stubs/vscode-copilot-api/dist/index.js');
+	const sdkStub = path.join(REPO_ROOT, 'build/glyphcode/copilot-stubs/github-copilot-sdk/dist/index.js');
+	const apiStub = path.join(REPO_ROOT, 'build/glyphcode/copilot-stubs/vscode-copilot-api/dist/index.js');
 	return {
 		name: 'inline-copilot-stubs',
 		setup(build) {
@@ -855,7 +855,7 @@ ${tslib}`,
 
 		// Use CSS external plugin for entry points that don't need bundled CSS
 		const plugins: esbuild.Plugin[] = bundleCssEntryPoints.has(entryPoint) ? [] : [cssExternalPlugin()];
-		// GlyphSpek: redirect Copilot SDK/API imports to inert stubs (GATE-002).
+		// GlyphCode: redirect Copilot SDK/API imports to inert stubs (GATE-002).
 		plugins.push(inlineCopilotStubsPlugin());
 		// Add content mapper plugin to inject product config and builtin extensions
 		plugins.push(contentMapperPlugin);

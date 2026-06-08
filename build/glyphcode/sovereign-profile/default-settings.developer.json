@@ -1,0 +1,15 @@
+{
+  "_comment": "GlyphCode DEVELOPER-mode default-settings overlay (STUB — NOT yet wired). Developer mode does NOT ship an 'AllowedExtensions' policy, so arbitrary Open VSX extensions can be installed/enabled. Telemetry stays off (GlyphCode no-telemetry guardrail holds in both modes). The defining difference from Sovereign: no allowlist policy + ambient-extension warning ON. See README.md.",
+
+  "telemetry.telemetryLevel": "off",
+  "telemetry.enableCrashReporter": false,
+
+  "update.mode": "none",
+
+  "workbench.enableExperiments": false,
+
+  "glyphcode.extensions.mode": "developer",
+  "glyphcode.extensions.ambientWarning": true,
+
+  "_allowlistNote": "extensions.allowed is intentionally NOT set in Developer mode. No 'AllowedExtensions' policy file is shipped. Arbitrary Open VSX extensions are permitted; the trust claim is limited to the governed agent run (ide-build-design.md §5.2). The first-party extension MUST surface the ambient-extension warning whenever a non-first-party extension is enabled."
+}

@@ -1,0 +1,37 @@
+<!DOCTYPE html>
+<!--
+  GlyphCode WORKSPACE rail surface — webview shell (Spec §5.9 "Workspace").
+
+  Static template; workspaceViewProvider.ts substitutes ${CSP}, ${STYLE_URI},
+  ${SCRIPT_URI} and ${NONCE} at resolve time. CSP-locked (default-src 'none'), per-load
+  nonce, no inline handlers, no external network. The provider posts a
+  { type:'render', model } message; workspace-view.js draws it with native DOM (no
+  framework, no innerHTML of untrusted data — every dynamic value goes through
+  textContent). It fabricates NO trust data — an empty stream renders the honest empty
+  state, never a fake "verified" claim, and a dot is FILE-LEVEL, never per-line.
+-->
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta http-equiv="Content-Security-Policy" content="${CSP}" />
+<link rel="stylesheet" href="${STYLE_URI}" nonce="${NONCE}" />
+</head>
+<body>
+  <div class="surface-h"><span>Workspace</span><span class="run-ref" id="runRef"></span></div>
+
+  <!-- Scope frame: filled by workspace-view.js so the soft-vs-isolated worktree
+       framing can vary per run. The honest "writes scoped to the worktree" statement
+       lives here — it is a posture, not a synthesized per-run allowlist. -->
+  <div id="scope"></div>
+
+  <div class="sect-h"><span>Changed in run</span><span class="count" id="fileCount">0</span></div>
+  <div class="files" id="files"></div>
+
+  <!-- Provenance dot legend — the file-level honest assurance axis + non-color shapes. -->
+  <div id="legend"></div>
+
+  <div class="foot" id="foot"></div>
+
+  <script nonce="${NONCE}" src="${SCRIPT_URI}"></script>
+</body>
+</html>

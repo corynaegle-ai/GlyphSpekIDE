@@ -4,11 +4,11 @@
  *--------------------------------------------------------------------------------------------*/
 
 /**
- * GlyphSpek-owned inert compatibility layer for `@vscode/copilot-api`.
+ * GlyphCode-owned inert compatibility layer for `@vscode/copilot-api`.
  *
- * GlyphSpek ships NO GitHub Copilot runtime (see SECURITY-PATCHES.md GATE-002).
+ * GlyphCode ships NO GitHub Copilot runtime (see SECURITY-PATCHES.md GATE-002).
  * Microsoft's Agent Host imports `CAPIClient` + `RequestType` as runtime values
- * to talk to Copilot's CAPI proxy. GlyphSpek does not use that Copilot-backed
+ * to talk to Copilot's CAPI proxy. GlyphCode does not use that Copilot-backed
  * path, so this module provides INERT runtime values: `RequestType` is a real
  * enum mirroring the SDK's, and any actual `CAPIClient` request throws.
  *
@@ -43,7 +43,7 @@ export type {
 	MakeRequestOptions,
 } from '@vscode/copilot-api';
 
-const COPILOT_UNAVAILABLE = 'Copilot is not available in GlyphSpek (the Copilot CAPI runtime is intentionally removed; GlyphSpek ships no GitHub Copilot).';
+const COPILOT_UNAVAILABLE = 'Copilot is not available in GlyphCode (the Copilot CAPI runtime is intentionally removed; GlyphCode ships no GitHub Copilot).';
 
 /**
  * Inert mirror of `@vscode/copilot-api`'s `RequestType` enum. Provided as a

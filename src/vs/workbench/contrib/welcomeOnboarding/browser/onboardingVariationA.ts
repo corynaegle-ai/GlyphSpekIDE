@@ -76,7 +76,7 @@ type OnboardingActionEvent = {
 
 type EnterpriseSignInUiState = 'options' | 'instance' | 'progress';
 
-// GlyphSpek branding strips the Copilot `defaultChatAgent` block from product.json.
+// GlyphCode branding strips the Copilot `defaultChatAgent` block from product.json.
 // This module must still load (the contribution registers IOnboardingService, which
 // startupPage.ts depends on via DI), so we avoid throwing at module-evaluation time.
 // The non-null assertion keeps the field accesses below compiling; `show()` early-returns
@@ -170,7 +170,7 @@ export class OnboardingVariationA extends Disposable implements IOnboardingServi
 	}
 
 	show(): void {
-		// GlyphSpek ships no Copilot, so product.json has no `defaultChatAgent`. The
+		// GlyphCode ships no Copilot, so product.json has no `defaultChatAgent`. The
 		// Copilot-onboarding wizard renders sign-in/disclaimer UI from that config, so
 		// with no chat agent it must be a safe no-op rather than dereferencing `defaultChat`.
 		if (!product.defaultChatAgent) {

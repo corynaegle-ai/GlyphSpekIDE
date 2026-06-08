@@ -217,17 +217,17 @@ class CodeMain {
 		const policyProductName = isWindows
 			? (productService.parentPolicyConfig?.win32RegValueName ?? productService.win32RegValueName)
 			: (productService.parentPolicyConfig?.darwinBundleIdentifier ?? productService.darwinBundleIdentifier);
-		// GlyphSpek PATCH-001: a self-contained Sovereign build carries its `AllowedExtensions`
+		// GlyphCode PATCH-001: a self-contained Sovereign build carries its `AllowedExtensions`
 		// allowlist as a bundled `policy.json` inside the signed app. Load it and layer the OS
 		// native/MDM policy *ahead* of it so native can tighten — never loosen — the allowlist.
 		// The bundled source is a `SovereignFilePolicyService` that FAILS CLOSED: if the bundled
 		// policy.json is missing/unreadable/invalid it forces `AllowedExtensions` to deny-all
 		// (UNTRUSTED) rather than silently degrading to the all-allowed default. Gated entirely by
-		// `product.json`'s `glyphspekSovereignPolicyFile`; a stock/Developer build (flag absent)
+		// `product.json`'s `glyphcodeSovereignPolicyFile`; a stock/Developer build (flag absent)
 		// falls through to the unchanged selection below using plain stock policy services.
-		const glyphspekSovereignPolicyFile = environmentMainService.glyphspekSovereignPolicyFile;
-		if (glyphspekSovereignPolicyFile) {
-			const bundledPolicyService = disposables.add(new SovereignFilePolicyService(glyphspekSovereignPolicyFile, fileService, logService));
+		const glyphcodeSovereignPolicyFile = environmentMainService.glyphcodeSovereignPolicyFile;
+		if (glyphcodeSovereignPolicyFile) {
+			const bundledPolicyService = disposables.add(new SovereignFilePolicyService(glyphcodeSovereignPolicyFile, fileService, logService));
 			let nativePolicyService: IPolicyService | undefined;
 			if ((isWindows || isMacintosh) && policyProductName) {
 				nativePolicyService = disposables.add(new NativePolicyService(logService, policyProductName));
