@@ -164,6 +164,17 @@ function buildBridgeEnv(opts) {
     // pluggable runtime selection honors it ('auto' default ⇒ omit nothing breaks).
     if (opts.verifierRuntime)
         env.GLYPHSTUDIO_VERIFIER_RUNTIME = opts.verifierRuntime;
+    // BYO ANTHROPIC chat-backend knobs (glyphstudio.chat.anthropic.* → the bridge-server
+    // child). NON-SECRET configuration only — the API key is never a setting and never
+    // crosses this env (it lives in the supervisor-read on-disk key file). Empty values
+    // are dropped so the supervisor's own defaults apply.
+    const anthropic = opts.chatAnthropic;
+    if (anthropic?.baseUrl?.trim())
+        env.GLYPHSTUDIO_CHAT_ANTHROPIC_BASE_URL = anthropic.baseUrl.trim();
+    if (anthropic?.attach)
+        env.GLYPHSTUDIO_CHAT_ANTHROPIC_ATTACH = anthropic.attach;
+    if (anthropic?.model?.trim())
+        env.GLYPHSTUDIO_CHAT_ANTHROPIC_MODEL = anthropic.model.trim();
     if (src.PATH !== undefined)
         env.PATH = src.PATH;
     if (src.HOME !== undefined)
@@ -516,8 +527,8 @@ exports.CHAT_BACKEND_ID = 'codex';
  */
 async function openChatSession(opts) {
     const { output } = opts;
-    // buildBridgeEnv only reads runsBase/supervisorVersion off opts; a chat session
-    // carries no §10.3 run request, so pass the env-relevant fields only.
+    // buildBridgeEnv only reads runsBase/supervisorVersion/chatAnthropic off opts; a
+    // chat session carries no §10.3 run request, so pass the env-relevant fields only.
     const env = buildBridgeEnv(opts);
     output.appendLine('');
     output.appendLine('[host] GlyphStudio native chat — spawning packaged bridge-server.');

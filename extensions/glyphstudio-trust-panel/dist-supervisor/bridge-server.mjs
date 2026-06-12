@@ -974,10 +974,10 @@ import { spawn as spawn6 } from "node:child_process";
 import { createConnection } from "node:net";
 import { copyFile, mkdir as mkdir2, writeFile as writeFile2, stat, truncate } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join as join12 } from "node:path";
+import { join as join13 } from "node:path";
 import { fileURLToPath as fileURLToPath2 } from "node:url";
 function siblingFile(name) {
-  return join12(fileURLToPath2(new URL(".", import.meta.url)), name);
+  return join13(fileURLToPath2(new URL(".", import.meta.url)), name);
 }
 function run(cmd, args, opts = {}) {
   return new Promise((resolve5) => {
@@ -1094,7 +1094,7 @@ function serializeHostRules(net, forwardInsert, natAppend) {
 async function provisionHost(runId, ruleset, mountPlan, resources) {
   const net = allocRunNet(runId);
   await mkdir2(FC_RUN_DIR, { recursive: true });
-  const base = join12(FC_RUN_DIR, `run-${net.idx}`);
+  const base = join13(FC_RUN_DIR, `run-${net.idx}`);
   const apiSock = `${base}.api`;
   const vsockUds = `${base}.vsock`;
   const rootfs = `${base}.ext4`;
@@ -1148,15 +1148,15 @@ async function provisionHost(runId, ruleset, mountPlan, resources) {
 async function injectGuestPayload(rootfs) {
   const agentSrc = siblingFile("firecracker-guest-agent.cjs");
   const initSrc = siblingFile("firecracker-guest-init.sh");
-  const mnt = join12(tmpdir(), `gs-fcmnt-${process.pid}-${Date.now()}`);
+  const mnt = join13(tmpdir(), `gs-fcmnt-${process.pid}-${Date.now()}`);
   await sudo(["mkdir", "-p", mnt]);
   try {
     await sudo(["mount", "-o", "loop", rootfs, mnt]);
-    await sudo(["mkdir", "-p", join12(mnt, "opt")]);
-    await sudo(["cp", agentSrc, join12(mnt, "opt", "glyph-guest-agent.cjs")]);
-    await sudo(["cp", initSrc, join12(mnt, "glyph-init")]);
-    await sudo(["chmod", "0755", join12(mnt, "glyph-init")]);
-    await sudo(["mkdir", "-p", join12(mnt, "workspace"), join12(mnt, "home", "agent")]);
+    await sudo(["mkdir", "-p", join13(mnt, "opt")]);
+    await sudo(["cp", agentSrc, join13(mnt, "opt", "glyph-guest-agent.cjs")]);
+    await sudo(["cp", initSrc, join13(mnt, "glyph-init")]);
+    await sudo(["chmod", "0755", join13(mnt, "glyph-init")]);
+    await sudo(["mkdir", "-p", join13(mnt, "workspace"), join13(mnt, "home", "agent")]);
   } finally {
     await sudo(["umount", mnt]).catch(() => {
     });
@@ -1187,7 +1187,7 @@ async function writeBackMounts(handles) {
     } catch {
       continue;
     }
-    const mnt = join12(tmpdir(), `gs-fcwb-${process.pid}-${handles.net.idx}-${m.tag}`);
+    const mnt = join13(tmpdir(), `gs-fcwb-${process.pid}-${handles.net.idx}-${m.tag}`);
     await sudo(["mkdir", "-p", mnt]);
     try {
       await sudo(["mount", "-o", "loop", m.imagePath, mnt]);
@@ -1380,9 +1380,9 @@ async function liveLaunch(args) {
   };
 }
 async function writeRunArtifact(name, contents) {
-  const dir = join12(tmpdir(), "glyph-fc-artifacts");
+  const dir = join13(tmpdir(), "glyph-fc-artifacts");
   await mkdir2(dir, { recursive: true });
-  const p = join12(dir, name);
+  const p = join13(dir, name);
   await writeFile2(p, contents);
   return p;
 }
@@ -1393,7 +1393,7 @@ var init_firecracker_netns = __esm({
     init_firecracker_vsock();
     FC_KERNEL = process.env.GLYPHSTUDIO_FC_KERNEL ?? "/opt/firecracker/kernels/vmlinux-5.10";
     FC_BASE_ROOTFS = process.env.GLYPHSTUDIO_FC_ROOTFS ?? "/opt/firecracker/rootfs/build-small.ext4";
-    FC_RUN_DIR = process.env.GLYPHSTUDIO_FC_RUN_DIR ?? join12(tmpdir(), "glyph-fc-runs");
+    FC_RUN_DIR = process.env.GLYPHSTUDIO_FC_RUN_DIR ?? join13(tmpdir(), "glyph-fc-runs");
     GUEST_VSOCK_PORT = 5e3;
     delay = (ms) => new Promise((r) => setTimeout(r, ms));
   }
@@ -1471,9 +1471,9 @@ var init_firecracker_vsock = __esm({
 
 // ../spikes/p0-supervisor/bridge-server.ts
 import { createHash as createHash9 } from "node:crypto";
-import { existsSync as existsSync9, readFileSync as readFileSync8, statSync as statSync4, realpathSync } from "node:fs";
+import { existsSync as existsSync9, readFileSync as readFileSync9, statSync as statSync5, realpathSync } from "node:fs";
 import { spawnSync as spawnSync2 } from "node:child_process";
-import { join as join17, resolve as resolve4 } from "node:path";
+import { join as join18, resolve as resolve4 } from "node:path";
 
 // ../spikes/p0-supervisor/run.ts
 import { randomUUID } from "node:crypto";
@@ -6854,24 +6854,1085 @@ var OllamaChatBackend = class {
   }
 };
 
+// ../spikes/p0-model-gateway/anthropic-backend.ts
+import { readFileSync as readFileSync6, statSync as statSync2 } from "node:fs";
+import { homedir as homedir2 } from "node:os";
+import { join as join10 } from "node:path";
+
+// ../spikes/p0-supervisor/web-fetch.ts
+import { createHash as createHash6 } from "node:crypto";
+import { lookup as dnsLookup } from "node:dns/promises";
+import { request as httpRequest2 } from "node:http";
+import { request as httpsRequest } from "node:https";
+import { connect as netConnect2, isIP } from "node:net";
+import { connect as tlsConnect } from "node:tls";
+import { URL as URL2 } from "node:url";
+import { gunzipSync, inflateSync, brotliDecompressSync } from "node:zlib";
+var WEB_DEFAULT_MAX_FETCH_KB = 2048;
+var WEB_DEFAULT_MAX_CONTEXT_KB = 50;
+var WEB_DEFAULT_TIMEOUT_MS = 1e4;
+var WEB_DEFAULT_MAX_REDIRECTS = 5;
+var WEB_DEFAULT_IDLE_TIMEOUT_MS = 5e3;
+var WEB_DEFAULT_MAX_DECOMPRESSION_RATIO = 8;
+function marker(reason) {
+  return `[@Web: ${reason}]`;
+}
+function fail(originalUrl, reason, attemptedHost) {
+  return { ok: false, originalUrl, marker: marker(reason), reason, ...attemptedHost ? { attemptedHost } : {} };
+}
+function safeInt(value, fallback, min, max) {
+  if (!Number.isFinite(value) || value === void 0) return fallback;
+  return Math.max(min, Math.min(max, Math.floor(value)));
+}
+function prepareWebUrl(raw) {
+  let url;
+  try {
+    url = new URL2(String(raw || "").trim());
+  } catch {
+    return { error: marker("refused \u2014 not a valid URL"), reason: "refused \u2014 not a valid URL" };
+  }
+  if (url.protocol !== "http:" && url.protocol !== "https:") {
+    const scheme = url.protocol.replace(/:$/, "");
+    return { error: marker(`refused \u2014 unsupported scheme '${scheme}'`), reason: `refused \u2014 unsupported scheme '${scheme}'` };
+  }
+  if (url.username || url.password) {
+    return { error: marker("refused \u2014 credentials in URL not allowed"), reason: "refused \u2014 credentials in URL not allowed" };
+  }
+  url.hash = "";
+  const port = url.port ? Number(url.port) : url.protocol === "http:" ? 80 : 443;
+  if (port !== 80 && port !== 443) {
+    return { error: marker("refused \u2014 non-default port"), reason: "refused \u2014 non-default port" };
+  }
+  const host = url.hostname.replace(/\.$/, "").toLowerCase();
+  if (!host) {
+    return { error: marker("refused \u2014 not a valid URL"), reason: "refused \u2014 not a valid URL" };
+  }
+  url.hostname = host;
+  return { url, host, port };
+}
+function ipv4ToNumber(ip) {
+  const parts = ip.split(".");
+  if (parts.length !== 4) return void 0;
+  let n = 0;
+  for (const p of parts) {
+    const v = Number(p);
+    if (!Number.isInteger(v) || v < 0 || v > 255) return void 0;
+    n = (n << 8) + v;
+  }
+  return n >>> 0;
+}
+function inRange(n, base, bits) {
+  const b = ipv4ToNumber(base);
+  if (b === void 0) return false;
+  const mask2 = bits === 0 ? 0 : 4294967295 << 32 - bits >>> 0;
+  return (n & mask2) === (b & mask2);
+}
+function uint32ToDottedQuad(n) {
+  return `${n >>> 24 & 255}.${n >>> 16 & 255}.${n >>> 8 & 255}.${n & 255}`;
+}
+function normalizeIpLiteral(host) {
+  const h = host.replace(/^\[/, "").replace(/\]$/, "").toLowerCase();
+  if (/^0x[0-9a-f]+$/.test(h)) {
+    const n = Number.parseInt(h.slice(2), 16);
+    if (Number.isInteger(n) && n >= 0 && n <= 4294967295) return uint32ToDottedQuad(n);
+    return h;
+  }
+  if (/^0[0-7]+$/.test(h)) {
+    const n = Number.parseInt(h, 8);
+    if (Number.isInteger(n) && n >= 0 && n <= 4294967295) return uint32ToDottedQuad(n);
+    return h;
+  }
+  if (/^[1-9][0-9]*$/.test(h) || h === "0") {
+    const n = Number(h);
+    if (Number.isInteger(n) && n >= 0 && n <= 4294967295) return uint32ToDottedQuad(n);
+    return h;
+  }
+  if (/^0[0-7.]+$/.test(h) && h.includes(".")) {
+    const parts = h.split(".").map((p) => Number.parseInt(p || "0", 8));
+    if (parts.length === 4 && parts.every((p) => Number.isInteger(p) && p >= 0 && p <= 255)) {
+      return parts.join(".");
+    }
+  }
+  if (h.startsWith("::ffff:")) return h.slice("::ffff:".length);
+  return h;
+}
+function isPublicAddress(address) {
+  const ip = normalizeIpLiteral(address);
+  const family = isIP(ip);
+  if (family === 4) {
+    const n = ipv4ToNumber(ip);
+    if (n === void 0) return false;
+    const ranges = [
+      ["0.0.0.0", 8],
+      ["10.0.0.0", 8],
+      ["100.64.0.0", 10],
+      ["127.0.0.0", 8],
+      ["169.254.0.0", 16],
+      ["172.16.0.0", 12],
+      ["192.168.0.0", 16],
+      ["192.0.2.0", 24],
+      ["198.51.100.0", 24],
+      ["203.0.113.0", 24],
+      ["224.0.0.0", 4]
+    ];
+    return !ranges.some(([base, bits]) => inRange(n, base, bits));
+  }
+  if (family === 6) {
+    const h = ip.toLowerCase();
+    if (h === "::" || h === "::1") return false;
+    if (h.startsWith("fe80:") || h.startsWith("fe8") || h.startsWith("fe9") || h.startsWith("fea") || h.startsWith("feb")) return false;
+    if (h.startsWith("fc") || h.startsWith("fd")) return false;
+    if (h.startsWith("ff")) return false;
+    if (h.startsWith("2001:db8")) return false;
+    return true;
+  }
+  return false;
+}
+async function resolvePublic(host, lookup2) {
+  if (host === "localhost" || host.endsWith(".localhost")) return void 0;
+  const literal = normalizeIpLiteral(host);
+  if (isIP(literal)) return isPublicAddress(literal) ? literal : void 0;
+  const records = await lookup2(host, { all: true, verbatim: true });
+  const publicRecord = records.find((r) => isPublicAddress(r.address));
+  return publicRecord?.address;
+}
+function decodeBody(body, encoding) {
+  const enc = encoding.toLowerCase();
+  if (enc.includes("gzip")) return gunzipSync(body);
+  if (enc.includes("br")) return brotliDecompressSync(body);
+  if (enc.includes("deflate")) return inflateSync(body);
+  return body;
+}
+function resolveCharset(body, contentType, isHtml) {
+  const fromHeader = /charset\s*=\s*"?([\w:.+-]+)"?/i.exec(contentType)?.[1];
+  if (fromHeader) return fromHeader.trim().toLowerCase();
+  if (isHtml) {
+    const head = body.subarray(0, 1024).toString("latin1");
+    const meta = /<meta[^>]+charset\s*=\s*["']?\s*([\w:.+-]+)/i.exec(head)?.[1] ?? /<meta[^>]+content\s*=\s*["'][^"']*charset\s*=\s*([\w:.+-]+)/i.exec(head)?.[1];
+    if (meta) return meta.trim().toLowerCase();
+  }
+  return "utf-8";
+}
+function decodeCharset(body, charset) {
+  const cs = charset.replace(/[^a-z0-9]/g, "");
+  if (cs === "utf8" || cs === "utf" || cs === "") {
+    const text = body.toString("utf8");
+    if (Buffer.byteLength(text, "utf8") !== body.byteLength && text.includes("\uFFFD")) {
+      return void 0;
+    }
+    return text;
+  }
+  try {
+    return new TextDecoder(charset, { fatal: true }).decode(body);
+  } catch {
+    return void 0;
+  }
+}
+function extractText(body, contentType) {
+  const type = contentType.split(";")[0].trim().toLowerCase();
+  if (type && !type.startsWith("text/html") && !type.startsWith("text/plain") && !type.startsWith("text/markdown") && type !== "application/json" && !type.endsWith("+json")) {
+    return { unsupported: true, boilerplateStripped: false };
+  }
+  const isHtml = type.startsWith("text/html");
+  const charset = resolveCharset(body, contentType, isHtml);
+  const decoded = decodeCharset(body, charset);
+  if (decoded === void 0) {
+    return { unsupported: true, boilerplateStripped: false };
+  }
+  let raw = decoded;
+  if (type.startsWith("text/html")) {
+    raw = raw.replace(/<script\b[^>]*>[\s\S]*?<\/script>/gi, " ").replace(/<style\b[^>]*>[\s\S]*?<\/style>/gi, " ").replace(/<!--[\s\S]*?-->/g, " ").replace(/<[^>]+>/g, " ").replace(/&nbsp;/g, " ").replace(/&amp;/g, "&").replace(/&lt;/g, "<").replace(/&gt;/g, ">").replace(/&quot;/g, '"');
+    return { text: raw.replace(/\s+/g, " ").trim(), boilerplateStripped: true };
+  }
+  return { text: raw.trim(), boilerplateStripped: false };
+}
+function proxyPort(proxy) {
+  if (proxy.port) return Number(proxy.port);
+  return proxy.protocol === "https:" ? 443 : 80;
+}
+function authorityHost(host) {
+  return isIP(host) === 6 ? `[${host}]` : host;
+}
+function connectHttpsThroughProxy(proxy, target, resolvedAddress, timeoutMs, idleTimeoutMs, recordConnect) {
+  return new Promise((resolve5, reject) => {
+    const raw = netConnect2({
+      host: proxy.hostname,
+      port: proxyPort(proxy)
+    });
+    let settled = false;
+    let buffered = Buffer.alloc(0);
+    const targetAuthority = `${authorityHost(resolvedAddress)}:${Number(target.port || 443)}`;
+    const hostAuthority = `${target.hostname}:${Number(target.port || 443)}`;
+    recordConnect?.({ host: resolvedAddress, port: Number(target.port || 443), servername: target.hostname });
+    const fail2 = (err) => {
+      if (settled) return;
+      settled = true;
+      raw.destroy();
+      reject(err);
+    };
+    const timer = setTimeout(() => fail2(new Error(`timed out after ${Math.round(timeoutMs / 1e3)}s`)), timeoutMs);
+    if (typeof timer.unref === "function") {
+      timer.unref();
+    }
+    raw.on("connect", () => {
+      raw.write(
+        [
+          `CONNECT ${targetAuthority} HTTP/1.1`,
+          `Host: ${hostAuthority}`,
+          "User-Agent: GlyphStudio-WebContext/1",
+          "Connection: close",
+          "",
+          ""
+        ].join("\r\n")
+      );
+    });
+    raw.on("data", (chunk) => {
+      buffered = Buffer.concat([buffered, chunk]);
+      const headerEnd = buffered.indexOf("\r\n\r\n");
+      if (headerEnd === -1) return;
+      const header = buffered.subarray(0, headerEnd).toString("latin1");
+      const status = /^HTTP\/\d(?:\.\d)?\s+(\d{3})\b/i.exec(header)?.[1];
+      if (!status || Number(status) < 200 || Number(status) >= 300) {
+        fail2(new Error(`proxy CONNECT failed${status ? ` \u2014 HTTP ${status}` : ""}`));
+        return;
+      }
+      raw.removeAllListeners("data");
+      raw.removeAllListeners("error");
+      raw.removeAllListeners("timeout");
+      clearTimeout(timer);
+      const tls = tlsConnect({
+        socket: raw,
+        servername: target.hostname,
+        rejectUnauthorized: true
+      });
+      tls.once("secureConnect", () => {
+        if (settled) return;
+        settled = true;
+        resolve5(tls);
+      });
+      tls.once("error", (err) => {
+        if (/certificate|tls|ssl|self[- ]signed|unable to verify/i.test(String(err.message))) {
+          fail2(new Error("TLS validation failed"));
+        } else {
+          fail2(err);
+        }
+      });
+    });
+    raw.once("timeout", () => fail2(new Error(`timed out after ${Math.round(timeoutMs / 1e3)}s`)));
+    raw.once("error", fail2);
+    raw.setTimeout(Math.min(idleTimeoutMs, timeoutMs));
+  });
+}
+function runRequest(client, options, maxBytes, idleTimeoutMs) {
+  return new Promise((resolve5, reject) => {
+    const idleSecs = Math.round(idleTimeoutMs / 1e3);
+    const req = client(options, (res) => {
+      const chunks = [];
+      let bytes = 0;
+      const armIdle = () => {
+        if (typeof res.setTimeout === "function") {
+          res.setTimeout(
+            idleTimeoutMs,
+            () => req.destroy(new Error(`timed out after ${idleSecs}s`))
+          );
+        }
+      };
+      armIdle();
+      res.on("data", (chunk) => {
+        armIdle();
+        bytes += chunk.length;
+        if (bytes > maxBytes) {
+          req.destroy(new Error(`response exceeded maxFetchKB`));
+          return;
+        }
+        chunks.push(chunk);
+      });
+      res.on("end", () => resolve5({
+        statusCode: res.statusCode ?? 0,
+        headers: res.headers,
+        body: Buffer.concat(chunks),
+        bytesRead: bytes
+      }));
+    });
+    req.on("timeout", () => req.destroy(new Error(`timed out after ${Math.round(Number(options.timeout ?? 0) / 1e3)}s`)));
+    req.setTimeout(Math.min(idleTimeoutMs, Number(options.timeout ?? idleTimeoutMs)));
+    req.on("error", reject);
+    req.end();
+  });
+}
+function proxyRequest(proxy, target, resolvedAddress, o) {
+  const headers = {
+    Host: target.host,
+    Accept: "text/html,text/plain,text/markdown,application/json;q=0.9,*/*;q=0.1",
+    "Accept-Encoding": "gzip, deflate, br",
+    "User-Agent": "GlyphStudio-WebContext/1"
+  };
+  if (target.protocol === "https:") {
+    return connectHttpsThroughProxy(proxy, target, resolvedAddress, o.timeoutMs, o.idleTimeoutMs, o.recordConnect).then((tlsSocket) => runRequest(
+      httpsRequest,
+      {
+        protocol: "https:",
+        hostname: target.hostname,
+        port: Number(target.port || 443),
+        path: `${target.pathname}${target.search}`,
+        method: "GET",
+        headers,
+        timeout: o.timeoutMs,
+        createConnection: () => tlsSocket
+      },
+      o.maxBytes,
+      o.idleTimeoutMs
+    ));
+  }
+  o.recordConnect?.({ host: resolvedAddress, port: Number(target.port || 80), servername: target.hostname });
+  return runRequest(
+    httpRequest2,
+    {
+      protocol: "http:",
+      hostname: proxy.hostname,
+      port: proxyPort(proxy),
+      path: `http://${authorityHost(resolvedAddress)}:${Number(target.port || 80)}${target.pathname}${target.search}`,
+      method: "GET",
+      headers,
+      timeout: o.timeoutMs
+    },
+    o.maxBytes,
+    o.idleTimeoutMs
+  );
+}
+var STREAM_DEFAULT_TIMEOUT_MS = 12e4;
+var ChunkQueue = class {
+  buffered = [];
+  err;
+  ended = false;
+  wake;
+  push(chunk) {
+    if (this.ended || this.err) return;
+    this.buffered.push(chunk);
+    this.wake?.();
+  }
+  end() {
+    if (this.ended || this.err) return;
+    this.ended = true;
+    this.wake?.();
+  }
+  fail(err) {
+    if (this.ended || this.err) return;
+    this.err = err;
+    this.wake?.();
+  }
+  async *iterate() {
+    for (; ; ) {
+      while (this.buffered.length > 0) {
+        yield this.buffered.shift();
+      }
+      if (this.err) throw this.err;
+      if (this.ended) return;
+      await new Promise((resolve5) => {
+        this.wake = resolve5;
+      });
+      this.wake = void 0;
+    }
+  }
+};
+var StreamResponseParser = class {
+  constructor(onHead, onError) {
+    this.onHead = onHead;
+    this.onError = onError;
+  }
+  onHead;
+  onError;
+  buffered = Buffer.alloc(0);
+  headersDone = false;
+  framing = "close";
+  remaining = 0;
+  // content-length countdown / current chunk remaining
+  chunkPhase = "size";
+  bodyDone = false;
+  queue = new ChunkQueue();
+  get finished() {
+    return this.bodyDone;
+  }
+  feed(chunk) {
+    this.buffered = this.buffered.length === 0 ? chunk : Buffer.concat([this.buffered, chunk]);
+    if (!this.headersDone) {
+      const headerEnd = this.buffered.indexOf("\r\n\r\n");
+      if (headerEnd === -1) return;
+      const head = this.buffered.subarray(0, headerEnd).toString("latin1");
+      this.buffered = this.buffered.subarray(headerEnd + 4);
+      const lines = head.split("\r\n");
+      const status = /^HTTP\/\d(?:\.\d)?\s+(\d{3})\b/i.exec(lines[0] ?? "")?.[1];
+      if (!status) {
+        this.onError(new Error("malformed HTTP response \u2014 bad status line"));
+        return;
+      }
+      const headers = {};
+      for (const line of lines.slice(1)) {
+        const sep3 = line.indexOf(":");
+        if (sep3 === -1) continue;
+        const name = line.slice(0, sep3).trim().toLowerCase();
+        const value = line.slice(sep3 + 1).trim();
+        headers[name] = headers[name] !== void 0 ? `${headers[name]}, ${value}` : value;
+      }
+      if (/\bchunked\b/i.test(headers["transfer-encoding"] ?? "")) {
+        this.framing = "chunked";
+      } else if (headers["content-length"] !== void 0) {
+        const len = Number(headers["content-length"]);
+        if (!Number.isInteger(len) || len < 0) {
+          this.onError(new Error("malformed HTTP response \u2014 bad Content-Length"));
+          return;
+        }
+        this.framing = "length";
+        this.remaining = len;
+      }
+      this.headersDone = true;
+      this.onHead(Number(status), headers);
+      if (this.framing === "length" && this.remaining === 0) {
+        this.finishBody();
+        return;
+      }
+    }
+    if (this.headersDone && !this.bodyDone) this.drainBody();
+  }
+  /** The socket closed. Read-to-close framing ends honestly; truncation elsewhere is an error. */
+  socketEnded() {
+    if (this.bodyDone) return;
+    if (!this.headersDone) {
+      this.onError(new Error("connection closed before response headers"));
+      return;
+    }
+    if (this.framing === "close") {
+      this.finishBody();
+      return;
+    }
+    this.onError(new Error("connection closed mid-body (truncated response)"));
+  }
+  finishBody() {
+    this.bodyDone = true;
+    this.queue.end();
+  }
+  drainBody() {
+    if (this.framing === "close") {
+      if (this.buffered.length > 0) {
+        this.queue.push(this.buffered);
+        this.buffered = Buffer.alloc(0);
+      }
+      return;
+    }
+    if (this.framing === "length") {
+      if (this.buffered.length > 0 && this.remaining > 0) {
+        const take = this.buffered.subarray(0, this.remaining);
+        this.buffered = this.buffered.subarray(take.length);
+        this.remaining -= take.length;
+        this.queue.push(take);
+      }
+      if (this.remaining === 0) this.finishBody();
+      return;
+    }
+    for (; ; ) {
+      if (this.chunkPhase === "size") {
+        const lineEnd = this.buffered.indexOf("\r\n");
+        if (lineEnd === -1) return;
+        const sizeLine = this.buffered.subarray(0, lineEnd).toString("latin1");
+        this.buffered = this.buffered.subarray(lineEnd + 2);
+        const size = Number.parseInt(sizeLine.split(";")[0].trim(), 16);
+        if (!Number.isInteger(size) || size < 0) {
+          this.onError(new Error("malformed HTTP response \u2014 bad chunk size"));
+          return;
+        }
+        if (size === 0) {
+          this.chunkPhase = "trailer";
+          continue;
+        }
+        this.remaining = size;
+        this.chunkPhase = "data";
+        continue;
+      }
+      if (this.chunkPhase === "data") {
+        if (this.buffered.length === 0) return;
+        const take = this.buffered.subarray(0, this.remaining);
+        this.buffered = this.buffered.subarray(take.length);
+        this.remaining -= take.length;
+        if (take.length > 0) this.queue.push(take);
+        if (this.remaining === 0) this.chunkPhase = "data-crlf";
+        else return;
+        continue;
+      }
+      if (this.chunkPhase === "data-crlf") {
+        if (this.buffered.length < 2) return;
+        this.buffered = this.buffered.subarray(2);
+        this.chunkPhase = "size";
+        continue;
+      }
+      const trailerEnd = this.buffered.indexOf("\r\n");
+      if (trailerEnd === -1) return;
+      const line = this.buffered.subarray(0, trailerEnd).toString("latin1");
+      this.buffered = this.buffered.subarray(trailerEnd + 2);
+      if (line.length === 0) {
+        this.finishBody();
+        return;
+      }
+    }
+  }
+};
+var OWNED_HEADERS = /* @__PURE__ */ new Set(["host", "content-length", "connection", "transfer-encoding"]);
+async function governedStreamRequest(opts) {
+  const prepared = prepareWebUrl(opts.url);
+  if ("error" in prepared) throw new Error(prepared.reason);
+  const { url, host, port } = prepared;
+  const literal = normalizeIpLiteral(host);
+  if (isIP(literal) && !isPublicAddress(literal)) {
+    throw new Error(`refused \u2014 non-public target '${host}'`);
+  }
+  const proxy = new URL2(opts.proxyUrl);
+  const timeoutMs = safeInt(opts.timeoutMs, STREAM_DEFAULT_TIMEOUT_MS, 100, 6e5);
+  const bodyBuf = Buffer.from(opts.body ?? "", "utf8");
+  const headerLines = [];
+  for (const [name, value] of Object.entries(opts.headers ?? {})) {
+    if (OWNED_HEADERS.has(name.trim().toLowerCase())) continue;
+    if (/[\r\n]/.test(name) || /[\r\n]/.test(value)) {
+      throw new Error(`refused \u2014 header '${name.replace(/[\r\n]+/g, " ")}' contains a line break`);
+    }
+    headerLines.push(`${name}: ${value}`);
+  }
+  return new Promise((resolve5, reject) => {
+    let settledHead = false;
+    let finished = false;
+    const parser = new StreamResponseParser(
+      (status, headers) => {
+        settledHead = true;
+        if (status >= 300 && status < 400) {
+          finished = true;
+          cleanup();
+          socket?.destroy();
+          tlsSock?.destroy();
+          reject(new Error(`refused \u2014 HTTP ${status} redirect (this transport never follows redirects)`));
+          return;
+        }
+        resolve5({ status, headers, chunks: parser.queue.iterate() });
+      },
+      (err) => failAll(err)
+    );
+    let socket;
+    let tlsSock;
+    const failAll = (err) => {
+      if (finished) return;
+      finished = true;
+      cleanup();
+      socket?.destroy();
+      tlsSock?.destroy();
+      if (!settledHead) reject(err);
+      parser.queue.fail(err);
+    };
+    const endAll = () => {
+      if (finished) return;
+      parser.socketEnded();
+      if (parser.finished) {
+        finished = true;
+        cleanup();
+      }
+    };
+    const timer = setTimeout(() => failAll(new Error(`timed out after ${timeoutMs}ms`)), timeoutMs);
+    if (typeof timer.unref === "function") {
+      timer.unref();
+    }
+    const onAbort = () => failAll(new Error("aborted"));
+    const cleanup = () => {
+      clearTimeout(timer);
+      opts.signal?.removeEventListener("abort", onAbort);
+    };
+    if (opts.signal) {
+      if (opts.signal.aborted) {
+        cleanup();
+        finished = true;
+        reject(new Error("aborted"));
+        return;
+      }
+      opts.signal.addEventListener("abort", onAbort, { once: true });
+    }
+    const writeRequest = (target, requestPath) => {
+      target.on("data", (chunk) => {
+        parser.feed(chunk);
+        if (parser.finished && !finished) {
+          finished = true;
+          cleanup();
+          target.destroy();
+        }
+      });
+      target.on("end", endAll);
+      target.on("close", endAll);
+      target.write(
+        [
+          `${opts.method.toUpperCase()} ${requestPath} HTTP/1.1`,
+          `Host: ${authorityHost(host)}${port === 443 || port === 80 ? "" : `:${port}`}`,
+          ...headerLines,
+          `Content-Length: ${bodyBuf.byteLength}`,
+          "Connection: close",
+          "",
+          ""
+        ].join("\r\n")
+      );
+      if (bodyBuf.byteLength > 0) target.write(bodyBuf);
+    };
+    socket = netConnect2({ host: proxy.hostname, port: proxyPort(proxy) });
+    socket.once("error", (err) => failAll(err));
+    if (url.protocol === "https:") {
+      let connectBuffered = Buffer.alloc(0);
+      const onConnectData = (chunk) => {
+        connectBuffered = Buffer.concat([connectBuffered, chunk]);
+        const headerEnd = connectBuffered.indexOf("\r\n\r\n");
+        if (headerEnd === -1) return;
+        const head = connectBuffered.subarray(0, headerEnd).toString("latin1");
+        const status = /^HTTP\/\d(?:\.\d)?\s+(\d{3})\b/i.exec(head)?.[1];
+        if (!status || Number(status) < 200 || Number(status) >= 300) {
+          failAll(new Error(`proxy CONNECT failed${status ? ` \u2014 HTTP ${status}` : ""}`));
+          return;
+        }
+        socket?.removeListener("data", onConnectData);
+        socket?.removeAllListeners("error");
+        const tls = tlsConnect({
+          socket,
+          servername: host,
+          rejectUnauthorized: true
+        });
+        tlsSock = tls;
+        tls.once("secureConnect", () => {
+          if (finished) {
+            tls.destroy();
+            return;
+          }
+          writeRequest(tls, `${url.pathname}${url.search}`);
+        });
+        tls.once("error", (err) => {
+          if (/certificate|tls|ssl|self[- ]signed|unable to verify/i.test(String(err.message))) {
+            failAll(new Error("TLS validation failed"));
+          } else {
+            failAll(err);
+          }
+        });
+      };
+      socket.on("data", onConnectData);
+      socket.once("connect", () => {
+        const authority = `${authorityHost(host)}:${port}`;
+        socket?.write(
+          [
+            `CONNECT ${authority} HTTP/1.1`,
+            `Host: ${authority}`,
+            "User-Agent: GlyphStudio-WebContext/1",
+            "Connection: close",
+            "",
+            ""
+          ].join("\r\n")
+        );
+      });
+      socket.once("end", () => {
+        if (!finished && !tlsSock) failAll(new Error("proxy closed the connection before CONNECT completed"));
+      });
+    } else {
+      socket.once("connect", () => {
+        writeRequest(socket, `http://${authorityHost(host)}:${port}${url.pathname}${url.search}`);
+      });
+    }
+  });
+}
+async function governedWebFetch(opts) {
+  const originalUrl = String(opts.url || "").trim();
+  const lookup2 = opts.lookup ?? dnsLookup;
+  const maxFetchBytes = safeInt(opts.maxFetchKB, WEB_DEFAULT_MAX_FETCH_KB, 1, 16384) * 1024;
+  const maxContextBytes = safeInt(opts.maxContextKB, WEB_DEFAULT_MAX_CONTEXT_KB, 1, 1024) * 1024;
+  const timeoutMs = safeInt(opts.timeoutMs, WEB_DEFAULT_TIMEOUT_MS, 100, 6e4);
+  const idleTimeoutMs = safeInt(opts.idleTimeoutMs, WEB_DEFAULT_IDLE_TIMEOUT_MS, 100, 6e4);
+  const totalTimeoutMs = safeInt(opts.totalTimeoutMs, timeoutMs, 100, 12e4);
+  const deadline = Date.now() + totalTimeoutMs;
+  const totalSecs = Math.round(totalTimeoutMs / 1e3);
+  const maxRedirects = safeInt(opts.maxRedirects, WEB_DEFAULT_MAX_REDIRECTS, 0, 10);
+  const proxy = new URL2(opts.proxyUrl);
+  let current = originalUrl;
+  for (let hop = 0; hop <= maxRedirects; hop++) {
+    if (Date.now() >= deadline) return fail(originalUrl, `fetch failed \u2014 timed out after ${totalSecs}s`);
+    const prepared = prepareWebUrl(current);
+    if ("error" in prepared) return { ok: false, originalUrl, marker: prepared.error, reason: prepared.reason };
+    const { url, host, port } = prepared;
+    let resolved;
+    try {
+      resolved = await resolvePublic(host, lookup2);
+    } catch (err) {
+      return fail(originalUrl, `fetch failed \u2014 ${String(err.message || "DNS failure")}`, host);
+    }
+    if (!resolved) return fail(originalUrl, "refused \u2014 non-public target", host);
+    const connectAddress = opts.rebindConnectTarget ? opts.rebindConnectTarget(resolved) : resolved;
+    if (!isPublicAddress(connectAddress)) return fail(originalUrl, "refused \u2014 non-public target", host);
+    const remaining = Math.max(100, deadline - Date.now());
+    const hopTimeout = Math.min(timeoutMs, remaining);
+    opts.onAttempt?.({ url: url.toString(), host, port });
+    let response;
+    try {
+      response = await proxyRequest(proxy, url, connectAddress, {
+        timeoutMs: hopTimeout,
+        idleTimeoutMs: Math.min(idleTimeoutMs, hopTimeout),
+        maxBytes: maxFetchBytes,
+        ...opts.recordConnect ? { recordConnect: opts.recordConnect } : {}
+      });
+    } catch (err) {
+      const msg = String(err.message ?? err);
+      if (Date.now() >= deadline) return fail(originalUrl, `fetch failed \u2014 timed out after ${totalSecs}s`, host);
+      if (/timed out/i.test(msg)) return fail(originalUrl, `fetch failed \u2014 ${msg}`, host);
+      return fail(originalUrl, `fetch failed \u2014 ${msg.slice(0, 120)}`, host);
+    }
+    if ([301, 302, 303, 307, 308].includes(response.statusCode)) {
+      const loc = response.headers.location;
+      const location = Array.isArray(loc) ? loc[0] : loc;
+      if (!location) return fail(originalUrl, `fetch failed \u2014 HTTP ${response.statusCode}`, host);
+      if (hop === maxRedirects) return fail(originalUrl, "fetch failed \u2014 too many redirects", host);
+      const next = new URL2(location, url);
+      if (url.protocol === "https:" && next.protocol === "http:") {
+        return fail(originalUrl, "refused \u2014 non-public target", host);
+      }
+      current = next.toString();
+      continue;
+    }
+    if (response.statusCode < 200 || response.statusCode >= 300) {
+      return fail(originalUrl, `fetch failed \u2014 HTTP ${response.statusCode}`, host);
+    }
+    const contentEncoding = String(response.headers["content-encoding"] ?? "");
+    let decoded;
+    try {
+      decoded = decodeBody(response.body, contentEncoding);
+    } catch {
+      return fail(originalUrl, "unsupported content type \u2014 encoded body");
+    }
+    const wasCompressed = /gzip|br|deflate/i.test(contentEncoding) && response.bytesRead > 0;
+    if (decoded.byteLength > maxFetchBytes * WEB_DEFAULT_MAX_DECOMPRESSION_RATIO) {
+      return fail(originalUrl, "fetch failed \u2014 response exceeded decompressed limit", host);
+    }
+    if (wasCompressed && decoded.byteLength > response.bytesRead * WEB_DEFAULT_MAX_DECOMPRESSION_RATIO) {
+      return fail(originalUrl, "fetch failed \u2014 response exceeded decompressed limit", host);
+    }
+    const contentType = String(response.headers["content-type"] ?? "text/plain");
+    const extracted = extractText(decoded, contentType);
+    if (extracted.unsupported) return fail(originalUrl, `unsupported content type \u2014 ${contentType.split(";")[0] || "unknown"}`, host);
+    const fullText = extracted.text ?? "";
+    if (!fullText.trim()) return fail(originalUrl, `no readable content at ${url.toString()}`, host);
+    const fullBytes = Buffer.byteLength(fullText, "utf8");
+    const truncated = fullBytes > maxContextBytes;
+    const text = truncated ? `${Buffer.from(fullText).subarray(0, maxContextBytes).toString("utf8")}
+... [truncated]` : fullText;
+    const sha256 = createHash6("sha256").update(fullText, "utf8").digest("hex");
+    opts.onAttempt?.({ url: url.toString(), host, port, contentSha256: sha256 });
+    return {
+      ok: true,
+      originalUrl,
+      finalUrl: url.toString(),
+      contentType,
+      text,
+      fullText,
+      sha256,
+      bytesRead: response.bytesRead,
+      extractedBytes: fullBytes,
+      truncated,
+      boilerplateStripped: extracted.boilerplateStripped
+    };
+  }
+  return fail(originalUrl, "fetch failed \u2014 too many redirects");
+}
+
+// ../spikes/p0-model-gateway/anthropic-backend.ts
+var DEFAULT_ANTHROPIC_BASE_URL = "https://api.anthropic.com";
+var DEFAULT_ANTHROPIC_MODEL = "claude-sonnet-4-6";
+var ANTHROPIC_VERSION = "2023-06-01";
+var DEFAULT_ANTHROPIC_MAX_OUTPUT_TOKENS = 4096;
+var ERROR_BODY_CAP2 = 300;
+function defaultAnthropicKeyFile() {
+  return join10(homedir2(), ".glyphstudio", "anthropic", "api-key");
+}
+function probeAnthropicKeyFile(keyFile) {
+  const path6 = keyFile ?? defaultAnthropicKeyFile();
+  let mode;
+  try {
+    mode = statSync2(path6).mode;
+  } catch {
+    return { ok: false, detail: `no API key at ${path6}` };
+  }
+  if ((mode & 63) !== 0) {
+    return { ok: false, detail: `key file is group/world-readable \u2014 chmod 600 ${path6}` };
+  }
+  let content;
+  try {
+    content = readFileSync6(path6, "utf8");
+  } catch {
+    return { ok: false, detail: `no API key at ${path6}` };
+  }
+  if (content.trim().length === 0) {
+    return { ok: false, detail: `no API key at ${path6}` };
+  }
+  return { ok: true, detail: "key present (reachability unverified)" };
+}
+function governedProxyOrRefusal(env) {
+  if (!env) {
+    return {
+      refusal: "refusing to call the Anthropic API on the ambient process environment: a chat turn must be GOVERNED (egress forced through the supervisor proxy, ambient secrets stripped). No governed env was provided."
+    };
+  }
+  const proxy = env.HTTPS_PROXY ?? env.https_proxy ?? env.HTTP_PROXY ?? env.http_proxy ?? "";
+  if (typeof proxy !== "string" || proxy.trim().length === 0) {
+    return {
+      refusal: "refusing to call the Anthropic API on an UNGOVERNED env: no HTTPS_PROXY/HTTP_PROXY is set, so the API egress would not be brokered through the supervisor proxy."
+    };
+  }
+  return { proxyUrl: proxy.trim() };
+}
+function readKeyOrRefusal(path6) {
+  let mode;
+  try {
+    mode = statSync2(path6).mode;
+  } catch {
+    return {
+      refusal: `no API key at ${path6} \u2014 create the file with your Anthropic API key and chmod 600 it.`
+    };
+  }
+  if ((mode & 63) !== 0) {
+    return {
+      refusal: `refusing to read the API key: ${path6} is group/world-readable \u2014 chmod 600 ${path6}.`
+    };
+  }
+  let content;
+  try {
+    content = readFileSync6(path6, "utf8");
+  } catch {
+    return {
+      refusal: `no API key at ${path6} \u2014 create the file with your Anthropic API key and chmod 600 it.`
+    };
+  }
+  const key = content.trim();
+  if (key.length === 0) {
+    return {
+      refusal: `no API key at ${path6} \u2014 the file exists but is empty. Put your Anthropic API key in it (chmod 600).`
+    };
+  }
+  return { key };
+}
+function toAnthropicMessages(messages) {
+  const systemParts = [];
+  const out = [];
+  for (const msg of messages) {
+    if (msg.role === "system") {
+      systemParts.push(msg.content);
+      continue;
+    }
+    const last = out[out.length - 1];
+    if (last && last.role === msg.role) {
+      last.content = `${last.content}
+
+${msg.content}`;
+    } else {
+      out.push({ role: msg.role, content: msg.content });
+    }
+  }
+  return {
+    ...systemParts.length > 0 ? { system: systemParts.join("\n\n") } : {},
+    messages: out
+  };
+}
+function clampMaxTokens(requested, fallback) {
+  if (typeof requested !== "number" || !Number.isFinite(requested)) return fallback;
+  return Math.max(1, Math.floor(requested));
+}
+var SseParser = class {
+  buffered = "";
+  feed(text) {
+    this.buffered += text;
+    const events = [];
+    for (; ; ) {
+      const sep3 = this.buffered.search(/\r?\n\r?\n/);
+      if (sep3 === -1) return events;
+      const sepLen = /^\r\n\r\n/.test(this.buffered.slice(sep3)) ? 4 : 2;
+      const block = this.buffered.slice(0, sep3);
+      this.buffered = this.buffered.slice(sep3 + sepLen);
+      let eventName = "";
+      const dataLines = [];
+      for (const line of block.split(/\r?\n/)) {
+        if (line.startsWith("event:")) eventName = line.slice("event:".length).trim();
+        else if (line.startsWith("data:")) dataLines.push(line.slice("data:".length).trimStart());
+      }
+      if (eventName || dataLines.length > 0) {
+        events.push({ event: eventName, data: dataLines.join("\n") });
+      }
+    }
+  }
+};
+function capErrorText(text) {
+  const oneLine = text.replace(/[\r\n\t]+/g, " ").trim();
+  return oneLine.length > ERROR_BODY_CAP2 ? `${oneLine.slice(0, ERROR_BODY_CAP2)}\u2026` : oneLine;
+}
+var AnthropicChatBackend = class {
+  id = "anthropic";
+  defaultModel;
+  baseUrl;
+  attach;
+  keyFile;
+  timeoutMs;
+  maxOutputTokensDefault;
+  transport;
+  constructor(opts = {}) {
+    this.baseUrl = (opts.baseUrl ?? DEFAULT_ANTHROPIC_BASE_URL).replace(/\/+$/, "");
+    this.attach = opts.attach ?? "x-api-key";
+    this.defaultModel = opts.model ?? DEFAULT_ANTHROPIC_MODEL;
+    this.keyFile = opts.keyFile ?? defaultAnthropicKeyFile();
+    this.timeoutMs = opts.timeoutMs;
+    this.maxOutputTokensDefault = opts.maxOutputTokensDefault ?? DEFAULT_ANTHROPIC_MAX_OUTPUT_TOKENS;
+    this.transport = opts.transport ?? governedStreamRequest;
+  }
+  async *chatTurn(req, opts) {
+    const governed = governedProxyOrRefusal(opts?.env);
+    if ("refusal" in governed) {
+      yield { type: "error", message: governed.refusal };
+      return;
+    }
+    const keyRead = readKeyOrRefusal(this.keyFile);
+    if ("refusal" in keyRead) {
+      yield { type: "error", message: keyRead.refusal };
+      return;
+    }
+    const mapped = toAnthropicMessages(req.messages);
+    const model = req.model ?? this.defaultModel;
+    const maxTokens = clampMaxTokens(req.maxOutputTokens, this.maxOutputTokensDefault);
+    const body = JSON.stringify({
+      model,
+      max_tokens: maxTokens,
+      stream: true,
+      ...mapped.system !== void 0 ? { system: mapped.system } : {},
+      messages: mapped.messages
+    });
+    const headers = {
+      "Content-Type": "application/json",
+      Accept: "text/event-stream",
+      "anthropic-version": ANTHROPIC_VERSION,
+      ...this.attach === "authorization" ? { Authorization: `Bearer ${keyRead.key}` } : { "x-api-key": keyRead.key }
+    };
+    let response;
+    try {
+      response = await this.transport({
+        url: `${this.baseUrl}/v1/messages`,
+        proxyUrl: governed.proxyUrl,
+        method: "POST",
+        headers,
+        body,
+        ...this.timeoutMs !== void 0 ? { timeoutMs: this.timeoutMs } : {},
+        ...opts?.signal ? { signal: opts.signal } : {}
+      });
+    } catch (err) {
+      yield {
+        type: "error",
+        message: `anthropic request failed: ${capErrorText(String(err?.message ?? err))}`
+      };
+      return;
+    }
+    if (response.status < 200 || response.status >= 300) {
+      let errBody = "";
+      try {
+        for await (const chunk of response.chunks) {
+          errBody += chunk.toString("utf8");
+          if (errBody.length > 4096) break;
+        }
+      } catch {
+      }
+      let detail = "";
+      try {
+        const parsed = JSON.parse(errBody);
+        if (parsed?.error?.type || parsed?.error?.message) {
+          detail = ` (${parsed.error?.type ?? "error"}): ${capErrorText(parsed.error?.message ?? "")}`;
+        }
+      } catch {
+      }
+      yield { type: "error", message: `anthropic API error \u2014 HTTP ${response.status}${detail}` };
+      return;
+    }
+    const sse = new SseParser();
+    let text = "";
+    let inputTokens;
+    let outputTokens;
+    let sawMessageStop = false;
+    try {
+      for await (const chunk of response.chunks) {
+        for (const event of sse.feed(chunk.toString("utf8"))) {
+          if (event.event === "ping" || event.data === "") continue;
+          let payload;
+          try {
+            payload = JSON.parse(event.data);
+          } catch {
+            yield { type: "error", message: "anthropic stream failed: malformed SSE data (not JSON)" };
+            return;
+          }
+          const p = payload;
+          const kind = p?.type ?? event.event;
+          if (kind === "error") {
+            const t = p?.error?.type ?? "error";
+            const m = capErrorText(p?.error?.message ?? "");
+            yield { type: "error", message: `anthropic API error (${t})${m ? `: ${m}` : ""}` };
+            return;
+          }
+          if (kind === "message_start") {
+            const it = p?.message?.usage?.input_tokens;
+            if (typeof it === "number" && Number.isFinite(it)) inputTokens = it;
+            continue;
+          }
+          if (kind === "content_block_delta") {
+            if (p?.delta?.type === "text_delta" && typeof p.delta.text === "string") {
+              text += p.delta.text;
+              yield { type: "delta", text: p.delta.text };
+            }
+            continue;
+          }
+          if (kind === "message_delta") {
+            const ot = p?.usage?.output_tokens;
+            if (typeof ot === "number" && Number.isFinite(ot)) outputTokens = ot;
+            continue;
+          }
+          if (kind === "message_stop") {
+            sawMessageStop = true;
+            const usage = inputTokens !== void 0 || outputTokens !== void 0 ? {
+              ...inputTokens !== void 0 ? { inputTokens } : {},
+              ...outputTokens !== void 0 ? { outputTokens } : {}
+            } : void 0;
+            yield { type: "done", text, ...usage ? { usage } : {} };
+            return;
+          }
+        }
+      }
+    } catch (err) {
+      yield {
+        type: "error",
+        message: `anthropic stream failed: ${capErrorText(String(err?.message ?? err))}`
+      };
+      return;
+    }
+    if (!sawMessageStop) {
+      yield {
+        type: "error",
+        message: "anthropic stream ended without message_stop (truncated response)"
+      };
+    }
+  }
+};
+
 // ../spikes/p0-model-gateway/governed-agentic-run.ts
 import { execFile as execFile2 } from "node:child_process";
 import { promisify as promisify2 } from "node:util";
-import { join as join13 } from "node:path";
+import { join as join14 } from "node:path";
 import { existsSync as existsSync6, mkdirSync as mkdirSync6, writeFileSync as writeFileSync3 } from "node:fs";
 import { createPublicKey as createPublicKey3 } from "node:crypto";
 
 // ../spikes/p0-supervisor/bundle.ts
-import { cpSync as cpSync2, mkdirSync as mkdirSync5, readFileSync as readFileSync6, writeFileSync as writeFileSync2 } from "node:fs";
+import { cpSync as cpSync2, mkdirSync as mkdirSync5, readFileSync as readFileSync7, writeFileSync as writeFileSync2 } from "node:fs";
 import * as path5 from "node:path";
 import {
-  createHash as createHash6,
+  createHash as createHash7,
   createPrivateKey,
   createPublicKey as createPublicKey2
 } from "node:crypto";
 
 // ../spikes/p0-verifier/verifier.ts
-import { cpSync, existsSync as existsSync5, readdirSync as readdirSync2, rmSync as rmSync3, statSync as statSync2 } from "node:fs";
+import { cpSync, existsSync as existsSync5, readdirSync as readdirSync2, rmSync as rmSync3, statSync as statSync3 } from "node:fs";
 import * as path4 from "node:path";
 
 // ../spikes/p0-sandbox/docker-runtime.ts
@@ -7162,15 +8223,15 @@ function mirrorDir(src, dest, exclude) {
   for (const entry of srcEntries) {
     const srcPath = path4.join(src, entry);
     const destPath = path4.join(dest, entry);
-    const st = statSync2(srcPath);
+    const st = statSync3(srcPath);
     if (st.isDirectory()) {
-      if (existsSync5(destPath) && !statSync2(destPath).isDirectory()) {
+      if (existsSync5(destPath) && !statSync3(destPath).isDirectory()) {
         rmSync3(destPath, { force: true });
       }
       cpSync(srcPath, destPath, { recursive: true, force: true });
       mirrorDir(srcPath, destPath, /* @__PURE__ */ new Set());
     } else {
-      if (existsSync5(destPath) && statSync2(destPath).isDirectory()) {
+      if (existsSync5(destPath) && statSync3(destPath).isDirectory()) {
         rmSync3(destPath, { recursive: true, force: true });
       }
       cpSync(srcPath, destPath, { force: true });
@@ -7605,7 +8666,7 @@ async function* runAgenticBuild(req, opts = {}) {
 // ../spikes/p0-supervisor/bundle.ts
 function keyIdForPublicKey2(publicKey) {
   const spki = publicKey.export({ type: "spki", format: "der" });
-  return createHash6("sha256").update(spki).digest("hex").slice(0, 16);
+  return createHash7("sha256").update(spki).digest("hex").slice(0, 16);
 }
 function resolveVerifierKeypair(verifierKeyPath2) {
   if (verifierKeyPath2 === void 0) {
@@ -7613,7 +8674,7 @@ function resolveVerifierKeypair(verifierKeyPath2) {
   }
   let privateKey;
   try {
-    privateKey = createPrivateKey(readFileSync6(verifierKeyPath2, "utf8"));
+    privateKey = createPrivateKey(readFileSync7(verifierKeyPath2, "utf8"));
   } catch (err) {
     throw new Error(
       `bundle: failed to load verifier private key from ${verifierKeyPath2}: ${err instanceof Error ? err.message : String(err)}`
@@ -7687,7 +8748,7 @@ function synthesizeErrorVerdict(tracePath, privateKey) {
 }
 
 // ../spikes/p0-sandbox/runtime-select.ts
-import { accessSync as accessSync2, statSync as statSync3, constants as fsConstants2 } from "node:fs";
+import { accessSync as accessSync2, statSync as statSync4, constants as fsConstants2 } from "node:fs";
 import { join as pathJoin2, delimiter as pathDelimiter2 } from "node:path";
 
 // ../spikes/p0-sandbox/firecracker-runtime.ts
@@ -7976,7 +9037,7 @@ function defaultHasBinary(name) {
   for (const dir of dirs) {
     const full = pathJoin2(dir, name);
     try {
-      const st = statSync3(full);
+      const st = statSync4(full);
       if (!st.isFile()) continue;
       accessSync2(full, fsConstants2.X_OK);
       return true;
@@ -8091,9 +9152,9 @@ async function runVerifyCheck(command, cwd, env, timeoutMs, signal) {
   }
 }
 function writeEphemeralVerifyPolicy(verifyCommand, runDir) {
-  const dir = join13(runDir, "verifier-policy");
+  const dir = join14(runDir, "verifier-policy");
   mkdirSync6(dir, { recursive: true });
-  const policyPath = join13(dir, "verify-policy.json");
+  const policyPath = join14(dir, "verify-policy.json");
   writeFileSync3(
     policyPath,
     JSON.stringify(
@@ -8156,12 +9217,12 @@ async function runGovernedAgenticBuild(opts) {
     runId = opts.existingRun.runId;
     tracePath = opts.existingRun.tracePath;
     sink = opts.sink ?? opts.existingRun.sink;
-    runDir = join13(tracePath, "..", "..");
+    runDir = join14(tracePath, "..", "..");
   } else {
     const created = createRun(opts.runsBaseDir);
     runId = created.runId;
     runDir = created.dir;
-    tracePath = join13(runSubdirPath(runDir, "trace"), "trace.jsonl");
+    tracePath = join14(runSubdirPath(runDir, "trace"), "trace.jsonl");
     sink = opts.sink ?? createTraceWriter(tracePath);
   }
   let lastTraceHash;
@@ -8487,18 +9548,18 @@ async function runGovernedAgenticBuild(opts) {
 // ../spikes/p0-model-gateway/governed-review-run.ts
 import { execFile as execFile3 } from "node:child_process";
 import { promisify as promisify3 } from "node:util";
-import { join as join15 } from "node:path";
+import { join as join16 } from "node:path";
 import { existsSync as existsSync8, mkdirSync as mkdirSync7, rmSync as rmSync4 } from "node:fs";
-import { createHash as createHash7, createPublicKey as createPublicKey4 } from "node:crypto";
+import { createHash as createHash8, createPublicKey as createPublicKey4 } from "node:crypto";
 
 // ../spikes/p0-model-gateway/verify-command.ts
-import { existsSync as existsSync7, readFileSync as readFileSync7, readdirSync as readdirSync3 } from "node:fs";
-import { join as join14 } from "node:path";
+import { existsSync as existsSync7, readFileSync as readFileSync8, readdirSync as readdirSync3 } from "node:fs";
+import { join as join15 } from "node:path";
 import { execFileSync as execFileSync2 } from "node:child_process";
 var VERIFY_OVERRIDE_PATH = ".glyphstudio/verify.json";
 var defaultVerifyResolverDeps = {
   fileExists: (p) => existsSync7(p),
-  readFile: (p) => readFileSync7(p, "utf8"),
+  readFile: (p) => readFileSync8(p, "utf8"),
   listDir: (dir) => {
     try {
       return readdirSync3(dir);
@@ -8529,7 +9590,7 @@ function asStringArray(v) {
   return void 0;
 }
 function readOverride(cwd, deps) {
-  const path6 = join14(cwd, VERIFY_OVERRIDE_PATH);
+  const path6 = join15(cwd, VERIFY_OVERRIDE_PATH);
   if (!deps.fileExists(path6)) return void 0;
   let raw;
   try {
@@ -8586,7 +9647,7 @@ function resolveVerifyCommand(cwd, deps = defaultVerifyResolverDeps) {
     return { command: override, label: override.join(" "), source: "override" };
   }
   const entries = deps.listDir(cwd);
-  const has = (name) => deps.fileExists(join14(cwd, name));
+  const has = (name) => deps.fileExists(join15(cwd, name));
   if (has("Package.swift")) {
     return { command: ["swift", "test"], label: "swift test", source: "swiftpm" };
   }
@@ -8614,7 +9675,7 @@ function resolveVerifyCommand(cwd, deps = defaultVerifyResolverDeps) {
   }
   if (has("package.json")) {
     try {
-      const pkg = JSON.parse(deps.readFile(join14(cwd, "package.json")));
+      const pkg = JSON.parse(deps.readFile(join15(cwd, "package.json")));
       if (pkg.scripts && typeof pkg.scripts.test === "string" && pkg.scripts.test.trim()) {
         return { command: ["npm", "test"], label: "npm test", source: "npm" };
       }
@@ -8854,16 +9915,16 @@ async function captureReviewDiff(cwd, scope, baseRef, byteCap) {
   const exactBytes = Buffer.from(text, "utf8");
   return {
     diff: text,
-    sha256: createHash7("sha256").update(exactBytes).digest("hex"),
+    sha256: createHash8("sha256").update(exactBytes).digest("hex"),
     bytes: exactBytes.byteLength,
     truncated,
     ...resolvedBase !== void 0 ? { baseRef: resolvedBase } : {}
   };
 }
 async function snapshotHeadTree(cwd, runDir) {
-  const dir = join15(runDir, "review-head-snapshot");
+  const dir = join16(runDir, "review-head-snapshot");
   mkdirSync7(dir, { recursive: true });
-  const tarPath = join15(runDir, "review-head-snapshot.tar");
+  const tarPath = join16(runDir, "review-head-snapshot.tar");
   await execFileAsync3("git", ["-C", cwd, "archive", "--format=tar", "-o", tarPath, "HEAD"]);
   await execFileAsync3("tar", ["-xf", tarPath, "-C", dir]);
   rmSync4(tarPath, { force: true });
@@ -8931,12 +9992,12 @@ async function runGovernedChangeReview(opts) {
     runId = opts.existingRun.runId;
     tracePath = opts.existingRun.tracePath;
     sink = opts.sink ?? opts.existingRun.sink;
-    runDir = join15(tracePath, "..", "..");
+    runDir = join16(tracePath, "..", "..");
   } else {
     const created = createRun(opts.runsBaseDir);
     runId = created.runId;
     runDir = created.dir;
-    tracePath = join15(runSubdirPath(runDir, "trace"), "trace.jsonl");
+    tracePath = join16(runSubdirPath(runDir, "trace"), "trace.jsonl");
     sink = opts.sink ?? createTraceWriter(tracePath);
   }
   let lastTraceHash;
@@ -9335,7 +10396,7 @@ async function runGovernedChangeReview(opts) {
 }
 
 // ../spikes/p0-model-gateway/governed-plan-run.ts
-import { join as join16 } from "node:path";
+import { join as join17 } from "node:path";
 
 // ../spikes/p0-model-gateway/plan-generation.ts
 function buildPlanPrompt(userPrompt) {
@@ -9519,12 +10580,12 @@ async function runGovernedPlanTurn(opts) {
     runId = opts.existingRun.runId;
     tracePath = opts.existingRun.tracePath;
     sink = opts.sink ?? opts.existingRun.sink;
-    runDir = join16(tracePath, "..", "..");
+    runDir = join17(tracePath, "..", "..");
   } else {
     const created = createRun(opts.runsBaseDir);
     runId = created.runId;
     runDir = created.dir;
-    tracePath = join16(runSubdirPath(runDir, "trace"), "trace.jsonl");
+    tracePath = join17(runSubdirPath(runDir, "trace"), "trace.jsonl");
     sink = opts.sink ?? createTraceWriter(tracePath);
   }
   const append = (type, payload, source) => {
@@ -9645,448 +10706,6 @@ async function runGovernedPlanTurn(opts) {
   };
 }
 
-// ../spikes/p0-supervisor/web-fetch.ts
-import { createHash as createHash8 } from "node:crypto";
-import { lookup as dnsLookup } from "node:dns/promises";
-import { request as httpRequest2 } from "node:http";
-import { request as httpsRequest } from "node:https";
-import { connect as netConnect2, isIP } from "node:net";
-import { connect as tlsConnect } from "node:tls";
-import { URL as URL2 } from "node:url";
-import { gunzipSync, inflateSync, brotliDecompressSync } from "node:zlib";
-var WEB_DEFAULT_MAX_FETCH_KB = 2048;
-var WEB_DEFAULT_MAX_CONTEXT_KB = 50;
-var WEB_DEFAULT_TIMEOUT_MS = 1e4;
-var WEB_DEFAULT_MAX_REDIRECTS = 5;
-var WEB_DEFAULT_IDLE_TIMEOUT_MS = 5e3;
-var WEB_DEFAULT_MAX_DECOMPRESSION_RATIO = 8;
-function marker(reason) {
-  return `[@Web: ${reason}]`;
-}
-function fail(originalUrl, reason, attemptedHost) {
-  return { ok: false, originalUrl, marker: marker(reason), reason, ...attemptedHost ? { attemptedHost } : {} };
-}
-function safeInt(value, fallback, min, max) {
-  if (!Number.isFinite(value) || value === void 0) return fallback;
-  return Math.max(min, Math.min(max, Math.floor(value)));
-}
-function prepareWebUrl(raw) {
-  let url;
-  try {
-    url = new URL2(String(raw || "").trim());
-  } catch {
-    return { error: marker("refused \u2014 not a valid URL"), reason: "refused \u2014 not a valid URL" };
-  }
-  if (url.protocol !== "http:" && url.protocol !== "https:") {
-    const scheme = url.protocol.replace(/:$/, "");
-    return { error: marker(`refused \u2014 unsupported scheme '${scheme}'`), reason: `refused \u2014 unsupported scheme '${scheme}'` };
-  }
-  if (url.username || url.password) {
-    return { error: marker("refused \u2014 credentials in URL not allowed"), reason: "refused \u2014 credentials in URL not allowed" };
-  }
-  url.hash = "";
-  const port = url.port ? Number(url.port) : url.protocol === "http:" ? 80 : 443;
-  if (port !== 80 && port !== 443) {
-    return { error: marker("refused \u2014 non-default port"), reason: "refused \u2014 non-default port" };
-  }
-  const host = url.hostname.replace(/\.$/, "").toLowerCase();
-  if (!host) {
-    return { error: marker("refused \u2014 not a valid URL"), reason: "refused \u2014 not a valid URL" };
-  }
-  url.hostname = host;
-  return { url, host, port };
-}
-function ipv4ToNumber(ip) {
-  const parts = ip.split(".");
-  if (parts.length !== 4) return void 0;
-  let n = 0;
-  for (const p of parts) {
-    const v = Number(p);
-    if (!Number.isInteger(v) || v < 0 || v > 255) return void 0;
-    n = (n << 8) + v;
-  }
-  return n >>> 0;
-}
-function inRange(n, base, bits) {
-  const b = ipv4ToNumber(base);
-  if (b === void 0) return false;
-  const mask2 = bits === 0 ? 0 : 4294967295 << 32 - bits >>> 0;
-  return (n & mask2) === (b & mask2);
-}
-function uint32ToDottedQuad(n) {
-  return `${n >>> 24 & 255}.${n >>> 16 & 255}.${n >>> 8 & 255}.${n & 255}`;
-}
-function normalizeIpLiteral(host) {
-  const h = host.replace(/^\[/, "").replace(/\]$/, "").toLowerCase();
-  if (/^0x[0-9a-f]+$/.test(h)) {
-    const n = Number.parseInt(h.slice(2), 16);
-    if (Number.isInteger(n) && n >= 0 && n <= 4294967295) return uint32ToDottedQuad(n);
-    return h;
-  }
-  if (/^0[0-7]+$/.test(h)) {
-    const n = Number.parseInt(h, 8);
-    if (Number.isInteger(n) && n >= 0 && n <= 4294967295) return uint32ToDottedQuad(n);
-    return h;
-  }
-  if (/^[1-9][0-9]*$/.test(h) || h === "0") {
-    const n = Number(h);
-    if (Number.isInteger(n) && n >= 0 && n <= 4294967295) return uint32ToDottedQuad(n);
-    return h;
-  }
-  if (/^0[0-7.]+$/.test(h) && h.includes(".")) {
-    const parts = h.split(".").map((p) => Number.parseInt(p || "0", 8));
-    if (parts.length === 4 && parts.every((p) => Number.isInteger(p) && p >= 0 && p <= 255)) {
-      return parts.join(".");
-    }
-  }
-  if (h.startsWith("::ffff:")) return h.slice("::ffff:".length);
-  return h;
-}
-function isPublicAddress(address) {
-  const ip = normalizeIpLiteral(address);
-  const family = isIP(ip);
-  if (family === 4) {
-    const n = ipv4ToNumber(ip);
-    if (n === void 0) return false;
-    const ranges = [
-      ["0.0.0.0", 8],
-      ["10.0.0.0", 8],
-      ["100.64.0.0", 10],
-      ["127.0.0.0", 8],
-      ["169.254.0.0", 16],
-      ["172.16.0.0", 12],
-      ["192.168.0.0", 16],
-      ["192.0.2.0", 24],
-      ["198.51.100.0", 24],
-      ["203.0.113.0", 24],
-      ["224.0.0.0", 4]
-    ];
-    return !ranges.some(([base, bits]) => inRange(n, base, bits));
-  }
-  if (family === 6) {
-    const h = ip.toLowerCase();
-    if (h === "::" || h === "::1") return false;
-    if (h.startsWith("fe80:") || h.startsWith("fe8") || h.startsWith("fe9") || h.startsWith("fea") || h.startsWith("feb")) return false;
-    if (h.startsWith("fc") || h.startsWith("fd")) return false;
-    if (h.startsWith("ff")) return false;
-    if (h.startsWith("2001:db8")) return false;
-    return true;
-  }
-  return false;
-}
-async function resolvePublic(host, lookup2) {
-  if (host === "localhost" || host.endsWith(".localhost")) return void 0;
-  const literal = normalizeIpLiteral(host);
-  if (isIP(literal)) return isPublicAddress(literal) ? literal : void 0;
-  const records = await lookup2(host, { all: true, verbatim: true });
-  const publicRecord = records.find((r) => isPublicAddress(r.address));
-  return publicRecord?.address;
-}
-function decodeBody(body, encoding) {
-  const enc = encoding.toLowerCase();
-  if (enc.includes("gzip")) return gunzipSync(body);
-  if (enc.includes("br")) return brotliDecompressSync(body);
-  if (enc.includes("deflate")) return inflateSync(body);
-  return body;
-}
-function resolveCharset(body, contentType, isHtml) {
-  const fromHeader = /charset\s*=\s*"?([\w:.+-]+)"?/i.exec(contentType)?.[1];
-  if (fromHeader) return fromHeader.trim().toLowerCase();
-  if (isHtml) {
-    const head = body.subarray(0, 1024).toString("latin1");
-    const meta = /<meta[^>]+charset\s*=\s*["']?\s*([\w:.+-]+)/i.exec(head)?.[1] ?? /<meta[^>]+content\s*=\s*["'][^"']*charset\s*=\s*([\w:.+-]+)/i.exec(head)?.[1];
-    if (meta) return meta.trim().toLowerCase();
-  }
-  return "utf-8";
-}
-function decodeCharset(body, charset) {
-  const cs = charset.replace(/[^a-z0-9]/g, "");
-  if (cs === "utf8" || cs === "utf" || cs === "") {
-    const text = body.toString("utf8");
-    if (Buffer.byteLength(text, "utf8") !== body.byteLength && text.includes("\uFFFD")) {
-      return void 0;
-    }
-    return text;
-  }
-  try {
-    return new TextDecoder(charset, { fatal: true }).decode(body);
-  } catch {
-    return void 0;
-  }
-}
-function extractText(body, contentType) {
-  const type = contentType.split(";")[0].trim().toLowerCase();
-  if (type && !type.startsWith("text/html") && !type.startsWith("text/plain") && !type.startsWith("text/markdown") && type !== "application/json" && !type.endsWith("+json")) {
-    return { unsupported: true, boilerplateStripped: false };
-  }
-  const isHtml = type.startsWith("text/html");
-  const charset = resolveCharset(body, contentType, isHtml);
-  const decoded = decodeCharset(body, charset);
-  if (decoded === void 0) {
-    return { unsupported: true, boilerplateStripped: false };
-  }
-  let raw = decoded;
-  if (type.startsWith("text/html")) {
-    raw = raw.replace(/<script\b[^>]*>[\s\S]*?<\/script>/gi, " ").replace(/<style\b[^>]*>[\s\S]*?<\/style>/gi, " ").replace(/<!--[\s\S]*?-->/g, " ").replace(/<[^>]+>/g, " ").replace(/&nbsp;/g, " ").replace(/&amp;/g, "&").replace(/&lt;/g, "<").replace(/&gt;/g, ">").replace(/&quot;/g, '"');
-    return { text: raw.replace(/\s+/g, " ").trim(), boilerplateStripped: true };
-  }
-  return { text: raw.trim(), boilerplateStripped: false };
-}
-function proxyPort(proxy) {
-  if (proxy.port) return Number(proxy.port);
-  return proxy.protocol === "https:" ? 443 : 80;
-}
-function authorityHost(host) {
-  return isIP(host) === 6 ? `[${host}]` : host;
-}
-function connectHttpsThroughProxy(proxy, target, resolvedAddress, timeoutMs, idleTimeoutMs, recordConnect) {
-  return new Promise((resolve5, reject) => {
-    const raw = netConnect2({
-      host: proxy.hostname,
-      port: proxyPort(proxy)
-    });
-    let settled = false;
-    let buffered = Buffer.alloc(0);
-    const targetAuthority = `${authorityHost(resolvedAddress)}:${Number(target.port || 443)}`;
-    const hostAuthority = `${target.hostname}:${Number(target.port || 443)}`;
-    recordConnect?.({ host: resolvedAddress, port: Number(target.port || 443), servername: target.hostname });
-    const fail2 = (err) => {
-      if (settled) return;
-      settled = true;
-      raw.destroy();
-      reject(err);
-    };
-    const timer = setTimeout(() => fail2(new Error(`timed out after ${Math.round(timeoutMs / 1e3)}s`)), timeoutMs);
-    if (typeof timer.unref === "function") {
-      timer.unref();
-    }
-    raw.on("connect", () => {
-      raw.write(
-        [
-          `CONNECT ${targetAuthority} HTTP/1.1`,
-          `Host: ${hostAuthority}`,
-          "User-Agent: GlyphStudio-WebContext/1",
-          "Connection: close",
-          "",
-          ""
-        ].join("\r\n")
-      );
-    });
-    raw.on("data", (chunk) => {
-      buffered = Buffer.concat([buffered, chunk]);
-      const headerEnd = buffered.indexOf("\r\n\r\n");
-      if (headerEnd === -1) return;
-      const header = buffered.subarray(0, headerEnd).toString("latin1");
-      const status = /^HTTP\/\d(?:\.\d)?\s+(\d{3})\b/i.exec(header)?.[1];
-      if (!status || Number(status) < 200 || Number(status) >= 300) {
-        fail2(new Error(`proxy CONNECT failed${status ? ` \u2014 HTTP ${status}` : ""}`));
-        return;
-      }
-      raw.removeAllListeners("data");
-      raw.removeAllListeners("error");
-      raw.removeAllListeners("timeout");
-      clearTimeout(timer);
-      const tls = tlsConnect({
-        socket: raw,
-        servername: target.hostname,
-        rejectUnauthorized: true
-      });
-      tls.once("secureConnect", () => {
-        if (settled) return;
-        settled = true;
-        resolve5(tls);
-      });
-      tls.once("error", (err) => {
-        if (/certificate|tls|ssl|self[- ]signed|unable to verify/i.test(String(err.message))) {
-          fail2(new Error("TLS validation failed"));
-        } else {
-          fail2(err);
-        }
-      });
-    });
-    raw.once("timeout", () => fail2(new Error(`timed out after ${Math.round(timeoutMs / 1e3)}s`)));
-    raw.once("error", fail2);
-    raw.setTimeout(Math.min(idleTimeoutMs, timeoutMs));
-  });
-}
-function runRequest(client, options, maxBytes, idleTimeoutMs) {
-  return new Promise((resolve5, reject) => {
-    const idleSecs = Math.round(idleTimeoutMs / 1e3);
-    const req = client(options, (res) => {
-      const chunks = [];
-      let bytes = 0;
-      const armIdle = () => {
-        if (typeof res.setTimeout === "function") {
-          res.setTimeout(
-            idleTimeoutMs,
-            () => req.destroy(new Error(`timed out after ${idleSecs}s`))
-          );
-        }
-      };
-      armIdle();
-      res.on("data", (chunk) => {
-        armIdle();
-        bytes += chunk.length;
-        if (bytes > maxBytes) {
-          req.destroy(new Error(`response exceeded maxFetchKB`));
-          return;
-        }
-        chunks.push(chunk);
-      });
-      res.on("end", () => resolve5({
-        statusCode: res.statusCode ?? 0,
-        headers: res.headers,
-        body: Buffer.concat(chunks),
-        bytesRead: bytes
-      }));
-    });
-    req.on("timeout", () => req.destroy(new Error(`timed out after ${Math.round(Number(options.timeout ?? 0) / 1e3)}s`)));
-    req.setTimeout(Math.min(idleTimeoutMs, Number(options.timeout ?? idleTimeoutMs)));
-    req.on("error", reject);
-    req.end();
-  });
-}
-function proxyRequest(proxy, target, resolvedAddress, o) {
-  const headers = {
-    Host: target.host,
-    Accept: "text/html,text/plain,text/markdown,application/json;q=0.9,*/*;q=0.1",
-    "Accept-Encoding": "gzip, deflate, br",
-    "User-Agent": "GlyphStudio-WebContext/1"
-  };
-  if (target.protocol === "https:") {
-    return connectHttpsThroughProxy(proxy, target, resolvedAddress, o.timeoutMs, o.idleTimeoutMs, o.recordConnect).then((tlsSocket) => runRequest(
-      httpsRequest,
-      {
-        protocol: "https:",
-        hostname: target.hostname,
-        port: Number(target.port || 443),
-        path: `${target.pathname}${target.search}`,
-        method: "GET",
-        headers,
-        timeout: o.timeoutMs,
-        createConnection: () => tlsSocket
-      },
-      o.maxBytes,
-      o.idleTimeoutMs
-    ));
-  }
-  o.recordConnect?.({ host: resolvedAddress, port: Number(target.port || 80), servername: target.hostname });
-  return runRequest(
-    httpRequest2,
-    {
-      protocol: "http:",
-      hostname: proxy.hostname,
-      port: proxyPort(proxy),
-      path: `http://${authorityHost(resolvedAddress)}:${Number(target.port || 80)}${target.pathname}${target.search}`,
-      method: "GET",
-      headers,
-      timeout: o.timeoutMs
-    },
-    o.maxBytes,
-    o.idleTimeoutMs
-  );
-}
-async function governedWebFetch(opts) {
-  const originalUrl = String(opts.url || "").trim();
-  const lookup2 = opts.lookup ?? dnsLookup;
-  const maxFetchBytes = safeInt(opts.maxFetchKB, WEB_DEFAULT_MAX_FETCH_KB, 1, 16384) * 1024;
-  const maxContextBytes = safeInt(opts.maxContextKB, WEB_DEFAULT_MAX_CONTEXT_KB, 1, 1024) * 1024;
-  const timeoutMs = safeInt(opts.timeoutMs, WEB_DEFAULT_TIMEOUT_MS, 100, 6e4);
-  const idleTimeoutMs = safeInt(opts.idleTimeoutMs, WEB_DEFAULT_IDLE_TIMEOUT_MS, 100, 6e4);
-  const totalTimeoutMs = safeInt(opts.totalTimeoutMs, timeoutMs, 100, 12e4);
-  const deadline = Date.now() + totalTimeoutMs;
-  const totalSecs = Math.round(totalTimeoutMs / 1e3);
-  const maxRedirects = safeInt(opts.maxRedirects, WEB_DEFAULT_MAX_REDIRECTS, 0, 10);
-  const proxy = new URL2(opts.proxyUrl);
-  let current = originalUrl;
-  for (let hop = 0; hop <= maxRedirects; hop++) {
-    if (Date.now() >= deadline) return fail(originalUrl, `fetch failed \u2014 timed out after ${totalSecs}s`);
-    const prepared = prepareWebUrl(current);
-    if ("error" in prepared) return { ok: false, originalUrl, marker: prepared.error, reason: prepared.reason };
-    const { url, host, port } = prepared;
-    let resolved;
-    try {
-      resolved = await resolvePublic(host, lookup2);
-    } catch (err) {
-      return fail(originalUrl, `fetch failed \u2014 ${String(err.message || "DNS failure")}`, host);
-    }
-    if (!resolved) return fail(originalUrl, "refused \u2014 non-public target", host);
-    const connectAddress = opts.rebindConnectTarget ? opts.rebindConnectTarget(resolved) : resolved;
-    if (!isPublicAddress(connectAddress)) return fail(originalUrl, "refused \u2014 non-public target", host);
-    const remaining = Math.max(100, deadline - Date.now());
-    const hopTimeout = Math.min(timeoutMs, remaining);
-    opts.onAttempt?.({ url: url.toString(), host, port });
-    let response;
-    try {
-      response = await proxyRequest(proxy, url, connectAddress, {
-        timeoutMs: hopTimeout,
-        idleTimeoutMs: Math.min(idleTimeoutMs, hopTimeout),
-        maxBytes: maxFetchBytes,
-        ...opts.recordConnect ? { recordConnect: opts.recordConnect } : {}
-      });
-    } catch (err) {
-      const msg = String(err.message ?? err);
-      if (Date.now() >= deadline) return fail(originalUrl, `fetch failed \u2014 timed out after ${totalSecs}s`, host);
-      if (/timed out/i.test(msg)) return fail(originalUrl, `fetch failed \u2014 ${msg}`, host);
-      return fail(originalUrl, `fetch failed \u2014 ${msg.slice(0, 120)}`, host);
-    }
-    if ([301, 302, 303, 307, 308].includes(response.statusCode)) {
-      const loc = response.headers.location;
-      const location = Array.isArray(loc) ? loc[0] : loc;
-      if (!location) return fail(originalUrl, `fetch failed \u2014 HTTP ${response.statusCode}`, host);
-      if (hop === maxRedirects) return fail(originalUrl, "fetch failed \u2014 too many redirects", host);
-      const next = new URL2(location, url);
-      if (url.protocol === "https:" && next.protocol === "http:") {
-        return fail(originalUrl, "refused \u2014 non-public target", host);
-      }
-      current = next.toString();
-      continue;
-    }
-    if (response.statusCode < 200 || response.statusCode >= 300) {
-      return fail(originalUrl, `fetch failed \u2014 HTTP ${response.statusCode}`, host);
-    }
-    const contentEncoding = String(response.headers["content-encoding"] ?? "");
-    let decoded;
-    try {
-      decoded = decodeBody(response.body, contentEncoding);
-    } catch {
-      return fail(originalUrl, "unsupported content type \u2014 encoded body");
-    }
-    const wasCompressed = /gzip|br|deflate/i.test(contentEncoding) && response.bytesRead > 0;
-    if (decoded.byteLength > maxFetchBytes * WEB_DEFAULT_MAX_DECOMPRESSION_RATIO) {
-      return fail(originalUrl, "fetch failed \u2014 response exceeded decompressed limit", host);
-    }
-    if (wasCompressed && decoded.byteLength > response.bytesRead * WEB_DEFAULT_MAX_DECOMPRESSION_RATIO) {
-      return fail(originalUrl, "fetch failed \u2014 response exceeded decompressed limit", host);
-    }
-    const contentType = String(response.headers["content-type"] ?? "text/plain");
-    const extracted = extractText(decoded, contentType);
-    if (extracted.unsupported) return fail(originalUrl, `unsupported content type \u2014 ${contentType.split(";")[0] || "unknown"}`, host);
-    const fullText = extracted.text ?? "";
-    if (!fullText.trim()) return fail(originalUrl, `no readable content at ${url.toString()}`, host);
-    const fullBytes = Buffer.byteLength(fullText, "utf8");
-    const truncated = fullBytes > maxContextBytes;
-    const text = truncated ? `${Buffer.from(fullText).subarray(0, maxContextBytes).toString("utf8")}
-... [truncated]` : fullText;
-    const sha256 = createHash8("sha256").update(fullText, "utf8").digest("hex");
-    opts.onAttempt?.({ url: url.toString(), host, port, contentSha256: sha256 });
-    return {
-      ok: true,
-      originalUrl,
-      finalUrl: url.toString(),
-      contentType,
-      text,
-      fullText,
-      sha256,
-      bytesRead: response.bytesRead,
-      extractedBytes: fullBytes,
-      truncated,
-      boilerplateStripped: extracted.boilerplateStripped
-    };
-  }
-  return fail(originalUrl, "fetch failed \u2014 too many redirects");
-}
-
 // ../spikes/p0-supervisor/bridge-server.ts
 var APPROVED_ISOLATION_RUNTIMES = [
   "docker",
@@ -10154,7 +10773,7 @@ function selfHashCheck(selfPath, pinnedSha) {
   }
   let actual;
   try {
-    actual = createHash9("sha256").update(readFileSync8(selfPath)).digest("hex");
+    actual = createHash9("sha256").update(readFileSync9(selfPath)).digest("hex");
   } catch (err) {
     return {
       ok: false,
@@ -10287,7 +10906,7 @@ function captureCodexBinaryIdentity(codexPath) {
   const identity = { path: codexPath };
   let sizeBytes;
   try {
-    const st = statSync4(codexPath);
+    const st = statSync5(codexPath);
     sizeBytes = st.size;
     identity.sizeBytes = st.size;
     identity.mtimeMs = st.mtimeMs;
@@ -10295,7 +10914,7 @@ function captureCodexBinaryIdentity(codexPath) {
   }
   if (sizeBytes === void 0 || sizeBytes <= CODEX_HASH_CAP_BYTES) {
     try {
-      const hash = createHash9("sha256").update(readFileSync8(codexPath)).digest("hex");
+      const hash = createHash9("sha256").update(readFileSync9(codexPath)).digest("hex");
       identity.sha256 = hash;
     } catch {
     }
@@ -11326,7 +11945,7 @@ var BridgeServer = class {
     const lifecycle = new RunLifecycle(created.state);
     this.remoteTracePaths.set(
       created.runId,
-      join17(runSubdirPath(created.dir, "trace"), "trace.jsonl")
+      join18(runSubdirPath(created.dir, "trace"), "trace.jsonl")
     );
     const namesApprovedRuntime = isApprovedIsolationRuntime(request.runtimeProfile);
     const runtimeIsolated = false;
@@ -11610,7 +12229,9 @@ var BridgeServer = class {
       OLLAMA_MODEL_LIST_CAP
     );
     const ollamaInfo = probe.ok ? { id: "ollama", status: "ok", kind: "local", models: probe.models } : { id: "ollama", status: "unavailable", kind: "local", detail: probe.detail };
-    const result = { backends: [codexInfo, ollamaInfo] };
+    const anthropicProbe = probeAnthropicKeyFile(this.chat?.anthropic?.keyFile);
+    const anthropicInfo = anthropicProbe.ok ? { id: "anthropic", status: "ok", kind: "frontier", detail: anthropicProbe.detail } : { id: "anthropic", status: "unavailable", kind: "frontier", detail: anthropicProbe.detail };
+    const result = { backends: [codexInfo, ollamaInfo, anthropicInfo] };
     this.emit(this.successResponse(req.id, result));
   }
   /**
@@ -11655,7 +12276,7 @@ var BridgeServer = class {
       return;
     }
     const run2 = this.runs.get(governed.runId);
-    const tracePath = run2?.created?.dir ? join17(runSubdirPath(run2.created.dir, "trace"), "trace.jsonl") : void 0;
+    const tracePath = run2?.created?.dir ? join18(runSubdirPath(run2.created.dir, "trace"), "trace.jsonl") : void 0;
     const sink = tracePath ? createTraceWriter(tracePath) : void 0;
     const seen = /* @__PURE__ */ new Set();
     const recordAttempt = (attempt) => {
@@ -11897,7 +12518,7 @@ var BridgeServer = class {
     if (params.pendingApproval === true) {
       const approvalId = `apr-${runId}`;
       const pendingRun = createRun(this.agentic?.runsBaseDir ?? this.runsBaseDir);
-      const pendingTracePath = join17(runSubdirPath(pendingRun.dir, "trace"), "trace.jsonl");
+      const pendingTracePath = join18(runSubdirPath(pendingRun.dir, "trace"), "trace.jsonl");
       this.remoteTracePaths.set(runId, pendingTracePath);
       this.pendingBuilds.set(approvalId, {
         approvalId,
@@ -11935,7 +12556,7 @@ var BridgeServer = class {
     const abort = new AbortController();
     try {
       const buildRun = existing ? { runId, dir: existing.runDir, state: "created" } : createRun(this.agentic?.runsBaseDir ?? this.runsBaseDir);
-      const tracePath = existing ? existing.tracePath : join17(runSubdirPath(buildRun.dir, "trace"), "trace.jsonl");
+      const tracePath = existing ? existing.tracePath : join18(runSubdirPath(buildRun.dir, "trace"), "trace.jsonl");
       const sink = this.remoteTraceWriters.get(runId) ?? createTraceWriter(tracePath);
       this.remoteTraceWriters.set(runId, sink);
       this.remoteTracePaths.set(runId, tracePath);
@@ -12185,7 +12806,7 @@ var BridgeServer = class {
     try {
       const created = createRun(this.review?.runsBaseDir ?? this.runsBaseDir);
       const reviewRun = { runId, dir: created.dir, state: created.state };
-      const tracePath = join17(runSubdirPath(reviewRun.dir, "trace"), "trace.jsonl");
+      const tracePath = join18(runSubdirPath(reviewRun.dir, "trace"), "trace.jsonl");
       const sink = createTraceWriter(tracePath);
       const reviewLifecycle = new RunLifecycle(reviewRun.state);
       const reviewServerRun = {
@@ -12376,7 +12997,7 @@ var BridgeServer = class {
     try {
       const created = createRun(this.plan?.runsBaseDir ?? this.runsBaseDir);
       const planRun = { runId, dir: created.dir, state: created.state };
-      const tracePath = join17(runSubdirPath(planRun.dir, "trace"), "trace.jsonl");
+      const tracePath = join18(runSubdirPath(planRun.dir, "trace"), "trace.jsonl");
       const sink = createTraceWriter(tracePath);
       this.remoteTraceWriters.set(runId, sink);
       this.remoteTracePaths.set(runId, tracePath);
@@ -12667,7 +13288,7 @@ var BridgeServer = class {
   canonicalDir(requested) {
     try {
       const real = realpathSync(resolve4(requested));
-      if (!statSync4(real).isDirectory()) return void 0;
+      if (!statSync5(real).isDirectory()) return void 0;
       return real;
     } catch {
       return void 0;
@@ -13164,7 +13785,7 @@ var BridgeServer = class {
     let tracePath = this.remoteTracePaths.get(runId);
     if (!tracePath) {
       const created = createRun(this.agentic?.runsBaseDir ?? this.runsBaseDir);
-      tracePath = join17(runSubdirPath(created.dir, "trace"), "trace.jsonl");
+      tracePath = join18(runSubdirPath(created.dir, "trace"), "trace.jsonl");
       this.remoteTracePaths.set(runId, tracePath);
     }
     const writer = createTraceWriter(tracePath);
@@ -13341,10 +13962,10 @@ var BridgeServer = class {
       }
     } else {
       const run3 = this.runs.get(runId);
-      let tracePath = this.remoteTracePaths.get(runId) ?? (run3 ? join17(runSubdirPath(run3.created.dir, "trace"), "trace.jsonl") : void 0);
+      let tracePath = this.remoteTracePaths.get(runId) ?? (run3 ? join18(runSubdirPath(run3.created.dir, "trace"), "trace.jsonl") : void 0);
       if (tracePath === void 0 && this.runsBaseDir !== void 0) {
         if (/^[A-Za-z0-9-]+$/.test(runId)) {
-          const candidate = join17(this.runsBaseDir, runId, "trace", "trace.jsonl");
+          const candidate = join18(this.runsBaseDir, runId, "trace", "trace.jsonl");
           if (existsSync9(candidate)) tracePath = candidate;
         }
       }
@@ -13796,7 +14417,7 @@ var BridgeServer = class {
       }
       const runId = governed.runId;
       const run2 = this.runs.get(runId);
-      const tracePath = run2?.created?.dir ? join17(runSubdirPath(run2.created.dir, "trace"), "trace.jsonl") : void 0;
+      const tracePath = run2?.created?.dir ? join18(runSubdirPath(run2.created.dir, "trace"), "trace.jsonl") : void 0;
       if (!run2 || !tracePath) {
         respond({
           status: "error",
@@ -14077,7 +14698,15 @@ var BridgeServer = class {
       const ollama = new OllamaChatBackend(
         this.chat?.ollamaHost ? { host: this.chat.ollamaHost } : {}
       );
-      this.chatGateway = new ModelGateway({ trace }).register(ollama).register(backend);
+      const anthropicCfg = this.chat?.anthropic;
+      const anthropic2 = new AnthropicChatBackend({
+        ...anthropicCfg?.baseUrl ? { baseUrl: anthropicCfg.baseUrl } : {},
+        ...anthropicCfg?.attach ? { attach: anthropicCfg.attach } : {},
+        ...anthropicCfg?.model ? { model: anthropicCfg.model } : {},
+        ...anthropicCfg?.keyFile ? { keyFile: anthropicCfg.keyFile } : {},
+        ...anthropicCfg?.transport ? { transport: anthropicCfg.transport } : {}
+      });
+      this.chatGateway = new ModelGateway({ trace }).register(ollama).register(anthropic2).register(backend);
     }
     return this.chatGateway;
   }
@@ -14176,6 +14805,21 @@ if (verifierRuntimeRaw && !verifierRuntime) {
 `
   );
 }
+var anthropicBaseUrl = process.env.GLYPHSTUDIO_CHAT_ANTHROPIC_BASE_URL?.trim();
+var anthropicModel = process.env.GLYPHSTUDIO_CHAT_ANTHROPIC_MODEL?.trim();
+var anthropicAttachRaw = process.env.GLYPHSTUDIO_CHAT_ANTHROPIC_ATTACH?.trim();
+var anthropicAttach = anthropicAttachRaw === "x-api-key" || anthropicAttachRaw === "authorization" ? anthropicAttachRaw : void 0;
+if (anthropicAttachRaw && !anthropicAttach) {
+  process.stderr.write(
+    `[bridge-server-cli] ignoring unknown GLYPHSTUDIO_CHAT_ANTHROPIC_ATTACH=${JSON.stringify(anthropicAttachRaw)} (expected x-api-key|authorization); using the default 'x-api-key'.
+`
+  );
+}
+var anthropic = {
+  ...anthropicBaseUrl ? { baseUrl: anthropicBaseUrl } : {},
+  ...anthropicAttach ? { attach: anthropicAttach } : {},
+  ...anthropicModel ? { model: anthropicModel } : {}
+};
 var agentic = {
   ...verifierPrivateKey ? { verifierPrivateKey } : {},
   ...verifierRuntime ? { verifierRuntime } : {}
@@ -14184,6 +14828,10 @@ var server = serveStdio(process, {
   ...supervisorVersion ? { supervisorVersion } : {},
   ...runsBaseDir ? { runsBaseDir } : {},
   ...Object.keys(agentic).length > 0 ? { agentic } : {},
+  // BYO ANTHROPIC backend config (only the chat.anthropic field is populated;
+  // ChatGatewayConfig stays otherwise default — backend/env/ollamaHost are
+  // test-only seams the production CLI never sets).
+  ...Object.keys(anthropic).length > 0 ? { chat: { anthropic } } : {},
   // THE REAL CHANGE-REVIEW RUNNER (#7 integration slice): bind `review/start`
   // to the governed review runner via the production adapter, configured from
   // the SAME knobs as the build path (codex resolved on PATH inside the

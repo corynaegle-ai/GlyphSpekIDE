@@ -713,12 +713,14 @@
           "enum": [
             "codex",
             "ollama",
+            "anthropic",
             "auto"
           ],
           "default": "codex",
           "enumDescriptions": [
             "Frontier: the Codex CLI on your own ChatGPT subscription. Governed + metadata-traced through the supervisor; codex authenticates from its own store (no credential ever crosses the bridge) and picks its own model unless glyphstudio.chat.model overrides it.",
             "Local \u2014 sovereign: an on-device Ollama model over loopback only. Nothing leaves your machine for the model call; still routed + traced through the supervisor.",
+            "Frontier: the Anthropic Messages API on your own (BYO) API key. The key is NEVER a setting \u2014 it lives only in ~/.glyphstudio/anthropic/api-key (chmod 600), read by the supervisor per turn; the API call egresses through the governed session proxy (observed + policy-bound). glyphstudio.chat.anthropic.* configures baseUrl/attach/model (Vertex-/company-gateway-ready).",
             "Auto \u2014 the explainable cost router decides per turn: cheap/small tasks (commit message, terminal Cmd-K, small prompts) and over-budget sessions go local (ollama); hard reasoning goes frontier (codex); a sensitive workspace ALWAYS stays local (fail-closed \u2014 never silently frontier). Every decision logs a human-readable reason + an approximate (\u2248) token estimate. See docs/model-routing.md."
           ],
           "description": "The chat gateway backend every governed AI turn rides (chat panel, inline edit, terminal Cmd-K, AI commit message). Set via 'GlyphStudio: Select Chat Model' (which probes what is actually reachable) or here directly. 'auto' enables the explainable cost router (cheap/sensitive \u2192 local, hard reasoning \u2192 frontier; every decision carries a visible reason). An unknown value falls back to codex \u2014 with an honest note on the surface's output channel, never silently."
@@ -744,7 +746,33 @@
         "glyphstudio.chat.model": {
           "type": "string",
           "default": "",
-          "description": "Model override for the selected chat backend; empty = the backend's default (codex picks its own model; ollama uses the supervisor's default, qwen2.5-coder:7b). For ollama, use an installed model name as listed by 'GlyphStudio: Select Chat Model'."
+          "description": "Model override for the selected chat backend; empty = the backend's default (codex picks its own model; ollama uses the supervisor's default, qwen2.5-coder:7b; anthropic uses glyphstudio.chat.anthropic.model or the supervisor default). For ollama, use an installed model name as listed by 'GlyphStudio: Select Chat Model'."
+        },
+        "glyphstudio.chat.anthropic.baseUrl": {
+          "type": "string",
+          "default": "",
+          "scope": "machine",
+          "description": "API origin for the 'anthropic' chat backend; empty = https://api.anthropic.com. Point this at a company gateway (e.g. a Vertex-fronting proxy) to re-home the backend without code changes. NON-SECRET configuration only: the API key is NEVER a setting — it lives at ~/.glyphstudio/anthropic/api-key (chmod 600), read by the supervisor per turn. Machine-scoped so a workspace cannot redirect your API traffic."
+        },
+        "glyphstudio.chat.anthropic.model": {
+          "type": "string",
+          "default": "",
+          "scope": "machine",
+          "description": "Default model for the 'anthropic' chat backend; empty = the supervisor's default (claude-sonnet-4-6). A per-turn glyphstudio.chat.model override still wins. The API key is NEVER a setting — it lives at ~/.glyphstudio/anthropic/api-key (chmod 600)."
+        },
+        "glyphstudio.chat.anthropic.attach": {
+          "type": "string",
+          "enum": [
+            "x-api-key",
+            "authorization"
+          ],
+          "default": "x-api-key",
+          "scope": "machine",
+          "enumDescriptions": [
+            "Anthropic-native: the key file's value is sent as the x-api-key header (the api.anthropic.com contract).",
+            "Bearer: the key file's value is sent as 'Authorization: Bearer <token>' — for an OAuth/AD-fronted company gateway."
+          ],
+          "description": "How the credential attaches to an 'anthropic' backend request. The credential itself is NEVER a setting — it lives at ~/.glyphstudio/anthropic/api-key (chmod 600), read by the supervisor per turn. Machine-scoped."
         },
         "glyphstudio.chat.maxAttachmentKB": {
           "type": "number",

@@ -674,6 +674,34 @@ function resolveVerifierRuntime() {
     return raw === 'docker' || raw === 'firecracker' || raw === 'off' ? raw : 'auto';
 }
 /**
+ * Read the `glyphstudio.chat.anthropic.*` settings (BYO Anthropic chat backend —
+ * Vertex-gateway-ready). NON-SECRET knobs only: baseUrl (empty ⇒ supervisor default
+ * https://api.anthropic.com), attach mode ('x-api-key' | 'authorization'; an unknown
+ * value degrades to undefined so the supervisor default applies — the supervisor
+ * independently re-validates), and a default model override. The API KEY is
+ * deliberately NOT a setting — it lives ONLY in the supervisor-read on-disk key file
+ * (~/.glyphstudio/anthropic/api-key, chmod 600). Returns undefined when nothing is
+ * configured so buildBridgeEnv sets no env vars at all. Guarded for stub hosts.
+ */
+function resolveChatAnthropicSettings() {
+    if (typeof vscode.workspace.getConfiguration !== 'function')
+        return undefined;
+    const cfg = vscode.workspace.getConfiguration('glyphstudio');
+    const baseUrl = cfg.get('chat.anthropic.baseUrl', '').trim();
+    const model = cfg.get('chat.anthropic.model', '').trim();
+    const attachRaw = cfg.get('chat.anthropic.attach', 'x-api-key');
+    // only a NON-DEFAULT, valid attach value needs to travel (the supervisor's own
+    // default is 'x-api-key'); unknown values degrade honestly to the default.
+    const attach = attachRaw === 'authorization' ? 'authorization' : undefined;
+    if (!baseUrl && !model && !attach)
+        return undefined;
+    return {
+        ...(baseUrl ? { baseUrl } : {}),
+        ...(attach ? { attach } : {}),
+        ...(model ? { model } : {}),
+    };
+}
+/**
  * Read the GlyphStudio icon symbol sprite (media/glyphstudio-icons.svg) for inline
  * injection into a webview body (docs/assets/ICON-USAGE.md). The sprite is a
  * static, first-party product asset — never untrusted input — so inlining it is
@@ -5968,12 +5996,17 @@ function buildNativeChatSessionFactory(context, output) {
             // MULTI-ROOT: bind every workspace folder too, so chat retrieves can name any
             // of them (the legacy workspaceRoot stays folder 0 for older supervisors).
             const workspaceRoots = liveIndexWorkspaceRoots();
+            // BYO ANTHROPIC knobs (glyphstudio.chat.anthropic.*) ride the session env to
+            // the supervisor (GLYPHSTUDIO_CHAT_ANTHROPIC_*). Non-secret config only —
+            // the API key is never a setting and never crosses this boundary.
+            const chatAnthropic = resolveChatAnthropicSettings();
             return (0, supervisorBridgeRunner_1.openChatSession)({
                 bridgeServerPath: resolveBundledBridgeServerPath(context),
                 extensionVersion: resolveExtensionVersion(context),
                 runsBase: resolveRunsBase(),
                 ...(workspaceRoot ? { workspaceRoot } : {}),
                 ...(workspaceRoots.length > 0 ? { workspaceRoots } : {}),
+                ...(chatAnthropic ? { chatAnthropic } : {}),
                 output,
             });
         },
