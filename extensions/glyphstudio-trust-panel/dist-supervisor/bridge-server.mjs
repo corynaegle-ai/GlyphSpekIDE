@@ -5723,8 +5723,50 @@ import { join as join9 } from "node:path";
 var MCP_CONFIG_RELATIVE_PATH = ".glyphstudio/mcp.json";
 var TRANSPORT_ISH_KEYS = ["url", "serverUrl", "transport", "type", "headers"];
 var KNOWN_ENTRY_KEYS = ["command", "args", "env"];
+var KNOWN_HTTP_ENTRY_KEYS = ["url", "headers"];
 function isPlainObject3(v) {
   return typeof v === "object" && v !== null && !Array.isArray(v);
+}
+function loadHttpEntry(name, raw) {
+  const rawUrl = raw.url;
+  if (typeof rawUrl !== "string" || rawUrl.trim().length === 0) {
+    return { name, ok: false, reason: '"url" must be a non-empty string' };
+  }
+  let parsed;
+  try {
+    parsed = new URL(rawUrl.trim());
+  } catch {
+    return { name, ok: false, reason: `"url" is not a parseable URL \u2014 url entries use { url, headers } (Streamable HTTP)` };
+  }
+  if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
+    return {
+      name,
+      ok: false,
+      reason: `"url" scheme '${parsed.protocol}' is not supported \u2014 url entries are MCP Streamable HTTP servers (http:/https: only)`
+    };
+  }
+  let headers = {};
+  if (raw.headers !== void 0) {
+    if (!isPlainObject3(raw.headers)) {
+      return { name, ok: false, reason: '"headers" must be an object of string values' };
+    }
+    for (const [k, v] of Object.entries(raw.headers)) {
+      if (typeof v !== "string") {
+        return {
+          name,
+          ok: false,
+          reason: `"headers.${k}" is not a string \u2014 header values are LITERAL strings only`
+        };
+      }
+      headers[k] = v;
+    }
+  }
+  const ignoredKeys = Object.keys(raw).filter((k) => !KNOWN_HTTP_ENTRY_KEYS.includes(k));
+  return {
+    name,
+    ok: true,
+    spec: { kind: "http", name, url: rawUrl.trim(), headers, ignoredKeys }
+  };
 }
 function loadEntry(name, raw) {
   if (!isPlainObject3(raw)) {
@@ -5733,11 +5775,14 @@ function loadEntry(name, raw) {
   const command = raw.command;
   const hasCommand = typeof command === "string" && command.trim().length > 0;
   const transportIsh = TRANSPORT_ISH_KEYS.filter((k) => raw[k] !== void 0);
+  if (!hasCommand && raw.url !== void 0) {
+    return loadHttpEntry(name, raw);
+  }
   if (!hasCommand && transportIsh.length > 0) {
     return {
       name,
       ok: false,
-      reason: `unsupported transport (entry carries ${transportIsh.join(", ")}) \u2014 v1 brokers stdio servers only (command + args + env)`
+      reason: `unsupported transport (entry carries ${transportIsh.join(", ")}) \u2014 stdio entries use { command, args, env }; url entries use { url, headers } (Streamable HTTP)`
     };
   }
   if (!hasCommand) {
@@ -5770,7 +5815,7 @@ function loadEntry(name, raw) {
   return {
     name,
     ok: true,
-    spec: { name, command: command.trim(), args, env, ignoredKeys }
+    spec: { kind: "stdio", name, command: command.trim(), args, env, ignoredKeys }
   };
 }
 function loadMcpConfig(workspaceRoot) {
@@ -5845,6 +5890,66 @@ function buildMcpSpawnEnv(configEnv, baseEnv = process.env) {
 }
 function utf8Bytes(s) {
   return Buffer.byteLength(s, "utf8");
+}
+function capToolListing(rawToolsValue) {
+  const rawTools = Array.isArray(rawToolsValue) ? rawToolsValue : [];
+  const tools = [];
+  let dropped = 0;
+  for (const raw of rawTools) {
+    if (typeof raw !== "object" || raw === null) {
+      dropped += 1;
+      continue;
+    }
+    const t = raw;
+    const name = typeof t.name === "string" ? t.name : "";
+    if (name.length === 0 || name.length > MAX_MCP_TOOL_NAME_CHARS) {
+      dropped += 1;
+      continue;
+    }
+    if (tools.length >= MAX_MCP_TOOLS_PER_SERVER) {
+      dropped += 1;
+      continue;
+    }
+    const info = { name };
+    if (typeof t.description === "string") info.description = t.description;
+    if (typeof t.inputSchema === "object" && t.inputSchema !== null) {
+      try {
+        info.inputSchemaJson = JSON.stringify(t.inputSchema);
+      } catch {
+      }
+    }
+    tools.push(info);
+  }
+  return { tools, droppedTools: dropped };
+}
+function mapCallResult(result) {
+  const r = typeof result === "object" && result !== null ? result : {};
+  const content = Array.isArray(r.content) ? r.content : [];
+  let resultJson;
+  try {
+    resultJson = JSON.stringify(content);
+  } catch (err) {
+    return {
+      status: "error",
+      reason: `tool result is not JSON-serializable: ${String(err?.message ?? err)}`
+    };
+  }
+  const bytes = utf8Bytes(resultJson);
+  if (bytes > MAX_MCP_RESULT_JSON_BYTES) {
+    return {
+      status: "error",
+      reason: `tool result exceeds the ${MAX_MCP_RESULT_JSON_BYTES}-byte cap (${bytes} bytes) \u2014 refusing to truncate silently`
+    };
+  }
+  if (r.isError === true) {
+    const firstText = content.map((c) => typeof c === "object" && c !== null ? c.text : void 0).find((t) => typeof t === "string");
+    return {
+      status: "error",
+      resultJson,
+      reason: `tool reported an error${firstText ? `: ${firstText.slice(0, 200)}` : ""}`
+    };
+  }
+  return { status: "ok", resultJson };
 }
 var McpStdioClient = class {
   spec;
@@ -6123,35 +6228,7 @@ var McpStdioClient = class {
   async listTools() {
     await this.ensureStarted();
     const result = await this.request("tools/list", {}, this.initTimeoutMs);
-    const rawTools = Array.isArray(result?.tools) ? result.tools : [];
-    const tools = [];
-    let dropped = 0;
-    for (const raw of rawTools) {
-      if (typeof raw !== "object" || raw === null) {
-        dropped += 1;
-        continue;
-      }
-      const t = raw;
-      const name = typeof t.name === "string" ? t.name : "";
-      if (name.length === 0 || name.length > MAX_MCP_TOOL_NAME_CHARS) {
-        dropped += 1;
-        continue;
-      }
-      if (tools.length >= MAX_MCP_TOOLS_PER_SERVER) {
-        dropped += 1;
-        continue;
-      }
-      const info = { name };
-      if (typeof t.description === "string") info.description = t.description;
-      if (typeof t.inputSchema === "object" && t.inputSchema !== null) {
-        try {
-          info.inputSchemaJson = JSON.stringify(t.inputSchema);
-        } catch {
-        }
-      }
-      tools.push(info);
-    }
-    return { tools, droppedTools: dropped };
+    return capToolListing(result?.tools);
   }
   /**
    * Call one tool (spawning/initializing lazily). `argsJson` MUST already have
@@ -6179,714 +6256,9 @@ var McpStdioClient = class {
     } catch (err) {
       return { status: "error", reason: String(err?.message ?? err) };
     }
-    const r = typeof result === "object" && result !== null ? result : {};
-    const content = Array.isArray(r.content) ? r.content : [];
-    let resultJson;
-    try {
-      resultJson = JSON.stringify(content);
-    } catch (err) {
-      return {
-        status: "error",
-        reason: `tool result is not JSON-serializable: ${String(err?.message ?? err)}`
-      };
-    }
-    const bytes = utf8Bytes(resultJson);
-    if (bytes > MAX_MCP_RESULT_JSON_BYTES) {
-      return {
-        status: "error",
-        reason: `tool result exceeds the ${MAX_MCP_RESULT_JSON_BYTES}-byte cap (${bytes} bytes) \u2014 refusing to truncate silently`
-      };
-    }
-    if (r.isError === true) {
-      const firstText = content.map((c) => typeof c === "object" && c !== null ? c.text : void 0).find((t) => typeof t === "string");
-      return {
-        status: "error",
-        resultJson,
-        reason: `tool reported an error${firstText ? `: ${firstText.slice(0, 200)}` : ""}`
-      };
-    }
-    return { status: "ok", resultJson };
+    return mapCallResult(result);
   }
 };
-
-// ../spikes/p0-supervisor/trust-gate.ts
-function trustFromCapabilities(caps) {
-  if (!caps.fsIsolated) return "untrusted";
-  return caps.hardEgress ? "trusted" : "sandboxed-soft-egress";
-}
-
-// ../spikes/p0-supervisor/record-human.ts
-import { existsSync as existsSync4, readFileSync as readFileSync5 } from "node:fs";
-var RecordHumanRefusal = class extends Error {
-  kind;
-  constructor(kind, message) {
-    super(message);
-    this.name = "RecordHumanRefusal";
-    this.kind = kind;
-  }
-};
-var TAIL_UNREADABLE_MESSAGE = "trace tail unreadable \u2014 refusing to append (possible tamper or truncation)";
-function assertRecordHumanWellFormed(type, payload) {
-  if (!RECORD_HUMAN_EVENT_TYPES.includes(type)) {
-    throw new RecordHumanRefusal(
-      "invalid-type",
-      `run/recordHuman type must be one of [${RECORD_HUMAN_EVENT_TYPES.join(", ")}], got '${String(type)}'`
-    );
-  }
-  if (payload === void 0) return 0;
-  if (payload === null || typeof payload !== "object" || Array.isArray(payload)) {
-    throw new RecordHumanRefusal(
-      "payload-not-serializable",
-      "run/recordHuman payload must be a plain JSON object when present"
-    );
-  }
-  let serialized;
-  try {
-    serialized = JSON.stringify(payload);
-  } catch (err) {
-    throw new RecordHumanRefusal(
-      "payload-not-serializable",
-      `run/recordHuman payload is not JSON-serializable: ${String(err?.message ?? err)}`
-    );
-  }
-  if (typeof serialized !== "string") {
-    throw new RecordHumanRefusal(
-      "payload-not-serializable",
-      "run/recordHuman payload is not JSON-serializable"
-    );
-  }
-  const bytes = Buffer.byteLength(serialized, "utf8");
-  if (bytes > MAX_RECORD_HUMAN_PAYLOAD_BYTES) {
-    throw new RecordHumanRefusal(
-      "payload-over-cap",
-      `run/recordHuman payload is ${bytes} bytes \u2014 over the ${MAX_RECORD_HUMAN_PAYLOAD_BYTES}-byte cap; refusing (payloads are small summaries, never content)`
-    );
-  }
-  return bytes;
-}
-function rehydrateAppendHumanEvent(tracePath, req) {
-  assertRecordHumanWellFormed(req.type, req.payload);
-  if (!existsSync4(tracePath)) {
-    throw new RecordHumanRefusal(
-      "no-trace-file",
-      `no trace file exists for this run (${tracePath}) \u2014 refusing to append`
-    );
-  }
-  let raw;
-  try {
-    raw = readFileSync5(tracePath, "utf8");
-  } catch (err) {
-    throw new RecordHumanRefusal(
-      "fs-error",
-      `failed to read the run trace: ${String(err?.message ?? err)}`
-    );
-  }
-  const lines = raw.split("\n").filter((l) => l.trim() !== "");
-  if (lines.length === 0) {
-    throw new RecordHumanRefusal("tail-unreadable", TAIL_UNREADABLE_MESSAGE);
-  }
-  let tail;
-  try {
-    tail = JSON.parse(lines[lines.length - 1]);
-  } catch {
-    throw new RecordHumanRefusal("tail-unreadable", TAIL_UNREADABLE_MESSAGE);
-  }
-  const tailEvt = tail;
-  if (tailEvt === null || typeof tailEvt !== "object" || typeof tailEvt.hash !== "string" || tailEvt.hash.length === 0 || typeof tailEvt.seq !== "number") {
-    throw new RecordHumanRefusal("tail-unreadable", TAIL_UNREADABLE_MESSAGE);
-  }
-  let appended;
-  try {
-    const writer = createTraceWriter(tracePath);
-    appended = writer.append({
-      v: TRACE_EVENT_VERSION,
-      runId: req.runId,
-      seq: 0,
-      // writer-authoritative; overwritten with tail.seq + 1
-      ts: 0,
-      // writer-authoritative; overwritten with Date.now()
-      type: req.type,
-      payload: req.payload ?? {},
-      source: "human"
-      // FORCED here — never caller-supplied
-    });
-  } catch (err) {
-    if (err instanceof RecordHumanRefusal) throw err;
-    throw new RecordHumanRefusal(
-      "tail-unreadable",
-      `${TAIL_UNREADABLE_MESSAGE}: ${String(err?.message ?? err)}`
-    );
-  }
-  if (appended.prevHash !== tailEvt.hash || appended.seq !== tailEvt.seq + 1) {
-    throw new RecordHumanRefusal(
-      "fs-error",
-      "append continuity check failed \u2014 the trace changed during the append; the chain position is not trustworthy"
-    );
-  }
-  return appended;
-}
-
-// ../spikes/p0-model-gateway/gateway.ts
-var ModelGateway = class {
-  backends = /* @__PURE__ */ new Map();
-  trace;
-  constructor(opts = {}) {
-    this.trace = opts.trace;
-  }
-  /** Register (or replace) a backend under its id. Returns the gateway (chainable). */
-  register(backend) {
-    this.backends.set(backend.id, backend);
-    return this;
-  }
-  /** True iff a backend is registered under `backendId`. */
-  has(backendId) {
-    return this.backends.has(backendId);
-  }
-  /** The ids of every registered backend (for an allowlist-style query). */
-  backendIds() {
-    return [...this.backends.keys()];
-  }
-  /**
-   * Drive ONE chat turn through the named backend, streaming its events and
-   * emitting a single `model_call` trace breadcrumb when the turn settles.
-   *
-   * An unknown backendId yields a single `error` event (and a breadcrumb with
-   * outcome 'error') rather than throwing — the caller gets a uniform stream.
-   * The breadcrumb's `outcome` is 'error' iff the terminal event was an error
-   * (or no terminal event arrived); otherwise 'ok'.
-   */
-  async *chatTurn(backendId, req, opts) {
-    const startedAt = Date.now();
-    const backend = this.backends.get(backendId);
-    if (!backend) {
-      const message = `unknown chat backend "${backendId}"`;
-      this.emitTrace({
-        backendId,
-        ...req.model ? { model: req.model } : {},
-        messageCount: req.messages.length,
-        outcome: "error",
-        durationMs: Date.now() - startedAt,
-        error: message
-      });
-      yield { type: "error", message };
-      return;
-    }
-    const resolvedModel = req.model ?? backend.defaultModel;
-    let outcome = "error";
-    let errorMessage = "chat turn produced no terminal event";
-    let inputTokens;
-    let outputTokens;
-    try {
-      for await (const event of backend.chatTurn(req, opts)) {
-        if (event.type === "done") {
-          outcome = "ok";
-          errorMessage = void 0;
-          inputTokens = event.usage?.inputTokens;
-          outputTokens = event.usage?.outputTokens;
-        } else if (event.type === "error") {
-          outcome = "error";
-          errorMessage = event.message;
-        }
-        yield event;
-      }
-    } catch (err) {
-      outcome = "error";
-      errorMessage = `chat backend "${backendId}" threw: ${String(err?.message ?? err)}`;
-      yield { type: "error", message: errorMessage };
-    } finally {
-      this.emitTrace({
-        backendId,
-        ...resolvedModel ? { model: resolvedModel } : {},
-        messageCount: req.messages.length,
-        outcome,
-        durationMs: Date.now() - startedAt,
-        ...inputTokens !== void 0 ? { inputTokens } : {},
-        ...outputTokens !== void 0 ? { outputTokens } : {},
-        ...outcome === "error" && errorMessage ? { error: errorMessage } : {}
-      });
-    }
-  }
-  /** Emit the per-turn trace breadcrumb, swallowing a sink failure (best-effort). */
-  emitTrace(meta) {
-    if (!this.trace) return;
-    try {
-      this.trace.modelCall(meta);
-    } catch {
-    }
-  }
-};
-
-// ../spikes/p0-model-gateway/codex-backend.ts
-import { spawn as spawn3 } from "node:child_process";
-import { isAbsolute as isAbsolute2 } from "node:path";
-
-// ../spikes/p0-model-gateway/prompt-assembly.ts
-var CHAT_INSTRUCTION = "You are a conversational coding assistant answering a CHAT message. This is a chat turn, NOT a coding task: answer the user conversationally and concisely in prose. Do NOT modify, create, or delete any files, and do NOT run any mutating or side-effecting commands \u2014 only read if you must. Reply with the answer text only.";
-var ROLE_LABEL = {
-  system: "System",
-  user: "User",
-  assistant: "Assistant"
-};
-function assembleCodexPrompt(messages) {
-  const sections = [CHAT_INSTRUCTION];
-  for (const m of messages) {
-    if (typeof m.content !== "string" || m.content.trim().length === 0) continue;
-    sections.push(`=== ${ROLE_LABEL[m.role]} ===
-${m.content.trim()}`);
-  }
-  return sections.join("\n\n");
-}
-
-// ../spikes/p0-model-gateway/codex-backend.ts
-var DEFAULT_CODEX_TIMEOUT_MS = 12e4;
-var STDERR_TAIL_LIMIT = 800;
-var REDACTED_TAIL_LIMIT = 240;
-function refuseUngovernedEnv(env) {
-  if (!env) {
-    return "refusing to run codex on the ambient process environment: a chat turn must be GOVERNED (egress forced through the supervisor proxy, ambient secrets stripped). No governed env was provided.";
-  }
-  const proxy = env.HTTPS_PROXY ?? env.https_proxy ?? env.HTTP_PROXY ?? env.http_proxy ?? "";
-  if (typeof proxy !== "string" || proxy.trim().length === 0) {
-    return "refusing to run codex on an UNGOVERNED env: no HTTPS_PROXY/HTTP_PROXY is set, so codex egress would not be brokered through the supervisor proxy.";
-  }
-  return void 0;
-}
-function redactStderrTail(raw) {
-  let s = raw;
-  s = s.replace(/\[[0-9;]*m/g, "");
-  s = s.replace(
-    /\b(api[_-]?key|apikey|token|secret|password|passwd|authorization|auth[-_]?header|bearer|access[_-]?token|refresh[_-]?token|session[_-]?token|client[_-]?secret|cookie)\b\s*[:=]?\s*("?)[^\s"']+\2/gi,
-    "$1 <redacted>"
-  );
-  s = s.replace(/\b(bearer|basic)\s+[A-Za-z0-9._\-+/=]{8,}/gi, "$1 <redacted>");
-  s = s.replace(/\b(sk-ant-[A-Za-z0-9_\-]{6,}|sk-[A-Za-z0-9_\-]{6,}|gh[pousr]_[A-Za-z0-9]{6,})\b/g, "<redacted>");
-  s = s.replace(/\beyJ[A-Za-z0-9_\-]+\.[A-Za-z0-9_\-]+\.[A-Za-z0-9_\-]+\b/g, "<redacted>");
-  s = s.replace(/\b[A-Za-z0-9+/_\-]{24,}={0,2}\b/g, "<redacted>");
-  s = s.replace(/(?:[A-Za-z]:)?[\\/](?:[^\s\\/]+[\\/])+[^\s\\/]*/g, "<path>");
-  s = s.replace(/\\\\[^\s\\/]+\\[^\s]*/g, "<path>");
-  s = s.replace(/[\u0000-\u001f\u007f]+/g, " ").replace(/\s+/g, " ").trim();
-  if (s.length > REDACTED_TAIL_LIMIT) {
-    s = `\u2026${s.slice(-REDACTED_TAIL_LIMIT)}`;
-  }
-  return s;
-}
-function asNum(v) {
-  return typeof v === "number" && Number.isFinite(v) ? v : void 0;
-}
-var CodexChatBackend = class {
-  id = "codex";
-  /**
-   * The ABSOLUTE codex path to spawn, or undefined when the caller could not
-   * resolve one. When undefined the backend is UNRESOLVED and FAILS CLOSED — it
-   * NEVER falls back to a bare `codex` re-resolved against the ambient PATH
-   * (Finding 2: the launched bytes must be the exact ones the supervisor
-   * identity-checked).
-   */
-  codexPath;
-  timeoutMs;
-  onOperatorLog;
-  constructor(opts = {}) {
-    this.codexPath = typeof opts.codexPath === "string" && isAbsolute2(opts.codexPath) ? opts.codexPath : void 0;
-    this.timeoutMs = opts.timeoutMs ?? DEFAULT_CODEX_TIMEOUT_MS;
-    this.onOperatorLog = opts.onOperatorLog;
-  }
-  /**
-   * Build the `codex exec` argv for a turn. The prompt is fed on STDIN (we pass
-   * `-` so codex reads stdin), so it never appears in argv (process listings stay
-   * free of prompt content).
-   */
-  buildArgs(req) {
-    const args = [
-      "exec",
-      "-",
-      // read the prompt from stdin
-      "--json",
-      "--sandbox",
-      "read-only",
-      "-c",
-      'approval_policy="never"',
-      "--skip-git-repo-check",
-      "--ephemeral",
-      "-C",
-      req.cwd
-    ];
-    if (req.model && req.model.trim().length > 0) {
-      args.push("-m", req.model);
-    }
-    return args;
-  }
-  async *chatTurn(req, opts) {
-    const prompt = assembleCodexPrompt(req.messages);
-    const args = this.buildArgs(req);
-    const refusal = refuseUngovernedEnv(opts?.env);
-    if (refusal) {
-      yield { type: "error", message: refusal };
-      return;
-    }
-    if (this.codexPath === void 0) {
-      yield {
-        type: "error",
-        message: "codex is not available: no absolute codex binary was resolved for this chat turn (refusing to spawn a bare `codex` from the ambient PATH)."
-      };
-      return;
-    }
-    const env = {
-      ...opts.env,
-      CI: "1"
-    };
-    const child = spawn3(this.codexPath, args, {
-      cwd: req.cwd,
-      env,
-      stdio: ["pipe", "pipe", "pipe"]
-    });
-    const events = [];
-    let resolveNext;
-    let settled = false;
-    let finished = false;
-    const wake = () => {
-      if (resolveNext) {
-        const r = resolveNext;
-        resolveNext = void 0;
-        r();
-      }
-    };
-    const push = (e) => {
-      events.push(e);
-      wake();
-    };
-    const answerChunks = [];
-    let usage;
-    let stdoutBuf = "";
-    let stderrTail = "";
-    const handleLine = (line) => {
-      const trimmed = line.trim();
-      if (trimmed.length === 0) return;
-      let evt;
-      try {
-        evt = JSON.parse(trimmed);
-      } catch {
-        return;
-      }
-      if (evt.type === "item.completed" && evt.item?.type === "agent_message") {
-        const text = typeof evt.item.text === "string" ? evt.item.text : "";
-        if (text.length > 0) {
-          answerChunks.push(text);
-          push({ type: "delta", text });
-        }
-      } else if (evt.type === "turn.completed" && evt.usage) {
-        const inputTokens = asNum(evt.usage.input_tokens);
-        const outputTokens = asNum(evt.usage.output_tokens);
-        if (inputTokens !== void 0 || outputTokens !== void 0) {
-          usage = {
-            ...inputTokens !== void 0 ? { inputTokens } : {},
-            ...outputTokens !== void 0 ? { outputTokens } : {}
-          };
-        }
-      }
-    };
-    child.stdout.setEncoding("utf8");
-    child.stdout.on("data", (chunk) => {
-      stdoutBuf += chunk;
-      let nl;
-      while ((nl = stdoutBuf.indexOf("\n")) !== -1) {
-        const line = stdoutBuf.slice(0, nl).replace(/\r$/, "");
-        stdoutBuf = stdoutBuf.slice(nl + 1);
-        handleLine(line);
-      }
-    });
-    child.stderr.setEncoding("utf8");
-    child.stderr.on("data", (chunk) => {
-      stderrTail = (stderrTail + chunk).slice(-STDERR_TAIL_LIMIT);
-    });
-    const settle = (e) => {
-      if (settled) return;
-      settled = true;
-      push(e);
-    };
-    let timedOut = false;
-    const timer = setTimeout(() => {
-      timedOut = true;
-      child.kill("SIGKILL");
-    }, this.timeoutMs);
-    if (timer.unref) timer.unref();
-    let aborted = false;
-    const onAbort = () => {
-      aborted = true;
-      child.kill("SIGKILL");
-    };
-    if (opts?.signal) {
-      if (opts.signal.aborted) onAbort();
-      else opts.signal.addEventListener("abort", onAbort, { once: true });
-    }
-    const cleanup = () => {
-      clearTimeout(timer);
-      if (opts?.signal) opts.signal.removeEventListener("abort", onAbort);
-    };
-    child.on("error", (err) => {
-      cleanup();
-      settle({
-        type: "error",
-        message: `codex spawn failed: ${String(err?.message ?? err)}`
-      });
-      finished = true;
-      wake();
-    });
-    child.on("close", (code) => {
-      cleanup();
-      if (stdoutBuf.trim().length > 0) {
-        handleLine(stdoutBuf);
-        stdoutBuf = "";
-      }
-      if (timedOut) {
-        settle({
-          type: "error",
-          message: `codex chat turn timed out after ${this.timeoutMs}ms`
-        });
-      } else if (aborted) {
-        settle({ type: "error", message: "codex chat turn aborted" });
-      } else if (code === 0) {
-        settle({ type: "done", text: answerChunks.join(""), ...usage ? { usage } : {} });
-      } else {
-        const rawTail = stderrTail.trim();
-        if (rawTail && this.onOperatorLog) {
-          try {
-            this.onOperatorLog(`codex exec exited ${code ?? "null"} (verbatim stderr tail): ${rawTail}`);
-          } catch {
-          }
-        }
-        const redacted = rawTail ? redactStderrTail(rawTail) : "";
-        settle({
-          type: "error",
-          message: `codex exec exited ${code ?? "null"}` + (redacted ? ` (redacted detail: ${redacted})` : "")
-        });
-      }
-      finished = true;
-      wake();
-    });
-    child.stdin.on("error", () => {
-    });
-    child.stdin.end(prompt, "utf8");
-    let i = 0;
-    for (; ; ) {
-      while (i < events.length) {
-        yield events[i];
-        i += 1;
-      }
-      if (finished && i >= events.length) break;
-      await new Promise((resolve5) => {
-        resolveNext = resolve5;
-      });
-    }
-  }
-};
-
-// ../spikes/p0-model-gateway/ollama-backend.ts
-var DEFAULT_OLLAMA_HOST = "http://127.0.0.1:11434";
-var DEFAULT_OLLAMA_CHAT_MODEL = "qwen2.5-coder:7b";
-var OLLAMA_MODEL_LIST_CAP = 16;
-var ERROR_BODY_CAP = 300;
-var OLLAMA_NUM_PREDICT_MIN = 1;
-var OLLAMA_NUM_PREDICT_CAP = 8192;
-function clampNumPredict(maxOutputTokens) {
-  if (typeof maxOutputTokens !== "number" || !Number.isFinite(maxOutputTokens)) return void 0;
-  const n = Math.floor(maxOutputTokens);
-  return Math.min(OLLAMA_NUM_PREDICT_CAP, Math.max(OLLAMA_NUM_PREDICT_MIN, n));
-}
-function isLoopbackHost(host) {
-  let url;
-  try {
-    url = new URL(host);
-  } catch {
-    return false;
-  }
-  if (url.protocol !== "http:" && url.protocol !== "https:") return false;
-  const h = url.hostname.toLowerCase();
-  return h === "localhost" || h === "[::1]" || h === "::1" || /^127\.\d{1,3}\.\d{1,3}\.\d{1,3}$/.test(h);
-}
-async function probeOllamaModels(host = DEFAULT_OLLAMA_HOST, cap = OLLAMA_MODEL_LIST_CAP) {
-  if (!isLoopbackHost(host)) {
-    return { ok: false, detail: `non-loopback ollama host "${host}" refused (local backend is loopback-only in v1)` };
-  }
-  let res;
-  try {
-    res = await fetch(`${host}/api/tags`);
-  } catch (err) {
-    return { ok: false, detail: `ollama daemon unreachable at ${host}: ${String(err?.message ?? err)}` };
-  }
-  if (!res.ok) {
-    return { ok: false, detail: `ollama /api/tags HTTP ${res.status}` };
-  }
-  try {
-    const data = await res.json();
-    const names = (Array.isArray(data.models) ? data.models : []).map((m) => typeof m?.name === "string" ? m.name : void 0).filter((n) => typeof n === "string" && n.length > 0).slice(0, cap);
-    return { ok: true, models: names };
-  } catch (err) {
-    return { ok: false, detail: `ollama /api/tags returned an unparseable body: ${String(err?.message ?? err)}` };
-  }
-}
-var OllamaChatBackend = class {
-  id = "ollama";
-  /** The model used when a turn has no override — surfaced so the gateway's trace breadcrumb names it. */
-  defaultModel;
-  host;
-  timeoutMs;
-  /** Set at construction when `host` failed the loopback guard; fails every turn honestly. */
-  hostError;
-  constructor(opts = {}) {
-    this.host = opts.host ?? DEFAULT_OLLAMA_HOST;
-    this.defaultModel = opts.model ?? DEFAULT_OLLAMA_CHAT_MODEL;
-    this.timeoutMs = opts.timeoutMs ?? 12e4;
-    this.hostError = isLoopbackHost(this.host) ? void 0 : `refusing non-loopback ollama host "${this.host}": the local chat backend is loopback-only in v1 (a remote daemon would silently turn the sovereign-local leg into network egress).`;
-  }
-  async *chatTurn(req, opts) {
-    if (this.hostError) {
-      yield { type: "error", message: this.hostError };
-      return;
-    }
-    const model = req.model ?? this.defaultModel;
-    const numPredict = clampNumPredict(req.maxOutputTokens);
-    const controller = new AbortController();
-    let timedOut = false;
-    const timer = setTimeout(() => {
-      timedOut = true;
-      controller.abort();
-    }, this.timeoutMs);
-    const onCallerAbort = () => controller.abort();
-    if (opts?.signal) {
-      if (opts.signal.aborted) controller.abort();
-      else opts.signal.addEventListener("abort", onCallerAbort, { once: true });
-    }
-    const abortMessage = () => timedOut ? `ollama chat turn timed out after ${this.timeoutMs}ms` : "ollama chat turn aborted";
-    try {
-      let res;
-      try {
-        res = await fetch(`${this.host}/api/chat`, {
-          method: "POST",
-          headers: { "content-type": "application/json" },
-          body: JSON.stringify({
-            model,
-            // Content-only projection: role/content exactly (no extra fields leak).
-            messages: req.messages.map((m) => ({ role: m.role, content: m.content })),
-            stream: true,
-            ...numPredict !== void 0 ? { options: { num_predict: numPredict } } : {}
-          }),
-          signal: controller.signal
-        });
-      } catch (err) {
-        if (controller.signal.aborted) {
-          yield { type: "error", message: abortMessage() };
-          return;
-        }
-        yield {
-          type: "error",
-          message: `ollama daemon unreachable at ${this.host}: ${String(err?.message ?? err)}`
-        };
-        return;
-      }
-      if (!res.ok) {
-        let tail = "";
-        try {
-          tail = (await res.text()).slice(0, ERROR_BODY_CAP);
-        } catch {
-        }
-        yield { type: "error", message: `ollama /api/chat HTTP ${res.status}${tail ? `: ${tail}` : ""}` };
-        return;
-      }
-      if (!res.body) {
-        yield { type: "error", message: "ollama /api/chat returned no response body to stream" };
-        return;
-      }
-      const reader = res.body.getReader();
-      const decoder = new TextDecoder();
-      let buffer = "";
-      let fullText = "";
-      let usage;
-      let sawDone = false;
-      const handleLine = (line) => {
-        let chunk;
-        try {
-          chunk = JSON.parse(line);
-        } catch {
-          return {
-            type: "error",
-            message: `ollama /api/chat emitted a malformed NDJSON line (${line.slice(0, 80)}\u2026) \u2014 failing the turn rather than skipping unverified output`
-          };
-        }
-        if (chunk.error !== void 0) {
-          return { type: "error", message: `ollama /api/chat reported an error: ${String(chunk.error).slice(0, ERROR_BODY_CAP)}` };
-        }
-        const content = chunk.message?.content;
-        if (typeof content === "string" && content.length > 0) {
-          fullText += content;
-          if (chunk.done !== true) return { type: "delta", text: content };
-        }
-        if (chunk.done === true) {
-          sawDone = true;
-          const input = typeof chunk.prompt_eval_count === "number" ? chunk.prompt_eval_count : void 0;
-          const output = typeof chunk.eval_count === "number" ? chunk.eval_count : void 0;
-          if (input !== void 0 || output !== void 0) {
-            usage = {
-              ...input !== void 0 ? { inputTokens: input } : {},
-              ...output !== void 0 ? { outputTokens: output } : {}
-            };
-          }
-        }
-        return void 0;
-      };
-      while (true) {
-        let step;
-        try {
-          step = await reader.read();
-        } catch (err) {
-          yield {
-            type: "error",
-            message: controller.signal.aborted ? abortMessage() : `ollama /api/chat stream failed mid-turn: ${String(err?.message ?? err)}`
-          };
-          return;
-        }
-        if (step.done) break;
-        buffer += decoder.decode(step.value, { stream: true });
-        let nl;
-        while ((nl = buffer.indexOf("\n")) >= 0) {
-          const line = buffer.slice(0, nl).trim();
-          buffer = buffer.slice(nl + 1);
-          if (!line) continue;
-          const event = handleLine(line);
-          if (event) {
-            yield event;
-            if (event.type === "error") return;
-          }
-          if (sawDone) break;
-        }
-        if (sawDone) break;
-      }
-      const trailing = (buffer + decoder.decode()).trim();
-      if (!sawDone && trailing) {
-        const event = handleLine(trailing);
-        if (event) {
-          yield event;
-          if (event.type === "error") return;
-        }
-      }
-      if (!sawDone) {
-        yield {
-          type: "error",
-          message: "ollama /api/chat stream ended without a terminal done chunk \u2014 the turn is incomplete"
-        };
-        return;
-      }
-      yield { type: "done", text: fullText, ...usage ? { usage } : {} };
-    } finally {
-      clearTimeout(timer);
-      opts?.signal?.removeEventListener("abort", onCallerAbort);
-    }
-  }
-};
-
-// ../spikes/p0-model-gateway/anthropic-backend.ts
-import { readFileSync as readFileSync6, statSync as statSync2 } from "node:fs";
-import { homedir as homedir2 } from "node:os";
-import { join as join10 } from "node:path";
 
 // ../spikes/p0-supervisor/web-fetch.ts
 import { createHash as createHash6 } from "node:crypto";
@@ -7665,7 +7037,1068 @@ async function governedWebFetch(opts) {
   return fail(originalUrl, "fetch failed \u2014 too many redirects");
 }
 
+// ../spikes/p0-supervisor/sse.ts
+var SseParser = class {
+  buffered = "";
+  feed(text) {
+    this.buffered += text;
+    const events = [];
+    for (; ; ) {
+      const sep3 = this.buffered.search(/\r?\n\r?\n/);
+      if (sep3 === -1) return events;
+      const sepLen = /^\r\n\r\n/.test(this.buffered.slice(sep3)) ? 4 : 2;
+      const block = this.buffered.slice(0, sep3);
+      this.buffered = this.buffered.slice(sep3 + sepLen);
+      let eventName = "";
+      const dataLines = [];
+      for (const line of block.split(/\r?\n/)) {
+        if (line.startsWith("event:")) eventName = line.slice("event:".length).trim();
+        else if (line.startsWith("data:")) dataLines.push(line.slice("data:".length).trimStart());
+      }
+      if (eventName || dataLines.length > 0) {
+        events.push({ event: eventName, data: dataLines.join("\n") });
+      }
+    }
+  }
+};
+
+// ../spikes/p0-supervisor/mcp-http-client.ts
+var MAX_HTTP_RESPONSE_BODY_BYTES = 4 * 262144;
+function teachNonPublicRefusal(err) {
+  const msg = String(err?.message ?? err);
+  if (/refused — non-public target/.test(msg)) {
+    return new Error(
+      "url-transport MCP servers must be publicly resolvable \u2014 run local servers over stdio (command + args + env)"
+    );
+  }
+  return err instanceof Error ? err : new Error(msg);
+}
+var McpHttpClient = class {
+  spec;
+  getProxyUrl;
+  callTimeoutMs;
+  initTimeoutMs;
+  logLine;
+  nextId = 1;
+  sessionId;
+  negotiatedVersion;
+  /** In-flight lazy initialize (de-dupes concurrent first uses). */
+  startPromise;
+  statusValue = "idle";
+  statusReasonValue;
+  constructor(spec, opts) {
+    this.spec = spec;
+    this.getProxyUrl = opts.getProxyUrl;
+    this.callTimeoutMs = opts.callTimeoutMs ?? DEFAULT_MCP_CALL_TIMEOUT_MS;
+    this.initTimeoutMs = opts.initTimeoutMs ?? DEFAULT_MCP_INIT_TIMEOUT_MS;
+    this.logLine = opts.logLine ?? (() => {
+    });
+  }
+  /** The server name this client brokers. */
+  get name() {
+    return this.spec.name;
+  }
+  /**
+   * Honest status for mcp/list. Nothing is ever SPAWNED here, so a failed
+   * handshake (unreachable host, non-MCP endpoint, old transport) is
+   * 'init-failed'; idle/disposed surface as 'init-failed' too if ever asked
+   * (list initializes first, so in practice they are not).
+   */
+  get status() {
+    if (this.statusValue === "ok") return "ok";
+    return "init-failed";
+  }
+  /** Short, non-secret reason accompanying a non-'ok' {@link status}. */
+  get statusReason() {
+    return this.statusReasonValue;
+  }
+  /** The protocolVersion the server answered initialize with (once started). */
+  get protocolVersion() {
+    return this.negotiatedVersion;
+  }
+  /**
+   * Spec identity, used by the broker to detect a config edit (a changed
+   * url/headers must produce a NEW client/session, never reuse a stale one).
+   */
+  get specIdentity() {
+    return JSON.stringify({ url: this.spec.url, headers: this.spec.headers });
+  }
+  /* ---------------------------------------------------------------- *
+   * Wire (one JSON-RPC message per HTTP POST)
+   * ---------------------------------------------------------------- */
+  /** The headers every POST/DELETE carries: operator's + ours (ours win). */
+  buildHeaders() {
+    return {
+      ...this.spec.headers,
+      Accept: "application/json, text/event-stream",
+      "Content-Type": "application/json",
+      ...this.sessionId !== void 0 ? { "Mcp-Session-Id": this.sessionId } : {},
+      // Per the 2025-03-26 spec the negotiated version is echoed as a header
+      // on every request after initialize.
+      ...this.negotiatedVersion !== void 0 ? { "MCP-Protocol-Version": this.negotiatedVersion } : {}
+    };
+  }
+  /**
+   * POST one JSON-RPC REQUEST and resolve its response message: a plain
+   * `application/json` body is one message; a `text/event-stream` body is
+   * scanned event-by-event for the message whose id matches (notifications
+   * are logged and ignored; server-initiated requests are logged and NEVER
+   * honored). Rejects with honest reasons on non-2xx / other content types /
+   * malformed bodies. `isInitialize` threads the response headers' session id
+   * capture and names the Streamable-HTTP-only posture on 404/405.
+   */
+  async request(method, params, timeoutMs, isInitialize = false) {
+    const id = this.nextId++;
+    const body = JSON.stringify({ jsonrpc: "2.0", id, method, params });
+    const proxyUrl = await this.getProxyUrl();
+    let response;
+    try {
+      response = await governedStreamRequest({
+        url: this.spec.url,
+        proxyUrl,
+        method: "POST",
+        headers: this.buildHeaders(),
+        body,
+        timeoutMs
+      });
+    } catch (err) {
+      throw teachNonPublicRefusal(err);
+    }
+    if (response.status < 200 || response.status >= 300) {
+      if (isInitialize && (response.status === 404 || response.status === 405)) {
+        throw new Error(
+          `initialize POST returned HTTP ${response.status} \u2014 only MCP Streamable HTTP (protocol 2025-03-26) is supported; the old 2024-11-05 HTTP+SSE (GET-first) transport is not`
+        );
+      }
+      throw new Error(`${method} failed \u2014 HTTP ${response.status}`);
+    }
+    if (isInitialize) {
+      const sid = response.headers["mcp-session-id"];
+      if (typeof sid === "string" && sid.length > 0) this.sessionId = sid;
+    }
+    const contentType = (response.headers["content-type"] ?? "").toLowerCase();
+    if (contentType.startsWith("application/json")) {
+      const text = await this.readBody(response.chunks, method);
+      let msg;
+      try {
+        msg = JSON.parse(text);
+      } catch {
+        throw new Error(`${method} failed \u2014 malformed application/json response body`);
+      }
+      return this.settleResponseMessage(msg, id, method);
+    }
+    if (contentType.startsWith("text/event-stream")) {
+      return this.settleFromSse(response.chunks, id, method);
+    }
+    throw new Error(
+      `${method} failed \u2014 unexpected response content-type '${contentType || "(none)"}'`
+    );
+  }
+  /** Accumulate a (bounded) UTF-8 response body. */
+  async readBody(chunks, method) {
+    const parts = [];
+    let bytes = 0;
+    for await (const chunk of chunks) {
+      bytes += chunk.byteLength;
+      if (bytes > MAX_HTTP_RESPONSE_BODY_BYTES) {
+        throw new Error(
+          `${method} failed \u2014 response body exceeds the ${MAX_HTTP_RESPONSE_BODY_BYTES}-byte transport cap \u2014 refusing to read further`
+        );
+      }
+      parts.push(chunk);
+    }
+    return Buffer.concat(parts).toString("utf8");
+  }
+  /**
+   * Scan a POST's SSE response for the JSON-RPC message answering `id`.
+   * Notifications: log-and-ignore. Server-initiated requests: NEVER honored —
+   * respond nothing, log it (none should arrive; we never open the GET
+   * stream). Stream end without the response → honest error.
+   */
+  async settleFromSse(chunks, id, method) {
+    const sse = new SseParser();
+    let bytes = 0;
+    for await (const chunk of chunks) {
+      bytes += chunk.byteLength;
+      if (bytes > MAX_HTTP_RESPONSE_BODY_BYTES) {
+        throw new Error(
+          `${method} failed \u2014 SSE response exceeds the ${MAX_HTTP_RESPONSE_BODY_BYTES}-byte transport cap \u2014 refusing to read further`
+        );
+      }
+      for (const event of sse.feed(chunk.toString("utf8"))) {
+        if (event.data.length === 0) continue;
+        let msg;
+        try {
+          msg = JSON.parse(event.data);
+        } catch {
+          this.logLine(`[mcp:${this.spec.name}] dropping non-JSON SSE event data`);
+          continue;
+        }
+        if (typeof msg !== "object" || msg === null) continue;
+        const m = msg;
+        if (typeof m.id === "number" && (m.result !== void 0 || m.error !== void 0)) {
+          if (m.id !== id) {
+            this.logLine(`[mcp:${this.spec.name}] ignoring response for unknown id ${m.id}`);
+            continue;
+          }
+          return this.settleResponseMessage(msg, id, method);
+        }
+        if (typeof m.id === "number" && typeof m.method === "string") {
+          this.logLine(
+            `[mcp:${this.spec.name}] ignoring server-initiated request '${m.method}' (not honored \u2014 this client brokers tools only)`
+          );
+          continue;
+        }
+        if (typeof m.method === "string") {
+          this.logLine(`[mcp:${this.spec.name}] ignoring server notification '${m.method}'`);
+          continue;
+        }
+      }
+    }
+    throw new Error(`${method} failed \u2014 SSE stream ended without a response (id ${id})`);
+  }
+  /** Unwrap one JSON-RPC response message (id checked, error → honest reject). */
+  settleResponseMessage(msg, id, method) {
+    if (typeof msg !== "object" || msg === null) {
+      throw new Error(`${method} failed \u2014 response is not a JSON-RPC message`);
+    }
+    const m = msg;
+    if (m.id !== id) {
+      throw new Error(`${method} failed \u2014 response id mismatch (expected ${id}, got ${String(m.id)})`);
+    }
+    if (m.error !== void 0) {
+      const e = m.error;
+      throw new Error(
+        `server error ${String(e?.code ?? "?")}: ${String(e?.message ?? "unknown error")}`
+      );
+    }
+    return m.result;
+  }
+  /** POST one JSON-RPC NOTIFICATION (no id); any 2xx (incl. 202) is success. */
+  async notify(method, params, timeoutMs) {
+    const body = JSON.stringify({ jsonrpc: "2.0", method, params });
+    const proxyUrl = await this.getProxyUrl();
+    let response;
+    try {
+      response = await governedStreamRequest({
+        url: this.spec.url,
+        proxyUrl,
+        method: "POST",
+        headers: this.buildHeaders(),
+        body,
+        timeoutMs
+      });
+    } catch (err) {
+      throw teachNonPublicRefusal(err);
+    }
+    if (response.status < 200 || response.status >= 300) {
+      throw new Error(`${method} failed \u2014 HTTP ${response.status}`);
+    }
+    try {
+      for await (const _ of response.chunks) {
+        void _;
+      }
+    } catch {
+    }
+  }
+  /* ---------------------------------------------------------------- *
+   * Lifecycle
+   * ---------------------------------------------------------------- */
+  /** Lazily initialize the session. Rejects with the honest failure reason. */
+  ensureStarted() {
+    if (this.statusValue === "ok") return Promise.resolve();
+    if (this.statusValue === "disposed") {
+      return Promise.reject(new Error("client is disposed"));
+    }
+    if (this.statusValue === "init-failed") {
+      return Promise.reject(new Error(this.statusReasonValue ?? "server is init-failed"));
+    }
+    if (this.startPromise) return this.startPromise;
+    this.startPromise = this.start().finally(() => {
+      this.startPromise = void 0;
+    });
+    return this.startPromise;
+  }
+  async start() {
+    try {
+      const initResult = await this.request(
+        "initialize",
+        {
+          protocolVersion: MCP_PROTOCOL_VERSION,
+          capabilities: {},
+          clientInfo: { name: "glyphstudio-supervisor", version: "0.0.0-p0" }
+        },
+        this.initTimeoutMs,
+        true
+      );
+      const serverVersion = initResult && typeof initResult.protocolVersion === "string" ? initResult.protocolVersion : void 0;
+      if (!serverVersion) {
+        throw new Error("initialize result carries no protocolVersion");
+      }
+      this.negotiatedVersion = serverVersion;
+      await this.notify("notifications/initialized", {}, this.initTimeoutMs);
+      if (this.statusValue === "disposed") return;
+      this.statusValue = "ok";
+      this.statusReasonValue = void 0;
+    } catch (err) {
+      const reason = `initialize failed: ${String(err?.message ?? err)}`;
+      if (this.statusValue !== "disposed") {
+        this.statusValue = "init-failed";
+        this.statusReasonValue = reason;
+      }
+      throw new Error(this.statusReasonValue ?? reason);
+    }
+  }
+  /**
+   * Dispose the client: best-effort HTTP DELETE to the endpoint with the
+   * session id (the Streamable HTTP session teardown), never throws,
+   * idempotent. The DELETE is fire-and-forget — a server that does not
+   * support explicit teardown (405) loses nothing.
+   */
+  async dispose() {
+    if (this.statusValue === "disposed") return;
+    const hadSession = this.statusValue === "ok" || this.sessionId !== void 0;
+    this.statusValue = "disposed";
+    this.statusReasonValue = "disposed";
+    if (!hadSession) return;
+    try {
+      const proxyUrl = await this.getProxyUrl();
+      const response = await governedStreamRequest({
+        url: this.spec.url,
+        proxyUrl,
+        method: "DELETE",
+        headers: {
+          ...this.spec.headers,
+          ...this.sessionId !== void 0 ? { "Mcp-Session-Id": this.sessionId } : {},
+          ...this.negotiatedVersion !== void 0 ? { "MCP-Protocol-Version": this.negotiatedVersion } : {}
+        },
+        timeoutMs: Math.min(this.initTimeoutMs, 5e3)
+      });
+      try {
+        for await (const _ of response.chunks) {
+          void _;
+        }
+      } catch {
+      }
+    } catch {
+    }
+  }
+  /* ---------------------------------------------------------------- *
+   * MCP surface (semantics identical to the stdio client)
+   * ---------------------------------------------------------------- */
+  /**
+   * List the server's tools (initializing lazily). Same caps as stdio via the
+   * shared {@link capToolListing}; throws honest reasons when the server
+   * cannot serve.
+   */
+  async listTools() {
+    await this.ensureStarted();
+    const result = await this.request("tools/list", {}, this.initTimeoutMs);
+    return capToolListing(result?.tools);
+  }
+  /**
+   * Call one tool (initializing lazily). NEVER throws — honest 'error'
+   * outcomes; same result byte cap / isError mapping as stdio via the shared
+   * {@link mapCallResult}.
+   */
+  async callTool(tool, argsJson, timeoutMs) {
+    try {
+      await this.ensureStarted();
+    } catch (err) {
+      return { status: "error", reason: String(err?.message ?? err) };
+    }
+    let result;
+    try {
+      result = await this.request(
+        "tools/call",
+        { name: tool, arguments: JSON.parse(argsJson) },
+        timeoutMs ?? this.callTimeoutMs
+      );
+    } catch (err) {
+      return { status: "error", reason: String(err?.message ?? err) };
+    }
+    return mapCallResult(result);
+  }
+};
+
+// ../spikes/p0-supervisor/trust-gate.ts
+function trustFromCapabilities(caps) {
+  if (!caps.fsIsolated) return "untrusted";
+  return caps.hardEgress ? "trusted" : "sandboxed-soft-egress";
+}
+
+// ../spikes/p0-supervisor/record-human.ts
+import { existsSync as existsSync4, readFileSync as readFileSync5 } from "node:fs";
+var RecordHumanRefusal = class extends Error {
+  kind;
+  constructor(kind, message) {
+    super(message);
+    this.name = "RecordHumanRefusal";
+    this.kind = kind;
+  }
+};
+var TAIL_UNREADABLE_MESSAGE = "trace tail unreadable \u2014 refusing to append (possible tamper or truncation)";
+function assertRecordHumanWellFormed(type, payload) {
+  if (!RECORD_HUMAN_EVENT_TYPES.includes(type)) {
+    throw new RecordHumanRefusal(
+      "invalid-type",
+      `run/recordHuman type must be one of [${RECORD_HUMAN_EVENT_TYPES.join(", ")}], got '${String(type)}'`
+    );
+  }
+  if (payload === void 0) return 0;
+  if (payload === null || typeof payload !== "object" || Array.isArray(payload)) {
+    throw new RecordHumanRefusal(
+      "payload-not-serializable",
+      "run/recordHuman payload must be a plain JSON object when present"
+    );
+  }
+  let serialized;
+  try {
+    serialized = JSON.stringify(payload);
+  } catch (err) {
+    throw new RecordHumanRefusal(
+      "payload-not-serializable",
+      `run/recordHuman payload is not JSON-serializable: ${String(err?.message ?? err)}`
+    );
+  }
+  if (typeof serialized !== "string") {
+    throw new RecordHumanRefusal(
+      "payload-not-serializable",
+      "run/recordHuman payload is not JSON-serializable"
+    );
+  }
+  const bytes = Buffer.byteLength(serialized, "utf8");
+  if (bytes > MAX_RECORD_HUMAN_PAYLOAD_BYTES) {
+    throw new RecordHumanRefusal(
+      "payload-over-cap",
+      `run/recordHuman payload is ${bytes} bytes \u2014 over the ${MAX_RECORD_HUMAN_PAYLOAD_BYTES}-byte cap; refusing (payloads are small summaries, never content)`
+    );
+  }
+  return bytes;
+}
+function rehydrateAppendHumanEvent(tracePath, req) {
+  assertRecordHumanWellFormed(req.type, req.payload);
+  if (!existsSync4(tracePath)) {
+    throw new RecordHumanRefusal(
+      "no-trace-file",
+      `no trace file exists for this run (${tracePath}) \u2014 refusing to append`
+    );
+  }
+  let raw;
+  try {
+    raw = readFileSync5(tracePath, "utf8");
+  } catch (err) {
+    throw new RecordHumanRefusal(
+      "fs-error",
+      `failed to read the run trace: ${String(err?.message ?? err)}`
+    );
+  }
+  const lines = raw.split("\n").filter((l) => l.trim() !== "");
+  if (lines.length === 0) {
+    throw new RecordHumanRefusal("tail-unreadable", TAIL_UNREADABLE_MESSAGE);
+  }
+  let tail;
+  try {
+    tail = JSON.parse(lines[lines.length - 1]);
+  } catch {
+    throw new RecordHumanRefusal("tail-unreadable", TAIL_UNREADABLE_MESSAGE);
+  }
+  const tailEvt = tail;
+  if (tailEvt === null || typeof tailEvt !== "object" || typeof tailEvt.hash !== "string" || tailEvt.hash.length === 0 || typeof tailEvt.seq !== "number") {
+    throw new RecordHumanRefusal("tail-unreadable", TAIL_UNREADABLE_MESSAGE);
+  }
+  let appended;
+  try {
+    const writer = createTraceWriter(tracePath);
+    appended = writer.append({
+      v: TRACE_EVENT_VERSION,
+      runId: req.runId,
+      seq: 0,
+      // writer-authoritative; overwritten with tail.seq + 1
+      ts: 0,
+      // writer-authoritative; overwritten with Date.now()
+      type: req.type,
+      payload: req.payload ?? {},
+      source: "human"
+      // FORCED here — never caller-supplied
+    });
+  } catch (err) {
+    if (err instanceof RecordHumanRefusal) throw err;
+    throw new RecordHumanRefusal(
+      "tail-unreadable",
+      `${TAIL_UNREADABLE_MESSAGE}: ${String(err?.message ?? err)}`
+    );
+  }
+  if (appended.prevHash !== tailEvt.hash || appended.seq !== tailEvt.seq + 1) {
+    throw new RecordHumanRefusal(
+      "fs-error",
+      "append continuity check failed \u2014 the trace changed during the append; the chain position is not trustworthy"
+    );
+  }
+  return appended;
+}
+
+// ../spikes/p0-model-gateway/gateway.ts
+var ModelGateway = class {
+  backends = /* @__PURE__ */ new Map();
+  trace;
+  constructor(opts = {}) {
+    this.trace = opts.trace;
+  }
+  /** Register (or replace) a backend under its id. Returns the gateway (chainable). */
+  register(backend) {
+    this.backends.set(backend.id, backend);
+    return this;
+  }
+  /** True iff a backend is registered under `backendId`. */
+  has(backendId) {
+    return this.backends.has(backendId);
+  }
+  /** The ids of every registered backend (for an allowlist-style query). */
+  backendIds() {
+    return [...this.backends.keys()];
+  }
+  /**
+   * Drive ONE chat turn through the named backend, streaming its events and
+   * emitting a single `model_call` trace breadcrumb when the turn settles.
+   *
+   * An unknown backendId yields a single `error` event (and a breadcrumb with
+   * outcome 'error') rather than throwing — the caller gets a uniform stream.
+   * The breadcrumb's `outcome` is 'error' iff the terminal event was an error
+   * (or no terminal event arrived); otherwise 'ok'.
+   */
+  async *chatTurn(backendId, req, opts) {
+    const startedAt = Date.now();
+    const backend = this.backends.get(backendId);
+    if (!backend) {
+      const message = `unknown chat backend "${backendId}"`;
+      this.emitTrace({
+        backendId,
+        ...req.model ? { model: req.model } : {},
+        messageCount: req.messages.length,
+        outcome: "error",
+        durationMs: Date.now() - startedAt,
+        error: message
+      });
+      yield { type: "error", message };
+      return;
+    }
+    const resolvedModel = req.model ?? backend.defaultModel;
+    let outcome = "error";
+    let errorMessage = "chat turn produced no terminal event";
+    let inputTokens;
+    let outputTokens;
+    try {
+      for await (const event of backend.chatTurn(req, opts)) {
+        if (event.type === "done") {
+          outcome = "ok";
+          errorMessage = void 0;
+          inputTokens = event.usage?.inputTokens;
+          outputTokens = event.usage?.outputTokens;
+        } else if (event.type === "error") {
+          outcome = "error";
+          errorMessage = event.message;
+        }
+        yield event;
+      }
+    } catch (err) {
+      outcome = "error";
+      errorMessage = `chat backend "${backendId}" threw: ${String(err?.message ?? err)}`;
+      yield { type: "error", message: errorMessage };
+    } finally {
+      this.emitTrace({
+        backendId,
+        ...resolvedModel ? { model: resolvedModel } : {},
+        messageCount: req.messages.length,
+        outcome,
+        durationMs: Date.now() - startedAt,
+        ...inputTokens !== void 0 ? { inputTokens } : {},
+        ...outputTokens !== void 0 ? { outputTokens } : {},
+        ...outcome === "error" && errorMessage ? { error: errorMessage } : {}
+      });
+    }
+  }
+  /** Emit the per-turn trace breadcrumb, swallowing a sink failure (best-effort). */
+  emitTrace(meta) {
+    if (!this.trace) return;
+    try {
+      this.trace.modelCall(meta);
+    } catch {
+    }
+  }
+};
+
+// ../spikes/p0-model-gateway/codex-backend.ts
+import { spawn as spawn3 } from "node:child_process";
+import { isAbsolute as isAbsolute2 } from "node:path";
+
+// ../spikes/p0-model-gateway/prompt-assembly.ts
+var CHAT_INSTRUCTION = "You are a conversational coding assistant answering a CHAT message. This is a chat turn, NOT a coding task: answer the user conversationally and concisely in prose. Do NOT modify, create, or delete any files, and do NOT run any mutating or side-effecting commands \u2014 only read if you must. Reply with the answer text only.";
+var ROLE_LABEL = {
+  system: "System",
+  user: "User",
+  assistant: "Assistant"
+};
+function assembleCodexPrompt(messages) {
+  const sections = [CHAT_INSTRUCTION];
+  for (const m of messages) {
+    if (typeof m.content !== "string" || m.content.trim().length === 0) continue;
+    sections.push(`=== ${ROLE_LABEL[m.role]} ===
+${m.content.trim()}`);
+  }
+  return sections.join("\n\n");
+}
+
+// ../spikes/p0-model-gateway/codex-backend.ts
+var DEFAULT_CODEX_TIMEOUT_MS = 12e4;
+var STDERR_TAIL_LIMIT = 800;
+var REDACTED_TAIL_LIMIT = 240;
+function refuseUngovernedEnv(env) {
+  if (!env) {
+    return "refusing to run codex on the ambient process environment: a chat turn must be GOVERNED (egress forced through the supervisor proxy, ambient secrets stripped). No governed env was provided.";
+  }
+  const proxy = env.HTTPS_PROXY ?? env.https_proxy ?? env.HTTP_PROXY ?? env.http_proxy ?? "";
+  if (typeof proxy !== "string" || proxy.trim().length === 0) {
+    return "refusing to run codex on an UNGOVERNED env: no HTTPS_PROXY/HTTP_PROXY is set, so codex egress would not be brokered through the supervisor proxy.";
+  }
+  return void 0;
+}
+function redactStderrTail(raw) {
+  let s = raw;
+  s = s.replace(/\[[0-9;]*m/g, "");
+  s = s.replace(
+    /\b(api[_-]?key|apikey|token|secret|password|passwd|authorization|auth[-_]?header|bearer|access[_-]?token|refresh[_-]?token|session[_-]?token|client[_-]?secret|cookie)\b\s*[:=]?\s*("?)[^\s"']+\2/gi,
+    "$1 <redacted>"
+  );
+  s = s.replace(/\b(bearer|basic)\s+[A-Za-z0-9._\-+/=]{8,}/gi, "$1 <redacted>");
+  s = s.replace(/\b(sk-ant-[A-Za-z0-9_\-]{6,}|sk-[A-Za-z0-9_\-]{6,}|gh[pousr]_[A-Za-z0-9]{6,})\b/g, "<redacted>");
+  s = s.replace(/\beyJ[A-Za-z0-9_\-]+\.[A-Za-z0-9_\-]+\.[A-Za-z0-9_\-]+\b/g, "<redacted>");
+  s = s.replace(/\b[A-Za-z0-9+/_\-]{24,}={0,2}\b/g, "<redacted>");
+  s = s.replace(/(?:[A-Za-z]:)?[\\/](?:[^\s\\/]+[\\/])+[^\s\\/]*/g, "<path>");
+  s = s.replace(/\\\\[^\s\\/]+\\[^\s]*/g, "<path>");
+  s = s.replace(/[\u0000-\u001f\u007f]+/g, " ").replace(/\s+/g, " ").trim();
+  if (s.length > REDACTED_TAIL_LIMIT) {
+    s = `\u2026${s.slice(-REDACTED_TAIL_LIMIT)}`;
+  }
+  return s;
+}
+function asNum(v) {
+  return typeof v === "number" && Number.isFinite(v) ? v : void 0;
+}
+var CodexChatBackend = class {
+  id = "codex";
+  /**
+   * The ABSOLUTE codex path to spawn, or undefined when the caller could not
+   * resolve one. When undefined the backend is UNRESOLVED and FAILS CLOSED — it
+   * NEVER falls back to a bare `codex` re-resolved against the ambient PATH
+   * (Finding 2: the launched bytes must be the exact ones the supervisor
+   * identity-checked).
+   */
+  codexPath;
+  timeoutMs;
+  onOperatorLog;
+  constructor(opts = {}) {
+    this.codexPath = typeof opts.codexPath === "string" && isAbsolute2(opts.codexPath) ? opts.codexPath : void 0;
+    this.timeoutMs = opts.timeoutMs ?? DEFAULT_CODEX_TIMEOUT_MS;
+    this.onOperatorLog = opts.onOperatorLog;
+  }
+  /**
+   * Build the `codex exec` argv for a turn. The prompt is fed on STDIN (we pass
+   * `-` so codex reads stdin), so it never appears in argv (process listings stay
+   * free of prompt content).
+   */
+  buildArgs(req) {
+    const args = [
+      "exec",
+      "-",
+      // read the prompt from stdin
+      "--json",
+      "--sandbox",
+      "read-only",
+      "-c",
+      'approval_policy="never"',
+      "--skip-git-repo-check",
+      "--ephemeral",
+      "-C",
+      req.cwd
+    ];
+    if (req.model && req.model.trim().length > 0) {
+      args.push("-m", req.model);
+    }
+    return args;
+  }
+  async *chatTurn(req, opts) {
+    const prompt = assembleCodexPrompt(req.messages);
+    const args = this.buildArgs(req);
+    const refusal = refuseUngovernedEnv(opts?.env);
+    if (refusal) {
+      yield { type: "error", message: refusal };
+      return;
+    }
+    if (this.codexPath === void 0) {
+      yield {
+        type: "error",
+        message: "codex is not available: no absolute codex binary was resolved for this chat turn (refusing to spawn a bare `codex` from the ambient PATH)."
+      };
+      return;
+    }
+    const env = {
+      ...opts.env,
+      CI: "1"
+    };
+    const child = spawn3(this.codexPath, args, {
+      cwd: req.cwd,
+      env,
+      stdio: ["pipe", "pipe", "pipe"]
+    });
+    const events = [];
+    let resolveNext;
+    let settled = false;
+    let finished = false;
+    const wake = () => {
+      if (resolveNext) {
+        const r = resolveNext;
+        resolveNext = void 0;
+        r();
+      }
+    };
+    const push = (e) => {
+      events.push(e);
+      wake();
+    };
+    const answerChunks = [];
+    let usage;
+    let stdoutBuf = "";
+    let stderrTail = "";
+    const handleLine = (line) => {
+      const trimmed = line.trim();
+      if (trimmed.length === 0) return;
+      let evt;
+      try {
+        evt = JSON.parse(trimmed);
+      } catch {
+        return;
+      }
+      if (evt.type === "item.completed" && evt.item?.type === "agent_message") {
+        const text = typeof evt.item.text === "string" ? evt.item.text : "";
+        if (text.length > 0) {
+          answerChunks.push(text);
+          push({ type: "delta", text });
+        }
+      } else if (evt.type === "turn.completed" && evt.usage) {
+        const inputTokens = asNum(evt.usage.input_tokens);
+        const outputTokens = asNum(evt.usage.output_tokens);
+        if (inputTokens !== void 0 || outputTokens !== void 0) {
+          usage = {
+            ...inputTokens !== void 0 ? { inputTokens } : {},
+            ...outputTokens !== void 0 ? { outputTokens } : {}
+          };
+        }
+      }
+    };
+    child.stdout.setEncoding("utf8");
+    child.stdout.on("data", (chunk) => {
+      stdoutBuf += chunk;
+      let nl;
+      while ((nl = stdoutBuf.indexOf("\n")) !== -1) {
+        const line = stdoutBuf.slice(0, nl).replace(/\r$/, "");
+        stdoutBuf = stdoutBuf.slice(nl + 1);
+        handleLine(line);
+      }
+    });
+    child.stderr.setEncoding("utf8");
+    child.stderr.on("data", (chunk) => {
+      stderrTail = (stderrTail + chunk).slice(-STDERR_TAIL_LIMIT);
+    });
+    const settle = (e) => {
+      if (settled) return;
+      settled = true;
+      push(e);
+    };
+    let timedOut = false;
+    const timer = setTimeout(() => {
+      timedOut = true;
+      child.kill("SIGKILL");
+    }, this.timeoutMs);
+    if (timer.unref) timer.unref();
+    let aborted = false;
+    const onAbort = () => {
+      aborted = true;
+      child.kill("SIGKILL");
+    };
+    if (opts?.signal) {
+      if (opts.signal.aborted) onAbort();
+      else opts.signal.addEventListener("abort", onAbort, { once: true });
+    }
+    const cleanup = () => {
+      clearTimeout(timer);
+      if (opts?.signal) opts.signal.removeEventListener("abort", onAbort);
+    };
+    child.on("error", (err) => {
+      cleanup();
+      settle({
+        type: "error",
+        message: `codex spawn failed: ${String(err?.message ?? err)}`
+      });
+      finished = true;
+      wake();
+    });
+    child.on("close", (code) => {
+      cleanup();
+      if (stdoutBuf.trim().length > 0) {
+        handleLine(stdoutBuf);
+        stdoutBuf = "";
+      }
+      if (timedOut) {
+        settle({
+          type: "error",
+          message: `codex chat turn timed out after ${this.timeoutMs}ms`
+        });
+      } else if (aborted) {
+        settle({ type: "error", message: "codex chat turn aborted" });
+      } else if (code === 0) {
+        settle({ type: "done", text: answerChunks.join(""), ...usage ? { usage } : {} });
+      } else {
+        const rawTail = stderrTail.trim();
+        if (rawTail && this.onOperatorLog) {
+          try {
+            this.onOperatorLog(`codex exec exited ${code ?? "null"} (verbatim stderr tail): ${rawTail}`);
+          } catch {
+          }
+        }
+        const redacted = rawTail ? redactStderrTail(rawTail) : "";
+        settle({
+          type: "error",
+          message: `codex exec exited ${code ?? "null"}` + (redacted ? ` (redacted detail: ${redacted})` : "")
+        });
+      }
+      finished = true;
+      wake();
+    });
+    child.stdin.on("error", () => {
+    });
+    child.stdin.end(prompt, "utf8");
+    let i = 0;
+    for (; ; ) {
+      while (i < events.length) {
+        yield events[i];
+        i += 1;
+      }
+      if (finished && i >= events.length) break;
+      await new Promise((resolve5) => {
+        resolveNext = resolve5;
+      });
+    }
+  }
+};
+
+// ../spikes/p0-model-gateway/ollama-backend.ts
+var DEFAULT_OLLAMA_HOST = "http://127.0.0.1:11434";
+var DEFAULT_OLLAMA_CHAT_MODEL = "qwen2.5-coder:7b";
+var OLLAMA_MODEL_LIST_CAP = 16;
+var ERROR_BODY_CAP = 300;
+var OLLAMA_NUM_PREDICT_MIN = 1;
+var OLLAMA_NUM_PREDICT_CAP = 8192;
+function clampNumPredict(maxOutputTokens) {
+  if (typeof maxOutputTokens !== "number" || !Number.isFinite(maxOutputTokens)) return void 0;
+  const n = Math.floor(maxOutputTokens);
+  return Math.min(OLLAMA_NUM_PREDICT_CAP, Math.max(OLLAMA_NUM_PREDICT_MIN, n));
+}
+function isLoopbackHost(host) {
+  let url;
+  try {
+    url = new URL(host);
+  } catch {
+    return false;
+  }
+  if (url.protocol !== "http:" && url.protocol !== "https:") return false;
+  const h = url.hostname.toLowerCase();
+  return h === "localhost" || h === "[::1]" || h === "::1" || /^127\.\d{1,3}\.\d{1,3}\.\d{1,3}$/.test(h);
+}
+async function probeOllamaModels(host = DEFAULT_OLLAMA_HOST, cap = OLLAMA_MODEL_LIST_CAP) {
+  if (!isLoopbackHost(host)) {
+    return { ok: false, detail: `non-loopback ollama host "${host}" refused (local backend is loopback-only in v1)` };
+  }
+  let res;
+  try {
+    res = await fetch(`${host}/api/tags`);
+  } catch (err) {
+    return { ok: false, detail: `ollama daemon unreachable at ${host}: ${String(err?.message ?? err)}` };
+  }
+  if (!res.ok) {
+    return { ok: false, detail: `ollama /api/tags HTTP ${res.status}` };
+  }
+  try {
+    const data = await res.json();
+    const names = (Array.isArray(data.models) ? data.models : []).map((m) => typeof m?.name === "string" ? m.name : void 0).filter((n) => typeof n === "string" && n.length > 0).slice(0, cap);
+    return { ok: true, models: names };
+  } catch (err) {
+    return { ok: false, detail: `ollama /api/tags returned an unparseable body: ${String(err?.message ?? err)}` };
+  }
+}
+var OllamaChatBackend = class {
+  id = "ollama";
+  /** The model used when a turn has no override — surfaced so the gateway's trace breadcrumb names it. */
+  defaultModel;
+  host;
+  timeoutMs;
+  /** Set at construction when `host` failed the loopback guard; fails every turn honestly. */
+  hostError;
+  constructor(opts = {}) {
+    this.host = opts.host ?? DEFAULT_OLLAMA_HOST;
+    this.defaultModel = opts.model ?? DEFAULT_OLLAMA_CHAT_MODEL;
+    this.timeoutMs = opts.timeoutMs ?? 12e4;
+    this.hostError = isLoopbackHost(this.host) ? void 0 : `refusing non-loopback ollama host "${this.host}": the local chat backend is loopback-only in v1 (a remote daemon would silently turn the sovereign-local leg into network egress).`;
+  }
+  async *chatTurn(req, opts) {
+    if (this.hostError) {
+      yield { type: "error", message: this.hostError };
+      return;
+    }
+    const model = req.model ?? this.defaultModel;
+    const numPredict = clampNumPredict(req.maxOutputTokens);
+    const controller = new AbortController();
+    let timedOut = false;
+    const timer = setTimeout(() => {
+      timedOut = true;
+      controller.abort();
+    }, this.timeoutMs);
+    const onCallerAbort = () => controller.abort();
+    if (opts?.signal) {
+      if (opts.signal.aborted) controller.abort();
+      else opts.signal.addEventListener("abort", onCallerAbort, { once: true });
+    }
+    const abortMessage = () => timedOut ? `ollama chat turn timed out after ${this.timeoutMs}ms` : "ollama chat turn aborted";
+    try {
+      let res;
+      try {
+        res = await fetch(`${this.host}/api/chat`, {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({
+            model,
+            // Content-only projection: role/content exactly (no extra fields leak).
+            messages: req.messages.map((m) => ({ role: m.role, content: m.content })),
+            stream: true,
+            ...numPredict !== void 0 ? { options: { num_predict: numPredict } } : {}
+          }),
+          signal: controller.signal
+        });
+      } catch (err) {
+        if (controller.signal.aborted) {
+          yield { type: "error", message: abortMessage() };
+          return;
+        }
+        yield {
+          type: "error",
+          message: `ollama daemon unreachable at ${this.host}: ${String(err?.message ?? err)}`
+        };
+        return;
+      }
+      if (!res.ok) {
+        let tail = "";
+        try {
+          tail = (await res.text()).slice(0, ERROR_BODY_CAP);
+        } catch {
+        }
+        yield { type: "error", message: `ollama /api/chat HTTP ${res.status}${tail ? `: ${tail}` : ""}` };
+        return;
+      }
+      if (!res.body) {
+        yield { type: "error", message: "ollama /api/chat returned no response body to stream" };
+        return;
+      }
+      const reader = res.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = "";
+      let fullText = "";
+      let usage;
+      let sawDone = false;
+      const handleLine = (line) => {
+        let chunk;
+        try {
+          chunk = JSON.parse(line);
+        } catch {
+          return {
+            type: "error",
+            message: `ollama /api/chat emitted a malformed NDJSON line (${line.slice(0, 80)}\u2026) \u2014 failing the turn rather than skipping unverified output`
+          };
+        }
+        if (chunk.error !== void 0) {
+          return { type: "error", message: `ollama /api/chat reported an error: ${String(chunk.error).slice(0, ERROR_BODY_CAP)}` };
+        }
+        const content = chunk.message?.content;
+        if (typeof content === "string" && content.length > 0) {
+          fullText += content;
+          if (chunk.done !== true) return { type: "delta", text: content };
+        }
+        if (chunk.done === true) {
+          sawDone = true;
+          const input = typeof chunk.prompt_eval_count === "number" ? chunk.prompt_eval_count : void 0;
+          const output = typeof chunk.eval_count === "number" ? chunk.eval_count : void 0;
+          if (input !== void 0 || output !== void 0) {
+            usage = {
+              ...input !== void 0 ? { inputTokens: input } : {},
+              ...output !== void 0 ? { outputTokens: output } : {}
+            };
+          }
+        }
+        return void 0;
+      };
+      while (true) {
+        let step;
+        try {
+          step = await reader.read();
+        } catch (err) {
+          yield {
+            type: "error",
+            message: controller.signal.aborted ? abortMessage() : `ollama /api/chat stream failed mid-turn: ${String(err?.message ?? err)}`
+          };
+          return;
+        }
+        if (step.done) break;
+        buffer += decoder.decode(step.value, { stream: true });
+        let nl;
+        while ((nl = buffer.indexOf("\n")) >= 0) {
+          const line = buffer.slice(0, nl).trim();
+          buffer = buffer.slice(nl + 1);
+          if (!line) continue;
+          const event = handleLine(line);
+          if (event) {
+            yield event;
+            if (event.type === "error") return;
+          }
+          if (sawDone) break;
+        }
+        if (sawDone) break;
+      }
+      const trailing = (buffer + decoder.decode()).trim();
+      if (!sawDone && trailing) {
+        const event = handleLine(trailing);
+        if (event) {
+          yield event;
+          if (event.type === "error") return;
+        }
+      }
+      if (!sawDone) {
+        yield {
+          type: "error",
+          message: "ollama /api/chat stream ended without a terminal done chunk \u2014 the turn is incomplete"
+        };
+        return;
+      }
+      yield { type: "done", text: fullText, ...usage ? { usage } : {} };
+    } finally {
+      clearTimeout(timer);
+      opts?.signal?.removeEventListener("abort", onCallerAbort);
+    }
+  }
+};
+
 // ../spikes/p0-model-gateway/anthropic-backend.ts
+import { readFileSync as readFileSync6, statSync as statSync2 } from "node:fs";
+import { homedir as homedir2 } from "node:os";
+import { join as join10 } from "node:path";
 var DEFAULT_ANTHROPIC_BASE_URL = "https://api.anthropic.com";
 var DEFAULT_ANTHROPIC_MODEL = "claude-sonnet-4-6";
 var ANTHROPIC_VERSION = "2023-06-01";
@@ -7766,29 +8199,6 @@ function clampMaxTokens(requested, fallback) {
   if (typeof requested !== "number" || !Number.isFinite(requested)) return fallback;
   return Math.max(1, Math.floor(requested));
 }
-var SseParser = class {
-  buffered = "";
-  feed(text) {
-    this.buffered += text;
-    const events = [];
-    for (; ; ) {
-      const sep3 = this.buffered.search(/\r?\n\r?\n/);
-      if (sep3 === -1) return events;
-      const sepLen = /^\r\n\r\n/.test(this.buffered.slice(sep3)) ? 4 : 2;
-      const block = this.buffered.slice(0, sep3);
-      this.buffered = this.buffered.slice(sep3 + sepLen);
-      let eventName = "";
-      const dataLines = [];
-      for (const line of block.split(/\r?\n/)) {
-        if (line.startsWith("event:")) eventName = line.slice("event:".length).trim();
-        else if (line.startsWith("data:")) dataLines.push(line.slice("data:".length).trimStart());
-      }
-      if (eventName || dataLines.length > 0) {
-        events.push({ event: eventName, data: dataLines.join("\n") });
-      }
-    }
-  }
-};
 function capErrorText(text) {
   const oneLine = text.replace(/[\r\n\t]+/g, " ").trim();
   return oneLine.length > ERROR_BODY_CAP2 ? `${oneLine.slice(0, ERROR_BODY_CAP2)}\u2026` : oneLine;
@@ -11282,12 +11692,15 @@ var BridgeServer = class {
   /**
    * The CONNECTION-SCOPED MCP broker state (#9 — governed MCP brokering): the
    * session workspace's loaded `.glyphstudio/mcp.json` entries plus ONE
-   * supervisor-owned {@link McpStdioClient} (server child process) per usable
-   * entry, keyed by server name. Established lazily by `mcp/list` (or a first
+   * supervisor-owned {@link McpClient} per usable entry, keyed by server name
+   * — a {@link McpStdioClient} (server child process) for stdio entries, a
+   * {@link McpHttpClient} (Streamable HTTP through the governed session
+   * proxy) for url entries. Established lazily by `mcp/list` (or a first
    * `mcp/call`) against the SAME pinned session root the index RPCs bind to.
-   * The server children are connection-scoped: {@link shutdown} disposes every
-   * client (SIGTERM → SIGKILL), so MCP children die with the connection —
-   * mirroring the governed-chat-session / remoteTraceWriters lifecycle.
+   * Clients are connection-scoped: {@link shutdown} disposes every client
+   * (SIGTERM → SIGKILL for children; best-effort session DELETE for http), so
+   * MCP servers die with the connection — mirroring the governed-chat-session
+   * / remoteTraceWriters lifecycle.
    */
   mcpBroker;
   /**
@@ -11391,6 +11804,16 @@ var BridgeServer = class {
    * the open socket keeps the event loop alive). Idempotent; resolve-never-reject.
    */
   async shutdown() {
+    const mcpBroker = this.mcpBroker;
+    this.mcpBroker = void 0;
+    if (mcpBroker) {
+      for (const client of mcpBroker.clients.values()) {
+        try {
+          await client.dispose();
+        } catch {
+        }
+      }
+    }
     const governed = this.chatGovernedSession;
     this.chatGovernedSession = void 0;
     if (governed) {
@@ -11413,16 +11836,6 @@ var BridgeServer = class {
       }
     }
     this.pendingMcpApprovals.clear();
-    const mcpBroker = this.mcpBroker;
-    this.mcpBroker = void 0;
-    if (mcpBroker) {
-      for (const client of mcpBroker.clients.values()) {
-        try {
-          await client.dispose();
-        } catch {
-        }
-      }
-    }
   }
   /** Parse one NDJSON line and dispatch it (resolve-never-throw). */
   handleLine(line) {
@@ -14197,7 +14610,7 @@ var BridgeServer = class {
     for (const entry of loaded.entries) {
       if (!entry.ok) continue;
       const spec = entry.spec;
-      const specIdentity = JSON.stringify({ command: spec.command, args: spec.args, env: spec.env });
+      const specIdentity = spec.kind === "http" ? JSON.stringify({ url: spec.url, headers: spec.headers }) : JSON.stringify({ command: spec.command, args: spec.args, env: spec.env });
       const existing = prevClients?.get(entry.name);
       if (existing && existing.specIdentity === specIdentity) {
         clients.set(entry.name, existing);
@@ -14206,7 +14619,23 @@ var BridgeServer = class {
       }
       clients.set(
         entry.name,
-        new McpStdioClient(spec, {
+        spec.kind === "http" ? new McpHttpClient(spec, {
+          // Streamable HTTP egress goes through the GOVERNED SESSION PROXY
+          // (the same session every mcp/call is trace-anchored to). The
+          // provider is resolved lazily PER REQUEST: the session exists on
+          // demand, and a re-pointed session re-points the next request.
+          getProxyUrl: async () => {
+            const governed = await this.ensureChatGovernedSession();
+            if (!governed) {
+              throw new Error(
+                "could not open a governed session (run + egress proxy) \u2014 refusing ungoverned MCP egress"
+              );
+            }
+            return governed.proxyUrl;
+          },
+          ...this.mcp?.callTimeoutMs !== void 0 ? { callTimeoutMs: this.mcp.callTimeoutMs } : {},
+          logLine: (line) => this.logLine(`[bridge-server] ${line}`)
+        }) : new McpStdioClient(spec, {
           ...this.mcp?.callTimeoutMs !== void 0 ? { callTimeoutMs: this.mcp.callTimeoutMs } : {},
           logLine: (line) => this.logLine(`[bridge-server] ${line}`)
         })
@@ -14238,7 +14667,12 @@ var BridgeServer = class {
    * {@link handleMcpCall}. Honesty note: discovery DOES spawn the configured
    * server child (third-party code, under the sanitized PATH/HOME-only env) —
    * that is the unavoidable cost of asking a stdio server what tools it has,
-   * and it is exactly what the operator opted into by writing the config entry.
+   * and it is exactly what the operator opted into by writing the config
+   * entry. For url (Streamable HTTP) entries discovery performs governed
+   * EGRESS instead: initialize + tools/list POSTs through the governed
+   * session proxy (the client's lazy getProxyUrl provider makes the session
+   * exist on demand, so no reordering is needed here) — same opt-in, same
+   * traced boundary.
    *
    * Session-bound like the index RPCs: the requested workspaceRoot must
    * resolve to the connection's pinned session root (bindSessionRoot).
