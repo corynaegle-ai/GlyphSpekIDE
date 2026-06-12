@@ -2567,7 +2567,14 @@ function activate(context) {
         if (typeof runId === 'string' && runId.length > 0) {
             governedFloatingOwnedRunIds.add(runId);
         }
-    }));
+    }), 
+    // BROKER CHIPS (inline-in-pty) — the fork's terminal-chips decoration contrib
+    // fetches a run's per-command decision chip rows over this seam after each
+    // finished shell command. PURE projection over the module-level chip store;
+    // an unknown/malformed runId returns the empty shape (no rows, zero dropped)
+    // — never throws. View-only (a projection of decisions the broker already
+    // traced; it confers no trust), so no gesture gate is needed.
+    vscode.commands.registerCommand('glyphstudio.governedTerminal.getCommandChips', (runId) => (0, terminalDecisionChips_1.projectCommandChipsResponse)(governedTerminalDecisionChips, runId, Date.now())));
     // EXPLICITLY UNGOVERNED TERMINAL (⌃⌘U). A first-class, deliberate accelerator for a
     // PLAIN host shell — full host env, NO supervisor proxy, command + network egress NOT
     // traced. This is NOT a new escape hatch: stock/ungoverned terminals already exist
@@ -5620,6 +5627,12 @@ async function openGovernedTerminalSurface(context, output, surface, detected) {
         proxyUrl: start.proxyUrl,
         baseEnv: process.env,
     });
+    // Stamp the governed-owned env marker (= runId) so the FORK can identify this
+    // terminal as a governed surface UNIFORMLY with the ⌃⌘K floating terminal (the
+    // inline-in-pty broker-chips contrib keys off creationOptions.env carrying this
+    // marker). The value is just the runId — not sensitive. Inert; carried through
+    // strictEnv; secondary to the WeakMap recorded at creation.
+    terminalEnv[governedFloatingTerminal_1.FLOATING_GOVERNED_TERMINAL_ENV_MARKER] = start.runId;
     // isTransient: do NOT let VS Code PERSIST/RESTORE this terminal across a window
     // reload. A governed terminal's HTTPS_PROXY/HTTP_PROXY points at THIS supervisor
     // process's metadata-only egress proxy (e.g. http://127.0.0.1:<port>), which is bound

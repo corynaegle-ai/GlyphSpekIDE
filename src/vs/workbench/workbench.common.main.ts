@@ -391,6 +391,7 @@ import './contrib/welcomeOnboarding/browser/welcomeOnboarding.contribution.js';
 // GlyphStudio Home (PATCH-004): the full-window landing surface the IDE opens on at startup.
 import './contrib/glyphstudioHome/browser/glyphstudioHome.contribution.js';
 import './contrib/glyphstudioHome/browser/floatingTerminal.contribution.js';
+import './contrib/glyphstudioHome/browser/terminalChips.contribution.js';
 
 // Call Hierarchy
 import './contrib/callHierarchy/browser/callHierarchy.contribution.js';

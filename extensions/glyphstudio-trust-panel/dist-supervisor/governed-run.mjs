@@ -33,6 +33,16 @@ var UNTRUSTED_PROVENANCE = [
   "tool-output",
   "mcp"
 ];
+function joinProvenance(labels) {
+  if (labels.length === 0) {
+    throw new Error("joinProvenance: empty label set (callers must supply the base label)");
+  }
+  for (const untrusted of UNTRUSTED_PROVENANCE) {
+    if (labels.includes(untrusted)) return untrusted;
+  }
+  if (labels.includes("user")) return "user";
+  return labels[0];
+}
 
 // ../spikes/p0-contracts/policy.ts
 var POLICY_DEFAULT_VERBS = ["allow", "deny", "ask"];
@@ -2101,6 +2111,16 @@ ${errOut}`;
         }
       }
     },
+    appendTaintStateChanged(payload) {
+      sink.append({
+        v: TRACE_EVENT_VERSION,
+        runId,
+        seq: 0,
+        ts: Date.now(),
+        type: "taint_state_changed",
+        payload
+      });
+    },
     finalize: finalizeSession,
     teardown: teardownSession,
     async finish() {
@@ -2112,6 +2132,18 @@ ${errOut}`;
     }
   };
   return session;
+}
+function toolResultProvenance(name, executed) {
+  switch (name) {
+    case "read_file":
+      return "repo";
+    case "run_command":
+      return executed ? "tool-output" : "user";
+    case "write_file":
+      return "artifact";
+    default:
+      return "user";
+  }
 }
 function systemPrompt() {
   return [
@@ -2134,18 +2166,21 @@ async function runAgentLoop(opts) {
     host,
     baseDir,
     policyPath,
-    deferTeardown = false
+    deferTeardown = false,
+    taintMode = "observe",
+    chat = ollamaChat
   } = opts;
   const session = await createAgentSession({ repoPath, baseDir, policyPath, runtime });
   let turns = 0;
   let toolCalls = 0;
+  const taint = /* @__PURE__ */ new Set();
   try {
     const messages = [
       { role: "system", content: systemPrompt() },
       { role: "user", content: task }
     ];
     for (let turn = 0; turn < maxTurns; turn++) {
-      const msg = await ollamaChat({ model, messages, tools: AGENT_TOOLS, host });
+      const msg = await chat({ model, messages, tools: AGENT_TOOLS, host });
       turns += 1;
       messages.push(msg);
       const calls = msg.tool_calls && msg.tool_calls.length > 0 ? msg.tool_calls : parseToolCallsFromContent(msg.content);
@@ -2154,8 +2189,21 @@ async function runAgentLoop(opts) {
         toolCalls += 1;
         const name = call.function.name;
         const args = parseToolArgs(call.function.arguments);
-        const result = await session.dispatchToolCall(name, args, "user");
-        messages.push({ role: "tool", content: result, tool_name: name });
+        const dispatchLabel = taintMode === "enforce" ? joinProvenance(["user", ...taint]) : "user";
+        const commandsRunBefore = session.commandsRun;
+        const result = await session.dispatchToolCall(name, args, dispatchLabel);
+        const executed = session.commandsRun > commandsRunBefore;
+        const resultLabel = toolResultProvenance(name, executed);
+        messages.push({ role: "tool", content: result, tool_name: name, provenance: resultLabel });
+        if (UNTRUSTED_PROVENANCE.includes(resultLabel) && !taint.has(resultLabel)) {
+          const previous = [...taint];
+          taint.add(resultLabel);
+          session.appendTaintStateChanged({
+            previous,
+            ingested: { label: resultLabel, tool: name },
+            effective: [...taint]
+          });
+        }
       }
     }
     const finalCheck = await session.sandbox.exec({ command: ["npm", "test"] });

@@ -1524,6 +1524,16 @@ var UNTRUSTED_PROVENANCE = [
   "tool-output",
   "mcp"
 ];
+function joinProvenance(labels) {
+  if (labels.length === 0) {
+    throw new Error("joinProvenance: empty label set (callers must supply the base label)");
+  }
+  for (const untrusted of UNTRUSTED_PROVENANCE) {
+    if (labels.includes(untrusted)) return untrusted;
+  }
+  if (labels.includes("user")) return "user";
+  return labels[0];
+}
 
 // ../spikes/p0-contracts/policy.ts
 var POLICY_DEFAULT_VERBS = ["allow", "deny", "ask"];
@@ -11661,6 +11671,10 @@ var BridgeServer = class {
         enforcement: "observe-only",
         provenanceLabel: "web",
         rule: "observed \u2014 @Web public-document fetch through governed soft egress; NOT a hard allowlist authorization",
+        // Taint v1, OBSERVE-ONLY: the run's effective provenance at record
+        // time, joined from prior untrusted ingestions. Recorded for the
+        // audit trail; the soft plane still blocks nothing.
+        runEffectiveProvenance: this.runEffectiveProvenance(run2),
         ...attempt.contentSha256 ? { contentSha256: attempt.contentSha256 } : {}
       };
       const appended = sink.append({
@@ -11688,6 +11702,24 @@ var BridgeServer = class {
         ...typeof params.maxRedirects === "number" ? { maxRedirects: params.maxRedirects } : {},
         onAttempt: recordAttempt
       });
+      if (result.ok && run2 && sink) {
+        this.ingestRunTaint(run2, "web", "web/fetch", (type, payload) => {
+          const appended = sink.append({
+            v: TRACE_EVENT_VERSION,
+            runId: governed.runId,
+            seq: 0,
+            ts: Date.now(),
+            type,
+            payload
+          });
+          this.emitRunEventEnvelope({
+            rev: RUN_EVENT_PROTOCOL_VERSION,
+            runId: governed.runId,
+            kind: "trace_event",
+            event: appended
+          });
+        });
+      }
       const response = result.ok ? { ...result, runId: governed.runId } : result;
       this.emit(this.successResponse(req.id, response));
     } catch (err) {
@@ -13628,15 +13660,53 @@ var BridgeServer = class {
     }
   }
   /**
+   * The run's EFFECTIVE provenance (taint-label propagation v1): the trust
+   * lattice JOIN of 'user' (the operator initiated the session) with every
+   * untrusted label the run has ingested through a brokered seam. Untainted
+   * run → 'user'; tainted run → an untrusted label, which the EXISTING decide()
+   * taint firewall escalates allow → force_ask for privileged tools.
+   */
+  runEffectiveProvenance(run2) {
+    return joinProvenance(["user", ...run2?.taintIngested ?? []]);
+  }
+  /**
+   * Record that `run` INGESTED content carrying the untrusted `label` through
+   * `tool` (a capability-style name, e.g. `mcp/<server>/<tool>`). Idempotent
+   * per label: only the FIRST ingestion of a given label elevates the run's
+   * taint set and appends ONE `taint_state_changed` event (labels only, never
+   * content) via `append`. Trusted labels are ignored — only untrusted
+   * ingestion changes trust state.
+   */
+  ingestRunTaint(run2, label, tool, append) {
+    if (!UNTRUSTED_PROVENANCE.includes(label)) return;
+    const set = run2.taintIngested ??= /* @__PURE__ */ new Set();
+    if (set.has(label)) return;
+    const previous = [...set];
+    set.add(label);
+    const payload = {
+      previous,
+      ingested: { label, tool },
+      effective: [...set]
+    };
+    append("taint_state_changed", payload);
+  }
+  /**
    * mcp/call — broker ONE MCP tool call (#9). The supervisor:
    *   1. RE-VALIDATES the wire shape with the contract gate
    *      {@link assertMcpCallWellFormed} (malformed → JSON-RPC error carrying
    *      the gate's dotted problem tags — never repaired);
    *   2. routes the call through decide() as tool kind 'mcp' with capability
    *      `mcp/<server>/<tool>` BEFORE anything reaches the third-party server.
-   *      The request's provenance is 'user' (the first-party UI asks on the
-   *      operator's behalf — the agent-loop dispatch default); the RESULT data
-   *      is what carries the 'mcp' (UNTRUSTED) provenance label;
+   *      The request's provenance is the run's EFFECTIVE provenance
+   *      ({@link runEffectiveProvenance}): 'user' while the run is untainted
+   *      (the first-party UI asks on the operator's behalf), but once the run
+   *      has INGESTED untrusted content (an earlier ok MCP result → 'mcp')
+   *      the effective label is untrusted and the EXISTING decide() taint
+   *      firewall escalates allow → force_ask — the operator confirms via the
+   *      existing approval modal, zero new enforcement code. The RESULT data
+   *      always carries the 'mcp' (UNTRUSTED) provenance label, and an ok
+   *      result elevates the run's taint set ({@link ingestRunTaint}, one
+   *      `taint_state_changed` event per label);
    *   3. TRACES with EXISTING event types only — policy_decision before
    *      execution, tool_start/tool_end around it — on the SAME hash-chained
    *      trace the connection's governed chat session uses (lazily opened via
@@ -13727,7 +13797,7 @@ var BridgeServer = class {
       const runId = governed.runId;
       const run2 = this.runs.get(runId);
       const tracePath = run2?.created?.dir ? join17(runSubdirPath(run2.created.dir, "trace"), "trace.jsonl") : void 0;
-      if (!tracePath) {
+      if (!run2 || !tracePath) {
         respond({
           status: "error",
           reason: "governed session has no trace path \u2014 refusing to broker an untraced MCP call"
@@ -13757,7 +13827,7 @@ var BridgeServer = class {
         runId,
         tool: "mcp",
         payload: { server: call.server, tool: call.tool, argsJson: call.argsJson },
-        provenanceLabel: "user",
+        provenanceLabel: this.runEffectiveProvenance(run2),
         requestedCapability: mcpCapability(call.server, call.tool)
       };
       const decision = decide(policy, request);
@@ -13812,6 +13882,7 @@ var BridgeServer = class {
       };
       appendAndMirror("tool_end", toolEnd);
       if (outcome.status === "ok") {
+        this.ingestRunTaint(run2, "mcp", request.requestedCapability, appendAndMirror);
         respond({
           status: "ok",
           ...outcome.resultJson !== void 0 ? { resultJson: outcome.resultJson } : {}

@@ -1,0 +1,44 @@
+/*---------------------------------------------------------------------------------------------
+ *  Copyright (c) Microsoft Corporation. All rights reserved.
+ *  Licensed under the MIT License. See License.txt in the project root for license information.
+ *--------------------------------------------------------------------------------------------*/
+
+/*
+ * GLYPHSTUDIO GOVERNED TERMINAL — inline broker decision chips.
+ *
+ * The chip decoration is an OWN xterm decoration registered on the command's marker
+ * (terminalChipsController.ts). Core's command-decoration circle renders 16px wide at
+ * margin-left -17px (decorationStyles.ts), i.e. fully inside the terminal's left
+ * padding. The chip badge stays at the marker cell (margin-left 0) and is shrunk +
+ * raised into the cell's top-left corner, so the two never collide. Theme tokens only —
+ * no hardcoded hex (the floatingTerminal.css house rule).
+ */
+
+.glyphstudio-terminal-chips {
+	width: 8px;
+	height: 8px;
+	font-size: 8px;
+	line-height: 8px;
+	text-align: left;
+	/* Superscript-corner offset: clear of core's circle (left padding) AND of most of
+	 * the prompt's first glyph. */
+	transform: translateY(-30%);
+	cursor: pointer;
+	z-index: 7;
+	color: var(--vscode-descriptionForeground);
+}
+
+/* Every decision observed (soft plane — watched, not blocked): neutral, no posture color. */
+.glyphstudio-terminal-chips.glyphstudio-terminal-chips-observed {
+	color: var(--vscode-descriptionForeground);
+}
+
+/* At least one ask/deny — needs a look. */
+.glyphstudio-terminal-chips.glyphstudio-terminal-chips-attention {
+	color: var(--vscode-editorWarning-foreground);
+}
+
+/* Enforced decisions without ask/deny (hard-plane labels, rendered verbatim). */
+.glyphstudio-terminal-chips.glyphstudio-terminal-chips-enforced {
+	color: var(--vscode-charts-green);
+}
