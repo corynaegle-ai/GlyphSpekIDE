@@ -5980,6 +5980,42 @@ async function openGovernedChat(context, output) {
     await openGovernedTerminalSurface(context, output, 'chat', detected);
 }
 /**
+ * Resolve the POLICY PATH the native chat session forwards for governed MCP
+ * brokering (#9 policy-seam wiring): a CONFIGURED `glyphstudio.policyPath`
+ * scope (classified exactly as the governed-terminal path does — provenance
+ * honored, workspace values not silently merged away), or undefined.
+ *
+ * DELIBERATELY no bundled-default fallback here (unlike the governed-terminal
+ * path): the bundled default-governed-terminal-policy.json carries
+ * `defaults.mcp: "deny"` (the terminal's advisory deny-by-default posture), so
+ * forwarding it would silently flip default-install MCP brokering from the
+ * built-in all-ask HELD-APPROVAL flow to a flat deny. Unconfigured ⇒ omit the
+ * option ⇒ the supervisor's built-in all-ask policy keeps governing every
+ * mcp/call (approval modal, fail-closed) — the pre-slice behavior, unchanged.
+ * Operators opt in to per-server/per-tool rules via their own policy file.
+ *
+ * SILENT degrade — no toast, no picker: opening chat must stay one keystroke;
+ * the supervisor also independently FAIL-CLOSES to its built-in all-ask policy
+ * when a configured path is unloadable, so a bad path never weakens brokering.
+ * Returns undefined on a stub host without getConfiguration.
+ */
+function resolveChatPolicyPath() {
+    try {
+        if (typeof vscode.workspace.getConfiguration !== 'function')
+            return undefined;
+        const inspect = vscode.workspace
+            .getConfiguration('glyphstudio')
+            .inspect('policyPath');
+        const classified = (0, configScope_1.classifyPolicyPath)(inspect);
+        return classified.scope !== 'none' ? classified.path : undefined;
+    }
+    catch {
+        // Stub hosts (tests) may lack full configuration plumbing — omit silently;
+        // the supervisor's built-in all-ask default still governs every mcp/call.
+        return undefined;
+    }
+}
+/**
  * Build the production {@link NativeChatSessionFactory} for the native chat window:
  * it opens a {@link ChatSession} against the bundled, hash-pinned bridge-server, which
  * drives chat/send through the GlyphStudio model gateway's CODEX backend. No credential
@@ -6000,6 +6036,10 @@ function buildNativeChatSessionFactory(context, output) {
             // the supervisor (GLYPHSTUDIO_CHAT_ANTHROPIC_*). Non-secret config only —
             // the API key is never a setting and never crosses this boundary.
             const chatAnthropic = resolveChatAnthropicSettings();
+            // CHAT POLICY for governed MCP brokering (configured glyphstudio.policyPath
+            // only; unconfigured ⇒ omitted ⇒ the supervisor's built-in all-ask default —
+            // silent degrade, see resolveChatPolicyPath).
+            const policyPath = resolveChatPolicyPath();
             return (0, supervisorBridgeRunner_1.openChatSession)({
                 bridgeServerPath: resolveBundledBridgeServerPath(context),
                 extensionVersion: resolveExtensionVersion(context),
@@ -6007,6 +6047,7 @@ function buildNativeChatSessionFactory(context, output) {
                 ...(workspaceRoot ? { workspaceRoot } : {}),
                 ...(workspaceRoots.length > 0 ? { workspaceRoots } : {}),
                 ...(chatAnthropic ? { chatAnthropic } : {}),
+                ...(policyPath ? { policyPath } : {}),
                 output,
             });
         },

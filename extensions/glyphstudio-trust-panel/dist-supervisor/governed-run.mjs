@@ -104,11 +104,13 @@ function parsePolicy(raw) {
     if (!isStringArray(a.write_paths)) errors.push("allow.write_paths must be a string[]");
     if (!isStringMatrix(a.commands)) errors.push("allow.commands must be a string[][]");
     if (!isStringArray(a.network)) errors.push("allow.network must be a string[]");
+    if (a.mcp !== void 0 && !isStringMatrix(a.mcp)) errors.push("allow.mcp must be a string[][]");
     allow = {
       read_paths: isStringArray(a.read_paths) ? a.read_paths : [],
       write_paths: isStringArray(a.write_paths) ? a.write_paths : [],
       commands: isStringMatrix(a.commands) ? a.commands : [],
-      network: isStringArray(a.network) ? a.network : []
+      network: isStringArray(a.network) ? a.network : [],
+      mcp: isStringMatrix(a.mcp) ? a.mcp : []
     };
   }
   let deny;
@@ -119,10 +121,12 @@ function parsePolicy(raw) {
     if (!isStringArray(dn.read_paths)) errors.push("deny.read_paths must be a string[]");
     if (!isStringArray(dn.write_paths)) errors.push("deny.write_paths must be a string[]");
     if (!isStringMatrix(dn.commands)) errors.push("deny.commands must be a string[][]");
+    if (dn.mcp !== void 0 && !isStringMatrix(dn.mcp)) errors.push("deny.mcp must be a string[][]");
     deny = {
       read_paths: isStringArray(dn.read_paths) ? dn.read_paths : [],
       write_paths: isStringArray(dn.write_paths) ? dn.write_paths : [],
-      commands: isStringMatrix(dn.commands) ? dn.commands : []
+      commands: isStringMatrix(dn.commands) ? dn.commands : [],
+      mcp: isStringMatrix(dn.mcp) ? dn.mcp : []
     };
   }
   let verify;
@@ -1133,6 +1137,20 @@ function readHost(payload) {
   }
   return void 0;
 }
+function readServer(payload) {
+  if (typeof payload === "object" && payload !== null) {
+    const s = payload.server;
+    if (typeof s === "string") return s;
+  }
+  return void 0;
+}
+function readMcpTool(payload) {
+  if (typeof payload === "object" && payload !== null) {
+    const t = payload.tool;
+    if (typeof t === "string") return t;
+  }
+  return void 0;
+}
 function readPort(payload) {
   if (typeof payload === "object" && payload !== null) {
     const p = payload.port;
@@ -1209,6 +1227,12 @@ function decideRaw(policy, request) {
       return verbToDecision(policy.defaults.network);
     }
     case "mcp": {
+      const server = readServer(request.payload);
+      const mcpTool = readMcpTool(request.payload);
+      if (server !== void 0 && mcpTool !== void 0) {
+        if (anyCommandMatch(policy.deny.mcp, [server, mcpTool])) return "deny";
+        if (anyCommandMatch(policy.allow.mcp, [server, mcpTool])) return "allow";
+      }
       return verbToDecision(policy.defaults.mcp);
     }
     default: {

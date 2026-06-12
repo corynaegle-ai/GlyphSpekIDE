@@ -1469,6 +1469,10 @@ var init_firecracker_vsock = __esm({
   }
 });
 
+// ../spikes/p0-supervisor/bridge-server-cli.ts
+import { createHash as createHash10 } from "node:crypto";
+import { readFileSync as readFileSync10 } from "node:fs";
+
 // ../spikes/p0-supervisor/bridge-server.ts
 import { createHash as createHash9 } from "node:crypto";
 import { existsSync as existsSync9, readFileSync as readFileSync9, statSync as statSync5, realpathSync } from "node:fs";
@@ -1595,11 +1599,13 @@ function parsePolicy(raw) {
     if (!isStringArray(a.write_paths)) errors.push("allow.write_paths must be a string[]");
     if (!isStringMatrix(a.commands)) errors.push("allow.commands must be a string[][]");
     if (!isStringArray(a.network)) errors.push("allow.network must be a string[]");
+    if (a.mcp !== void 0 && !isStringMatrix(a.mcp)) errors.push("allow.mcp must be a string[][]");
     allow = {
       read_paths: isStringArray(a.read_paths) ? a.read_paths : [],
       write_paths: isStringArray(a.write_paths) ? a.write_paths : [],
       commands: isStringMatrix(a.commands) ? a.commands : [],
-      network: isStringArray(a.network) ? a.network : []
+      network: isStringArray(a.network) ? a.network : [],
+      mcp: isStringMatrix(a.mcp) ? a.mcp : []
     };
   }
   let deny;
@@ -1610,10 +1616,12 @@ function parsePolicy(raw) {
     if (!isStringArray(dn.read_paths)) errors.push("deny.read_paths must be a string[]");
     if (!isStringArray(dn.write_paths)) errors.push("deny.write_paths must be a string[]");
     if (!isStringMatrix(dn.commands)) errors.push("deny.commands must be a string[][]");
+    if (dn.mcp !== void 0 && !isStringMatrix(dn.mcp)) errors.push("deny.mcp must be a string[][]");
     deny = {
       read_paths: isStringArray(dn.read_paths) ? dn.read_paths : [],
       write_paths: isStringArray(dn.write_paths) ? dn.write_paths : [],
-      commands: isStringMatrix(dn.commands) ? dn.commands : []
+      commands: isStringMatrix(dn.commands) ? dn.commands : [],
+      mcp: isStringMatrix(dn.mcp) ? dn.mcp : []
     };
   }
   let verify;
@@ -2728,6 +2736,20 @@ function readHost(payload) {
   }
   return void 0;
 }
+function readServer(payload) {
+  if (typeof payload === "object" && payload !== null) {
+    const s = payload.server;
+    if (typeof s === "string") return s;
+  }
+  return void 0;
+}
+function readMcpTool(payload) {
+  if (typeof payload === "object" && payload !== null) {
+    const t = payload.tool;
+    if (typeof t === "string") return t;
+  }
+  return void 0;
+}
 function readPort(payload) {
   if (typeof payload === "object" && payload !== null) {
     const p = payload.port;
@@ -2804,6 +2826,12 @@ function decideRaw(policy, request) {
       return verbToDecision(policy.defaults.network);
     }
     case "mcp": {
+      const server2 = readServer(request.payload);
+      const mcpTool = readMcpTool(request.payload);
+      if (server2 !== void 0 && mcpTool !== void 0) {
+        if (anyCommandMatch(policy.deny.mcp, [server2, mcpTool])) return "deny";
+        if (anyCommandMatch(policy.allow.mcp, [server2, mcpTool])) return "allow";
+      }
       return verbToDecision(policy.defaults.mcp);
     }
     default: {
@@ -2831,9 +2859,10 @@ function builtinScriptedPolicy() {
       write_paths: ["src/**", "test/**"],
       // argv rules: `npm test` is allowed; `*` matches a single trailing token.
       commands: [["npm", "*"]],
-      network: ["registry.npmjs.org"]
+      network: ["registry.npmjs.org"],
+      mcp: []
     },
-    deny: { read_paths: [], write_paths: [], commands: [] },
+    deny: { read_paths: [], write_paths: [], commands: [], mcp: [] },
     verify: [["npm", "test"]]
   };
 }
@@ -10883,8 +10912,8 @@ var DEFAULT_MCP_APPROVAL_TIMEOUT_MS = 12e4;
 var DEFAULT_MCP_POLICY = {
   version: 1,
   defaults: { file_read: "ask", file_write: "ask", command: "ask", network: "deny", mcp: "ask" },
-  allow: { read_paths: [], write_paths: [], commands: [], network: [] },
-  deny: { read_paths: [], write_paths: [], commands: [] },
+  allow: { read_paths: [], write_paths: [], commands: [], network: [], mcp: [] },
+  deny: { read_paths: [], write_paths: [], commands: [], mcp: [] },
   verify: Object.freeze([])
 };
 var MAX_INDEX_UPDATE_BATCH_PATHS = 4096;
@@ -14611,11 +14640,15 @@ var BridgeServer = class {
           lifecycle,
           trust,
           // A minimal §10.3-shaped record for the retained run (codex CLI, local-exec).
+          // policyPath/policyHash: when the CLI loaded a chat policy (mcp policy-seam
+          // wiring), record the HONEST file facts it computed at load; otherwise keep
+          // the historical '' no-policy-configured markers (the built-in all-ask
+          // DEFAULT_MCP_POLICY has no file to point at — never invent one).
           request: {
             actorType: "codex-cli",
             autonomyTier: "allowlist",
-            policyPath: "",
-            policyHash: "",
+            policyPath: this.mcp?.policyPath ?? "",
+            policyHash: this.mcp?.policySha256 ?? "",
             workspaceRoot: created.dir,
             runtimeProfile: "local-exec",
             extensionPosture: "sovereign",
@@ -14647,7 +14680,7 @@ var BridgeServer = class {
         serverRun.terminalSession = session;
         const { env } = buildGovernedEnvResult({ proxyUrl: session.proxyUrl });
         this.logLine(
-          `[bridge-server] chat/send \u2192 governed chat session ${created.runId} (proxy=${session.proxyUrl}, trust=${trust}${actorBinary ? `, codex=${actorBinary.path}` : ""}).`
+          `[bridge-server] chat/send \u2192 governed chat session ${created.runId} (proxy=${session.proxyUrl}, trust=${trust}${actorBinary ? `, codex=${actorBinary.path}` : ""}${this.mcp?.policyPath ? `, policy=${this.mcp.policyPath}` : ""}).`
         );
         this.chatGovernedSession = { runId: created.runId, proxyUrl: session.proxyUrl, env, session };
         return this.chatGovernedSession;
@@ -14820,6 +14853,32 @@ var anthropic = {
   ...anthropicAttach ? { attach: anthropicAttach } : {},
   ...anthropicModel ? { model: anthropicModel } : {}
 };
+var chatPolicyPath = process.env.GLYPHSTUDIO_CHAT_POLICY_PATH?.trim();
+var mcp;
+if (chatPolicyPath) {
+  try {
+    const loaded = loadPolicy(chatPolicyPath);
+    if (loaded.policy) {
+      const policySha256 = createHash10("sha256").update(readFileSync10(chatPolicyPath)).digest("hex");
+      mcp = { policy: loaded.policy, policyPath: chatPolicyPath, policySha256 };
+      process.stderr.write(
+        `[bridge-server-cli] chat policy loaded: ${chatPolicyPath} (sha256 ${policySha256}).
+`
+      );
+    } else {
+      process.stderr.write(
+        `[bridge-server-cli] could not load chat policy at ${chatPolicyPath}: ${loaded.errors.join("; ")}; MCP brokering runs fail-closed on the built-in all-ask policy.
+`
+      );
+    }
+  } catch (err) {
+    const reason = err instanceof Error ? err.message : String(err);
+    process.stderr.write(
+      `[bridge-server-cli] could not load chat policy at ${chatPolicyPath}: ${reason}; MCP brokering runs fail-closed on the built-in all-ask policy.
+`
+    );
+  }
+}
 var agentic = {
   ...verifierPrivateKey ? { verifierPrivateKey } : {},
   ...verifierRuntime ? { verifierRuntime } : {}
@@ -14832,6 +14891,12 @@ var server = serveStdio(process, {
   // ChatGatewayConfig stays otherwise default — backend/env/ollamaHost are
   // test-only seams the production CLI never sets).
   ...Object.keys(anthropic).length > 0 ? { chat: { anthropic } } : {},
+  // CHAT POLICY for governed MCP brokering (policy-seam wiring): the loaded
+  // policy + its honest file facts. Absent (unset env or failed load) ⇒ the
+  // BridgeServer's built-in all-ask DEFAULT_MCP_POLICY fail-closes every
+  // mcp/call to the held-approval path. Today nothing else populates mcp here,
+  // so the whole field is this load's product.
+  ...mcp ? { mcp } : {},
   // THE REAL CHANGE-REVIEW RUNNER (#7 integration slice): bind `review/start`
   // to the governed review runner via the production adapter, configured from
   // the SAME knobs as the build path (codex resolved on PATH inside the

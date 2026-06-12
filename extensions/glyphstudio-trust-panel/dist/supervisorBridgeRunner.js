@@ -175,6 +175,12 @@ function buildBridgeEnv(opts) {
         env.GLYPHSTUDIO_CHAT_ANTHROPIC_ATTACH = anthropic.attach;
     if (anthropic?.model?.trim())
         env.GLYPHSTUDIO_CHAT_ANTHROPIC_MODEL = anthropic.model.trim();
+    // CHAT POLICY PATH for governed MCP brokering (#9 policy-seam wiring): a PATH
+    // only, never policy content — the supervisor loads + validates the file itself
+    // and FAIL-CLOSES to its built-in all-ask policy on any load failure. Empty /
+    // whitespace values are dropped so the supervisor's own default applies.
+    if (opts.policyPath?.trim())
+        env.GLYPHSTUDIO_CHAT_POLICY_PATH = opts.policyPath.trim();
     if (src.PATH !== undefined)
         env.PATH = src.PATH;
     if (src.HOME !== undefined)
@@ -527,8 +533,8 @@ exports.CHAT_BACKEND_ID = 'codex';
  */
 async function openChatSession(opts) {
     const { output } = opts;
-    // buildBridgeEnv only reads runsBase/supervisorVersion/chatAnthropic off opts; a
-    // chat session carries no §10.3 run request, so pass the env-relevant fields only.
+    // buildBridgeEnv only reads runsBase/supervisorVersion/chatAnthropic/policyPath off
+    // opts; a chat session carries no §10.3 run request, so pass the env-relevant fields only.
     const env = buildBridgeEnv(opts);
     output.appendLine('');
     output.appendLine('[host] GlyphStudio native chat — spawning packaged bridge-server.');
