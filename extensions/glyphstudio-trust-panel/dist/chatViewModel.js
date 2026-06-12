@@ -19,15 +19,16 @@
  *      result carries a credential-shaped field, and the assembled outbound
  *      request shape (ModelCallParams) has no credential field by construction.
  *
- * Pure + dependency-free so it compiles to dist/ and is unit-tested headlessly,
- * AND the same shapes/derivations are mirrored 1:1 in media/chat.js (the webview
- * cannot import CommonJS). The tests pin the invariants here; chat.js is a thin
- * renderer over this exact model.
+ * Pure + dependency-free so it compiles to dist/ and is unit-tested headlessly.
+ * (The legacy media/chat.js webview that mirrored these derivations was DELETED with
+ * the demo stub gateway; this module remains the pure, tested seam any future
+ * allowlist-driven model picker renders over.)
  */
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.CHAT_DECISIONS = void 0;
 exports.emptyChatView = emptyChatView;
 exports.applyAllowlist = applyAllowlist;
+exports.applyAllowlistFailure = applyAllowlistFailure;
 exports.selectModel = selectModel;
 exports.isModelAllowed = isModelAllowed;
 exports.selectedAllowedModel = selectedAllowedModel;
@@ -73,6 +74,21 @@ function applyAllowlist(view, models) {
         delete next.selectedModel;
         next.status = 'no models are allowlisted by the supervisor — the model picker is empty.';
     }
+    return next;
+}
+/**
+ * Fold a BRIDGE/ALLOWLIST FAILURE into the view: the picker shows the ERROR STATE,
+ * never phantom models. When the supervisor bridge cannot be reached (spawn/hash/
+ * handshake failure) there is NO trustworthy allowlist — so the picker is EMPTIED
+ * (no stale or invented entries survive), the selection is cleared, and the status
+ * carries the honest, non-secret failure reason. With no selectable model,
+ * {@link assembleUserCall} then refuses to send — the UI cannot quietly call a
+ * model nobody allowlisted.
+ */
+function applyAllowlistFailure(view, message) {
+    const next = { ...view, allowedModels: [] };
+    delete next.selectedModel;
+    next.status = `model allowlist unavailable — ${message && message.trim().length > 0 ? message.trim() : 'the supervisor bridge could not be reached.'}`;
     return next;
 }
 /** Select a model BY LABEL. Refuses (no-op) a label not on the allowlist. */

@@ -45,7 +45,7 @@
  * handler never wraps the bridge in try/catch around process lifecycle.
  */
 Object.defineProperty(exports, "__esModule", { value: true });
-exports.SupervisorBridge = exports.DEFAULT_INDEX_BUILD_TIMEOUT_MS = exports.defaultBridgeSpawn = void 0;
+exports.SupervisorBridge = exports.DEFAULT_MCP_CALL_TIMEOUT_MS = exports.DEFAULT_MCP_APPROVAL_WINDOW_MS = exports.DEFAULT_INDEX_BUILD_TIMEOUT_MS = exports.defaultBridgeSpawn = void 0;
 const node_child_process_1 = require("node:child_process");
 const supervisorBinary_1 = require("./supervisorBinary");
 const bridgeProtocol_1 = require("./bridgeProtocol");
@@ -82,6 +82,19 @@ const DEFAULT_REQUEST_TIMEOUT_MS = 30_000;
  * for the whole window. Overridable via the `glyphstudio.index.buildTimeoutMs` setting.
  */
 exports.DEFAULT_INDEX_BUILD_TIMEOUT_MS = 1_800_000;
+/**
+ * The supervisor's default window for an operator verdict on a parked ask/force_ask
+ * `mcp/call` (DEFAULT_MCP_APPROVAL_TIMEOUT_MS supervisor-side: 120s — after which it
+ * denies HONESTLY). Mirrored here only to derive the client-side request timeout.
+ */
+exports.DEFAULT_MCP_APPROVAL_WINDOW_MS = 120_000;
+/**
+ * The `mcp/call` request timeout. DELIBERATELY ABOVE the supervisor's approval
+ * window ({@link DEFAULT_MCP_APPROVAL_WINDOW_MS} + headroom for the call itself) so a
+ * call parked on the operator's Approve/Deny modal settles via the supervisor's
+ * HONEST verdict ('denied' on timeout) rather than a client-side transport timeout.
+ */
+exports.DEFAULT_MCP_CALL_TIMEOUT_MS = exports.DEFAULT_MCP_APPROVAL_WINDOW_MS + 60_000;
 /**
  * Grace period between the polite SIGTERM and the SIGKILL escalation in dispose().
  * The bridge-server exits cleanly on stdin-end/SIGTERM in the normal case; this
@@ -147,6 +160,28 @@ class SupervisorBridge {
         this.onBuildEvent = handler;
     }
     /**
+     * Register a handler for streamed `review/event` notifications (#7 change
+     * review). After a {@link startChangeReview} ack, the supervisor emits a
+     * sequence of {@link ChangeReviewStreamEvent}s tagged with the same `runId`;
+     * this sink receives each one so the review UI can surface lifecycle markers
+     * and finalize on the terminal `result` (carrying the ChangeReview) or `error`.
+     */
+    setReviewEventHandler(handler) {
+        this.onReviewEvent = handler;
+    }
+    /**
+     * Register a handler for streamed `plan/event` notifications (#8 plan mode).
+     * After a {@link startBuildPlan} ack, the supervisor emits a sequence of
+     * {@link BuildPlanStreamEvent}s tagged with the same `runId`; this sink
+     * receives each one so the plan UI can surface lifecycle markers, render the
+     * plan the moment it streams, and finalize on the terminal `result` (carrying
+     * the BuildPlanProposal — the run is then PARKED awaiting approve/reject) or
+     * `error`. A cancelled plan run's terminal markers also ride this stream.
+     */
+    setPlanEventHandler(handler) {
+        this.onPlanEvent = handler;
+    }
+    /**
      * Connect to the supervisor: hash-pin the binary, spawn it, and run the
      * version-compatibility handshake. Resolves (never rejects) with a distinct
      * status. On any non-'connected' status the child (if spawned) is torn down.
@@ -193,6 +228,15 @@ class SupervisorBridge {
             ...(typeof this.opts.workspaceRoot === 'string' && this.opts.workspaceRoot.trim().length > 0
                 ? { workspaceRoot: this.opts.workspaceRoot.trim() }
                 : {}),
+            // MULTI-ROOT binding (additive): ALL the session's workspace folders, so the
+            // supervisor binds the root SET and per-root index RPCs are accepted for any
+            // member. Sanitized to trimmed non-empty strings; omitted when none survive.
+            ...(() => {
+                const roots = (this.opts.workspaceRoots ?? [])
+                    .filter((r) => typeof r === 'string' && r.trim().length > 0)
+                    .map((r) => r.trim());
+                return roots.length > 0 ? { workspaceRoots: roots } : {};
+            })(),
         };
         const response = await this.request(bridgeProtocol_1.BridgeMethod.Handshake, handshakeParams);
         if (response.error) {
@@ -399,6 +443,34 @@ class SupervisorBridge {
         return { ok: true, turnId: result.turnId };
     }
     /**
+     * Query the chat gateway's routable backends (`chat/backends` — model picker
+     * Slice 2). SYNCHRONOUS (request/result): the supervisor probes each backend AT
+     * REQUEST TIME and reports an HONEST status per {@link ChatBackendInfo} (exactly
+     * the backends it can route to — codex + ollama today, no phantoms), including
+     * installed model names where enumerable. No credential crosses this wire.
+     *
+     * BEST-EFFORT / NON-FATAL: resolves (never rejects). On an unconnected bridge, a
+     * transport/server error (INCLUDING method-not-found from a pre-Slice-1 supervisor
+     * bundle), or a malformed result, this resolves `{ ok:false, backends:[] }` so the
+     * picker renders an honest "backends unknown" notice instead of inventing options.
+     */
+    async requestChatBackends() {
+        if (!this.ready || !this.child || this.closed) {
+            const error = this.closeReason || 'bridge is not connected (handshake not completed).';
+            return { ok: false, backends: [], error };
+        }
+        const response = await this.request(bridgeProtocol_1.BridgeMethod.ChatBackends, {});
+        if (response.error) {
+            this.opts.log.appendLine(`[bridge] chat/backends error ${response.error.code}: ${response.error.message}`);
+            return { ok: false, backends: [], error: response.error.message };
+        }
+        const result = response.result;
+        if (!result || !Array.isArray(result.backends)) {
+            return { ok: false, backends: [], error: 'malformed chat/backends result from supervisor.' };
+        }
+        return { ok: true, backends: result.backends };
+    }
+    /**
      * Fetch ONE explicit public http(s) URL for `@Web` context. The extension only sends
      * this bridge RPC; it never performs web egress itself. The supervisor owns URL
      * validation, proxy routing, trace attribution, and content hashing.
@@ -514,6 +586,110 @@ class SupervisorBridge {
         }
         return { ok: true, runId: result.runId };
     }
+    /**
+     * Start a GOVERNED CHANGE REVIEW (`review/start`, #7). READ-ONLY over the repo
+     * — no authority gate interposes (frozen design: friction follows authority,
+     * and a review grants none). The params carry WHERE (`cwd`) and WHAT to review
+     * (`scope` + optional `baseRef`); NEVER a credential.
+     *
+     * ACK-THEN-NOTIFICATIONS (mirrors build/start): resolves with the supervisor's
+     * ACK ({ runId }); the review then STREAMS as `review/event` notifications
+     * tagged with that runId, delivered to the sink registered via
+     * {@link setReviewEventHandler} — register it BEFORE calling this. Resolves
+     * (never rejects); a transport/server error — including the supervisor's
+     * honest "review runner not wired" refusal — resolves `{ ok: false }` with the
+     * specific reason so the command path renders it rather than throwing.
+     */
+    async startChangeReview(params) {
+        if (!this.ready || !this.child || this.closed) {
+            const reason = this.closeReason || 'bridge is not connected (handshake not completed).';
+            return { ok: false, reason };
+        }
+        if (typeof params.cwd !== 'string' || params.cwd.trim().length === 0) {
+            return { ok: false, reason: 'startChangeReview requires a non-empty absolute cwd.' };
+        }
+        if (!bridgeProtocol_1.CHANGE_REVIEW_SCOPES.includes(params.scope)) {
+            return {
+                ok: false,
+                reason: `startChangeReview requires scope ∈ {${bridgeProtocol_1.CHANGE_REVIEW_SCOPES.join(', ')}}.`,
+            };
+        }
+        const response = await this.request(bridgeProtocol_1.BridgeMethod.ChangeReviewStart, params);
+        if (response.error) {
+            this.opts.log.appendLine(`[bridge] review/start error ${response.error.code}: ${response.error.message}`);
+            return { ok: false, reason: response.error.message };
+        }
+        const result = response.result;
+        if (!result || typeof result.runId !== 'string' || result.runId.length === 0) {
+            return { ok: false, reason: 'malformed review/start ack from supervisor (no runId).' };
+        }
+        return { ok: true, runId: result.runId };
+    }
+    /**
+     * Start a GOVERNED PLAN RUN (`plan/start`, #8). READ-ONLY over the repo — no
+     * authority gate interposes before planning (frozen design: friction follows
+     * authority, and a plan turn grants none; the gate fires at build/start,
+     * unchanged). The params carry WHERE (`cwd`) and WHAT to plan (`prompt`);
+     * NEVER a credential.
+     *
+     * ACK-THEN-NOTIFICATIONS (mirrors review/start): resolves with the
+     * supervisor's ACK ({ runId }); the plan then STREAMS as `plan/event`
+     * notifications tagged with that runId, delivered to the sink registered via
+     * {@link setPlanEventHandler} — register it BEFORE calling this. The terminal
+     * `result` PARKS the run server-side: approve it with a later
+     * {@link startAgenticBuild} carrying the SAME `runId` + `planApproval`, or
+     * close it with {@link rejectBuildPlan}. Resolves (never rejects); a
+     * transport/server error — including the supervisor's honest "plan runner not
+     * wired" refusal — resolves `{ ok: false }` with the specific reason.
+     */
+    async startBuildPlan(params) {
+        if (!this.ready || !this.child || this.closed) {
+            const reason = this.closeReason || 'bridge is not connected (handshake not completed).';
+            return { ok: false, reason };
+        }
+        if (typeof params.cwd !== 'string' || params.cwd.trim().length === 0) {
+            return { ok: false, reason: 'startBuildPlan requires a non-empty absolute cwd.' };
+        }
+        if (typeof params.prompt !== 'string' || params.prompt.trim().length === 0) {
+            return { ok: false, reason: 'startBuildPlan requires a non-empty prompt (the task to plan).' };
+        }
+        const response = await this.request(bridgeProtocol_1.BridgeMethod.BuildPlanStart, params);
+        if (response.error) {
+            this.opts.log.appendLine(`[bridge] plan/start error ${response.error.code}: ${response.error.message}`);
+            return { ok: false, reason: response.error.message };
+        }
+        const result = response.result;
+        if (!result || typeof result.runId !== 'string' || result.runId.length === 0) {
+            return { ok: false, reason: 'malformed plan/start ack from supervisor (no runId).' };
+        }
+        return { ok: true, runId: result.runId };
+    }
+    /**
+     * REJECT a PARKED plan run (`plan/reject`, #8). The supervisor appends the
+     * `plan_rejected` trace event (with the optional non-secret reason) and closes
+     * the run honestly — no build ever starts on it. Resolves (never rejects);
+     * a transport/server error — including the supervisor's specific
+     * "not a parked plan run" refusal — resolves `{ ok: false }` with the reason.
+     */
+    async rejectBuildPlan(params) {
+        if (!this.ready || !this.child || this.closed) {
+            const reason = this.closeReason || 'bridge is not connected (handshake not completed).';
+            return { ok: false, reason };
+        }
+        if (typeof params.runId !== 'string' || params.runId.trim().length === 0) {
+            return { ok: false, reason: 'rejectBuildPlan requires a non-empty runId.' };
+        }
+        const response = await this.request(bridgeProtocol_1.BridgeMethod.BuildPlanReject, params);
+        if (response.error) {
+            this.opts.log.appendLine(`[bridge] plan/reject error ${response.error.code}: ${response.error.message}`);
+            return { ok: false, reason: response.error.message };
+        }
+        const result = response.result;
+        if (!result || result.rejected !== true || typeof result.runId !== 'string') {
+            return { ok: false, reason: 'malformed plan/reject ack from supervisor.' };
+        }
+        return { ok: true, runId: result.runId };
+    }
     /* ============================================================== *
      * CODE-INDEX RETRIEVAL RPC (@Codebase repo-aware retrieval)
      * ============================================================== */
@@ -595,6 +771,152 @@ class SupervisorBridge {
             if (this.indexBuildPendingId === buildId)
                 this.indexBuildPendingId = undefined;
         }
+    }
+    /**
+     * INCREMENTALLY update the workspace's LOCAL code index from one debounced
+     * save/watch batch (`index/update` — the index-freshness loop). SYNCHRONOUS
+     * (request/result, NOT ack-then-stream, like `index/retrieve`): the supervisor
+     * filters the batch through the SAME discovery gates a full build uses, re-embeds
+     * only the windows whose content hash changed, and evicts deleted files. Only an
+     * EXISTING session index is updated (no index yet → honest `{ ok:false }`).
+     * Everything is LOCAL — nothing egresses code; the result carries only non-secret
+     * COUNTS, never a credential.
+     *
+     * BEST-EFFORT / NON-FATAL: resolves (never rejects). On an unconnected bridge, a
+     * transport/server error, or a malformed result, this resolves to
+     * `{ ok:false, error }` so the background watch loop logs honestly and retries on
+     * the next batch — index freshness must NEVER surface as a user-facing failure.
+     */
+    async indexUpdate(params) {
+        if (!this.ready || !this.child || this.closed) {
+            const error = this.closeReason || 'bridge is not connected (handshake not completed).';
+            return { ok: false, error };
+        }
+        const response = await this.request(bridgeProtocol_1.BridgeMethod.IndexUpdate, params);
+        if (response.error) {
+            this.opts.log.appendLine(`[bridge] index/update error ${response.error.code}: ${response.error.message}`);
+            return { ok: false, error: response.error.message };
+        }
+        const result = response.result;
+        if (!result || typeof result.ok !== 'boolean') {
+            return { ok: false, error: 'malformed index/update result from supervisor.' };
+        }
+        return result;
+    }
+    /**
+     * LIST the MCP servers + tools brokered for the session's workspace (`mcp/list` —
+     * #9 governed MCP brokering). SYNCHRONOUS (request/result): the supervisor — the
+     * ONLY component that owns MCP stdio server children — loads the workspace's
+     * `.glyphstudio/mcp.json`, reports each server with an HONEST status, and projects
+     * the discovered tools (names/descriptions/raw input schemas — third-party text we
+     * never vouch for). No credential crosses this wire.
+     *
+     * BEST-EFFORT / NON-FATAL: resolves (never rejects). On an unconnected bridge, a
+     * transport/server error, or a malformed result, this resolves to
+     * `{ ok:false, servers:[] }` so chat degrades to NOT advertising the tool rather
+     * than failing the turn.
+     */
+    async mcpList(params) {
+        if (!this.ready || !this.child || this.closed) {
+            const error = this.closeReason || 'bridge is not connected (handshake not completed).';
+            return { ok: false, servers: [], error };
+        }
+        const response = await this.request(bridgeProtocol_1.BridgeMethod.McpList, params);
+        if (response.error) {
+            this.opts.log.appendLine(`[bridge] mcp/list error ${response.error.code}: ${response.error.message}`);
+            return { ok: false, servers: [], error: response.error.message };
+        }
+        const result = response.result;
+        if (!result || !Array.isArray(result.servers)) {
+            return { ok: false, servers: [], error: 'malformed mcp/list result from supervisor.' };
+        }
+        return { ok: true, servers: result.servers };
+    }
+    /**
+     * BROKER one MCP tool call (`mcp/call` — #9). SYNCHRONOUS (request/result), but the
+     * request can stay IN FLIGHT for minutes: an ask/force_ask policy decision PARKS
+     * the call supervisor-side as a pending approval until `approval/respond` (or the
+     * supervisor's own {@link DEFAULT_MCP_APPROVAL_WINDOW_MS}-class timeout denies it
+     * honestly). The timeout here is therefore set ABOVE the supervisor's approval
+     * window ({@link DEFAULT_MCP_CALL_TIMEOUT_MS}) so the supervisor's honest 'denied'
+     * always wins the race against a client-side timeout.
+     *
+     * BEST-EFFORT / NON-FATAL: resolves (never rejects). On an unconnected bridge, a
+     * transport/server error, or a malformed result, this resolves to an honest
+     * `{ status:'error' }` so the chat loop renders a visible failure marker. The
+     * result's raw JSON output is UNTRUSTED third-party data ('mcp' provenance).
+     */
+    async mcpCall(params) {
+        if (!this.ready || !this.child || this.closed) {
+            const reason = this.closeReason || 'bridge is not connected (handshake not completed).';
+            return { status: 'error', reason };
+        }
+        const response = await this.request(bridgeProtocol_1.BridgeMethod.McpCall, params, {
+            timeoutMs: exports.DEFAULT_MCP_CALL_TIMEOUT_MS,
+        });
+        if (response.error) {
+            this.opts.log.appendLine(`[bridge] mcp/call error ${response.error.code}: ${response.error.message}`);
+            return { status: 'error', reason: response.error.message };
+        }
+        const result = response.result;
+        if (!result || !bridgeProtocol_1.MCP_CALL_STATUSES.includes(result.status)) {
+            return { status: 'error', reason: 'malformed mcp/call result from supervisor.' };
+        }
+        return result;
+    }
+    /**
+     * Resolve a PENDING approval (`approval/respond`) — the operator's Approve/Deny
+     * verdict for a parked ask/force_ask `mcp/call` (#9 Slice 2) or a held build.
+     * SYNCHRONOUS ACK; the PARKED RPC itself (the in-flight mcp/call) settles
+     * separately once the supervisor applies the verdict.
+     *
+     * BEST-EFFORT / NON-FATAL: resolves (never rejects) with `{ ok:false, error }` on
+     * any failure — the supervisor's approval timeout still denies the parked call
+     * honestly, so a lost respond can never wedge it.
+     */
+    async approvalRespond(params) {
+        if (!this.ready || !this.child || this.closed) {
+            const error = this.closeReason || 'bridge is not connected (handshake not completed).';
+            return { ok: false, error };
+        }
+        const response = await this.request(bridgeProtocol_1.BridgeMethod.ApprovalRespond, params);
+        if (response.error) {
+            this.opts.log.appendLine(`[bridge] approval/respond error ${response.error.code}: ${response.error.message}`);
+            return { ok: false, error: response.error.message };
+        }
+        const result = response.result;
+        if (!result || typeof result.resolved !== 'boolean') {
+            return { ok: false, error: 'malformed approval/respond result from supervisor.' };
+        }
+        return { ok: true, result };
+    }
+    /**
+     * APPEND a human decision / checkpoint event to a run's hash-chained trace
+     * (`run/recordHuman` — #10 Slice 1). This is what makes the IDE's
+     * "human_accepted recorded" notification TRUE: the supervisor appends with
+     * `source` FORCED to 'human' and returns the event's REAL chain position
+     * ({ seq, hash }) — or refuses honestly (unknown run, no trace file,
+     * tamper-suspect tail, over-cap payload). NEVER a silent success.
+     *
+     * BEST-EFFORT / NON-FATAL at the transport layer: resolves (never rejects)
+     * with `{ ok:false, error }`; the CALLER must surface a failure honestly
+     * (the decision applied locally but was NOT recorded).
+     */
+    async recordHuman(params) {
+        if (!this.ready || !this.child || this.closed) {
+            const error = this.closeReason || 'bridge is not connected (handshake not completed).';
+            return { ok: false, error };
+        }
+        const response = await this.request(bridgeProtocol_1.BridgeMethod.RecordHuman, params);
+        if (response.error) {
+            this.opts.log.appendLine(`[bridge] run/recordHuman error ${response.error.code}: ${response.error.message}`);
+            return { ok: false, error: response.error.message };
+        }
+        const result = response.result;
+        if (!result || result.ok !== true || typeof result.seq !== 'number' || typeof result.hash !== 'string') {
+            return { ok: false, error: 'malformed run/recordHuman result from supervisor.' };
+        }
+        return { ok: true, result };
     }
     /* ============================================================== *
      * GOVERNED TERMINAL SESSION RPC (M7 — the in-IDE Governed Terminal)
@@ -844,6 +1166,16 @@ class SupervisorBridge {
             if (note.method === bridgeProtocol_1.BridgeNotification.AgenticBuildEvent) {
                 if (this.onBuildEvent)
                     this.onBuildEvent(note.params);
+                return;
+            }
+            if (note.method === bridgeProtocol_1.BridgeNotification.ChangeReviewEvent) {
+                if (this.onReviewEvent)
+                    this.onReviewEvent(note.params);
+                return;
+            }
+            if (note.method === bridgeProtocol_1.BridgeNotification.BuildPlanEvent) {
+                if (this.onPlanEvent)
+                    this.onPlanEvent(note.params);
                 return;
             }
             if (note.method === bridgeProtocol_1.BridgeNotification.IndexProgress) {

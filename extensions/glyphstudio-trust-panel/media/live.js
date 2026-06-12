@@ -113,6 +113,18 @@
   // A runId the host asked to focus (Governed Runs tree click) before it streamed.
   // Adopted the moment that run first appears in ingestRunEvent. View-only nav.
   var pendingHostSelection = null;
+  // SESSION CHECKPOINTS (#10 Slice 3): runId -> the compact `checkpointAvailable`
+  // payload the HOST posted. HONESTY: the host posts one ONLY for a checkpoint
+  // whose checkpoint_created event really reached that run's hash chain
+  // (trace-anchored), so an entry here is never fabricated webview-side — and a
+  // run with no entry shows NO restore affordance.
+  var checkpointsByRun = Object.create(null);
+  // GOVERNED-TERMINAL BROKER CHIPS: runId -> the host-posted `commandDecisionChips`
+  // rows (per-command egress decisions, newest-first, already aggregated host-side).
+  // HONESTY: the host derives rows ONLY from policy_decision events the broker
+  // really traced for governed-terminal sessions; a run with no entry renders
+  // NOTHING — the strip is never fabricated webview-side.
+  var commandChipsByRun = Object.create(null);
 
   function emptyRunView(runId) {
     return {
@@ -327,6 +339,13 @@
           signature: event.signature,
           verifierPublicKey: event.verifierPublicKey,
         };
+        // Slice 3 (display-only, defensive): the STRUCTURED degraded reason, when an
+        // emitter included it. The run-event protocol does not declare the field, but
+        // the validator passes the original object through, so an additive emitter's
+        // extra field survives — copy it for honest rendering, never as a trust input.
+        if (typeof event.isolationUnavailableReason === 'string' && event.isolationUnavailableReason.length > 0) {
+          view.verdict.isolationUnavailableReason = event.isolationUnavailableReason;
+        }
         if (!event.signature || typeof event.signature.value !== 'string') {
           view.failures = appendFailure(view.failures, {
             state: 'missing_verifier_signature',
@@ -1224,6 +1243,16 @@
       root.appendChild(verdictBanner('VERDICT — UNTRUSTED', '(claims "' + (v.overallVerdict || 'unknown').toUpperCase() + '")', 'verdict-untrusted-banner'));
     }
 
+    // HONESTY SURFACING (Slice 3): the structured reason WHY independent sandboxed
+    // verification did not engage, when the verdict carried one (an inline/degraded
+    // verdict only). Display only — never a trust input.
+    if (typeof v.isolationUnavailableReason === 'string' && v.isolationUnavailableReason.length > 0) {
+      root.appendChild(el('div', {
+        className: 'abr-isolation-reason',
+        text: 'independent verification unavailable — ' + v.isolationUnavailableReason + '; verdict is degraded',
+      }));
+    }
+
     // Per-check results.
     var checksWrap = el('div', { className: 'field' });
     checksWrap.appendChild(el('div', { className: 'field-label', text: 'Checks (sourced from Policy.verify — actor cannot narrow)' }));
@@ -2066,6 +2095,8 @@
       // No run selected: keep the always-visible ribbon in a quiet neutral posture
       // (no fabrication) rather than leaving stale chips from a prior run.
       renderEvidenceRibbon(null);
+      renderCheckpointAffordance(null);
+      renderCommandDecisionChips(null);
       return;
     }
     var view = runs[selectedRunId];
@@ -2073,6 +2104,8 @@
     setFrictionSurface(view);
     renderBadges(view);
     renderFailures(view);
+    renderCheckpointAffordance(selectedRunId);
+    renderCommandDecisionChips(selectedRunId);
     renderClaims(view);
     renderVerdict(view);
     renderLiveEvidenceSummary(view);
@@ -2081,6 +2114,174 @@
     renderCommands(view);
     renderNetwork(view);
     renderPolicy(view);
+  }
+
+  /* ================================================================== *
+   * SESSION CHECKPOINT AFFORDANCE (#10 Slice 3 — view layer).
+   *
+   * A small, unobtrusive run-scoped strip in the "Run trust state" card:
+   * the run's pre-build checkpoint + a "Restore checkpoint…" button. The
+   * host posts `checkpointAvailable` ONLY for a checkpoint whose
+   * checkpoint_created event really reached this run's hash chain, so the
+   * affordance can never appear for a checkpoint that is not trace-anchored
+   * to the selected run.
+   *
+   * HONESTY: the copy says ADVISORY and tracked-files-only, and never claims
+   * the checkpoint is "verified" — anchoring records THAT it happened; it
+   * does not verify the snapshot. The button grants NOTHING: clicking posts
+   * `restoreCheckpoint` to the host, whose modal destructive confirm (the
+   * same one the palette command uses) is the load-bearing gate.
+   * ================================================================== */
+
+  /** Record a host-posted `checkpointAvailable` and re-render if it is the selected run's. */
+  function applyCheckpointAvailable(msg) {
+    if (!msg || typeof msg.runId !== 'string' || msg.runId.length === 0) return;
+    if (typeof msg.sha12 !== 'string' || msg.sha12.length === 0) return;
+    checkpointsByRun[msg.runId] = {
+      sha12: msg.sha12,
+      label: typeof msg.label === 'string' ? msg.label : '',
+      createdAtIso: typeof msg.createdAtIso === 'string' ? msg.createdAtIso : '',
+      changedFileCount: typeof msg.changedFileCount === 'number' ? msg.changedFileCount : 0,
+    };
+    if (selectedRunId === msg.runId) renderCheckpointAffordance(selectedRunId);
+  }
+
+  /** Render (or clear) the selected run's checkpoint strip. Empty when un-anchored — never fabricated. */
+  function renderCheckpointAffordance(runId) {
+    var root = document.getElementById('live-checkpoint');
+    if (!root) return;
+    clear(root);
+    var cp = runId ? checkpointsByRun[runId] : null;
+    if (!cp) return; // no trace-anchored checkpoint for this run → no affordance
+    var strip = el('div', { className: 'checkpoint-strip' });
+    strip.appendChild(
+      el('span', {
+        className: 'checkpoint-note',
+        text:
+          'Pre-build checkpoint ' + cp.sha12 +
+          (cp.label ? ' (“' + cp.label + '”)' : '') +
+          ' — advisory snapshot of tracked files only (' + cp.changedFileCount +
+          ' changed at creation); untracked content was not captured. Session-scoped.',
+      }),
+    );
+    var btn = el('button', { className: 'btn checkpoint-restore-btn', text: 'Restore checkpoint…' });
+    btn.setAttribute('type', 'button');
+    btn.setAttribute(
+      'title',
+      'Roll tracked files back to this checkpoint, behind a confirmation listing exactly what changes. Advisory convenience — not a verified state.',
+    );
+    btn.addEventListener('click', function () {
+      if (typeof window !== 'undefined' && typeof window.GLYPHSTUDIO_POST === 'function') {
+        window.GLYPHSTUDIO_POST({ type: 'restoreCheckpoint', runId: runId, sha: cp.sha12 });
+      }
+    });
+    strip.appendChild(btn);
+    root.appendChild(strip);
+  }
+
+  /* ================================================================== *
+   * GOVERNED-TERMINAL BROKER DECISION CHIPS (view layer).
+   *
+   * A "Command decisions" strip in the run view: per shell command the
+   * operator ran in a governed terminal, the egress decisions the broker
+   * recorded WHILE it ran — aggregated into compact chips — plus the hosts
+   * touched, and an honest "between commands" bucket for decisions outside
+   * every command window. Rows arrive PRE-AGGREGATED from the host
+   * (terminalDecisionChips.ts); this layer only renders them.
+   *
+   * HONESTY: on the soft governed-unsandboxed plane every decision is
+   * observe-only BY DESIGN (observe-not-block) — those chips say "observed"
+   * and the row posture says OBSERVED-not-blocked, NEVER "approved"/
+   * "blocked"/"verified". Hard-plane decisions (if they ever stream) render
+   * their decision values verbatim. View-only — chips confer no trust.
+   * ================================================================== */
+
+  // Copy constants — keep VERBATIM in lock-step with terminalDecisionChips.ts
+  // (OBSERVED_ONLY_MICROCOPY / BETWEEN_COMMANDS_LABEL); tests pin both realms.
+  var CHIP_OBSERVED_ONLY_MICROCOPY = 'observed (soft plane — not blocked)';
+  var CHIP_BETWEEN_COMMANDS_LABEL = 'between commands';
+  // Newest-first rows shown before the "+N more" overflow line.
+  var COMMAND_CHIP_ROWS_VISIBLE_CAP = 10;
+
+  /** Record a host-posted `commandDecisionChips` and re-render if selected. */
+  function applyCommandDecisionChips(msg) {
+    if (!msg || typeof msg.runId !== 'string' || msg.runId.length === 0) return;
+    if (!Array.isArray(msg.rows)) return;
+    commandChipsByRun[msg.runId] = msg.rows;
+    if (selectedRunId === msg.runId) renderCommandDecisionChips(selectedRunId);
+  }
+
+  /** CSS-safe modifier from a decision label (class name only — text is verbatim). */
+  function chipClass(decision) {
+    return String(decision).toLowerCase().replace(/[^a-z0-9_-]/g, '');
+  }
+
+  /** Render (or clear) the selected run's "Command decisions" strip. */
+  function renderCommandDecisionChips(runId) {
+    var root = document.getElementById('live-command-chips');
+    if (!root) return;
+    clear(root);
+    var rows = runId ? commandChipsByRun[runId] : null;
+    if (!rows || rows.length === 0) return; // nothing traced → nothing rendered
+    var strip = el('div', { className: 'command-chips-strip' });
+    strip.appendChild(el('div', { className: 'command-chips-title', text: 'Command decisions' }));
+    var visible = rows.slice(0, COMMAND_CHIP_ROWS_VISIBLE_CAP);
+    for (var i = 0; i < visible.length; i++) {
+      var row = visible[i];
+      if (!row || typeof row !== 'object') continue;
+      var isBetween = row.betweenCommands === true;
+      var rowEl = el('div', {
+        className: 'command-chip-row' + (isBetween ? ' command-chip-row-between' : ''),
+      });
+      rowEl.appendChild(
+        el('span', {
+          className: 'command-chip-cmd',
+          text: isBetween ? CHIP_BETWEEN_COMMANDS_LABEL : String(row.commandLine || ''),
+          title: row.startedAtIso ? String(row.startedAtIso) : '',
+        }),
+      );
+      if (typeof row.exitCode === 'number') {
+        rowEl.appendChild(
+          el('span', { className: 'command-chip-exit', text: 'exit ' + row.exitCode }),
+        );
+      }
+      var chips = Array.isArray(row.chips) ? row.chips : [];
+      for (var c = 0; c < chips.length; c++) {
+        var chip = chips[c];
+        if (!chip || typeof chip.decision !== 'string') continue;
+        rowEl.appendChild(
+          el('span', {
+            className: 'decision-chip decision-chip-' + chipClass(chip.decision),
+            text: chip.count + ' ' + chip.decision,
+          }),
+        );
+      }
+      var hosts = Array.isArray(row.hosts) ? row.hosts : [];
+      if (hosts.length > 0) {
+        var hostsText = 'hosts: ' + hosts.join(', ');
+        if (typeof row.hostOverflowCount === 'number' && row.hostOverflowCount > 0) {
+          hostsText += ' (+' + row.hostOverflowCount + ' more)';
+        }
+        rowEl.appendChild(el('span', { className: 'command-chip-hosts', text: hostsText }));
+      }
+      if (row.observedOnly === true) {
+        // Posture honesty: everything in this row was OBSERVED on the soft
+        // plane and let through — nothing was approved, nothing was blocked.
+        rowEl.appendChild(
+          el('span', { className: 'command-chip-posture', text: CHIP_OBSERVED_ONLY_MICROCOPY }),
+        );
+      }
+      strip.appendChild(rowEl);
+    }
+    if (rows.length > COMMAND_CHIP_ROWS_VISIBLE_CAP) {
+      strip.appendChild(
+        el('div', {
+          className: 'command-chips-more',
+          text: '+' + (rows.length - COMMAND_CHIP_ROWS_VISIBLE_CAP) + ' more',
+        }),
+      );
+    }
+    root.appendChild(strip);
   }
 
   /* ================================================================== *
@@ -2298,6 +2499,21 @@
     // Signature state.
     meta.appendChild(el('span', { className: 'abr-sig-chip ' + v.sig.className, text: v.sig.text }));
     root.appendChild(meta);
+
+    // HONESTY SURFACING (Slice 3): WHY independent sandboxed verification did not
+    // engage — the STRUCTURED degraded reason the runner reported (Docker down,
+    // runtime preference 'off', no verify command, …). Present ONLY on an
+    // inline/degraded verdict; the bridge projection drops it from independent
+    // verdicts. Display only — never a trust input.
+    var isoReason = review.verdict && typeof review.verdict.isolationUnavailableReason === 'string'
+      ? review.verdict.isolationUnavailableReason
+      : '';
+    if (isoReason) {
+      root.appendChild(el('div', {
+        className: 'abr-isolation-reason',
+        text: 'independent verification unavailable — ' + isoReason + '; verdict is degraded',
+      }));
+    }
 
     // Per-check breakdown (reuse verdict-pill check-<status> styling).
     var checks = (review.verdict && review.verdict.checks) || [];
@@ -2614,6 +2830,16 @@
         // re-render; if it has not streamed yet, remember it so the next event for
         // that run auto-selects it (ingestRunEvent already selects the first run).
         selectRunFromHost(msg.runId);
+      } else if (msg.type === 'checkpointAvailable') {
+        // SESSION CHECKPOINT (#10 Slice 3). The host posts this ONLY for a
+        // checkpoint whose checkpoint_created event really reached the run's
+        // hash chain — record it and surface the run-scoped restore affordance.
+        applyCheckpointAvailable(msg);
+      } else if (msg.type === 'commandDecisionChips') {
+        // GOVERNED-TERMINAL BROKER CHIPS. The host posts per-command egress
+        // decision rows derived from the run's traced policy_decision events.
+        // Record + re-render the run-scoped "Command decisions" strip.
+        applyCommandDecisionChips(msg);
       } else if (msg.type === 'agenticBuildReview' && msg.review) {
         // AGENTIC BUILD REVIEW (Phase B). The host posts a pinned AgenticBuildReview
         // evidence object (real backend or the preview fixture). View-only: render
@@ -2789,6 +3015,23 @@
       FAILURE_LABELS: FAILURE_LABELS,
       renderFailures: renderFailures,
       surfaceUntrustedKeyFailure: surfaceUntrustedKeyFailure,
+      // SESSION CHECKPOINT AFFORDANCE (#10 Slice 3) — exposed so
+      // test/checkpointAffordance.test.mjs asserts on the REAL panel code that
+      // the run-scoped strip renders only from a host-posted checkpointAvailable
+      // (never fabricated), the copy stays advisory/never-"verified", and the
+      // button posts `restoreCheckpoint` with the run + sha.
+      applyCheckpointAvailable: applyCheckpointAvailable,
+      renderCheckpointAffordance: renderCheckpointAffordance,
+      // GOVERNED-TERMINAL BROKER CHIPS — exposed so
+      // test/commandDecisionChips.test.mjs asserts on the REAL panel code that
+      // the strip renders only from a host-posted commandDecisionChips message
+      // (never fabricated), observe-only rows carry the OBSERVED-not-blocked
+      // posture copy verbatim (never "approved"/"verified"), and enforced
+      // decision values render as-is (plane-agnostic).
+      applyCommandDecisionChips: applyCommandDecisionChips,
+      renderCommandDecisionChips: renderCommandDecisionChips,
+      CHIP_OBSERVED_ONLY_MICROCOPY: CHIP_OBSERVED_ONLY_MICROCOPY,
+      CHIP_BETWEEN_COMMANDS_LABEL: CHIP_BETWEEN_COMMANDS_LABEL,
     };
   }
 

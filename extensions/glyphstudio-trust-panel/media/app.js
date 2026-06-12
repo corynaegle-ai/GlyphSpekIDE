@@ -594,8 +594,16 @@ async function verifyWithKey(keyText, sigBytes, msg) {
  * prove the loaded trace is the one the verdict committed to. So before
  * presenting a verdict as AUTHORITATIVE we ALSO verify, in-browser:
  *   1. verifyChainBrowser(events).ok            — the hash chain is intact, and
- *   2. computeTraceRootBrowser(events) === verdict.traceRootHash — the loaded
- *      trace is exactly the one the verdict signed over.
+ *   2. the signed verdict.traceRootHash BINDS to the loaded trace under the
+ *      BUNDLE ROOT-BINDING RULE (canonical doc: spikes/p0-contracts/trace.ts):
+ *      either the whole-file recomputed root equals it, OR it equals the
+ *      running chain hash at some event index i and EVERY event after i is a
+ *      tolerated trailing event — a `source:'verifier'` `verifier_verdict`
+ *      whose payload.traceRootHash is that SAME signed root (the verdict's own
+ *      recording, appended AFTER signing; the runner signs over the root, THEN
+ *      appends the verdict event, and the bundle writer copies trace.jsonl
+ *      verbatim, so a real bundle's whole-file root is one event PAST the
+ *      signed root). Anything else trailing is tamper → INCONSISTENT.
  *
  * The hashing is reproduced BYTE-FOR-BYTE from spikes/p0-trace/trace-store.ts:
  *
@@ -682,6 +690,27 @@ function computeTraceRootBrowser(events) {
   const list = Array.isArray(events) ? events : [];
   if (list.length === 0) return GENESIS_HASH;
   return list[list.length - 1].hash;
+}
+
+/**
+ * REPLICA — pinned VERBATIM to the canonical `isToleratedTrailingEvent` in
+ * spikes/p0-contracts/trace.ts (the BUNDLE ROOT-BINDING RULE's shared
+ * trailing-event predicate). app.js is plain, unbundled webview JS with no
+ * module system, so it cannot import the TypeScript contracts package; the
+ * predicate is replicated here LINE-FOR-LINE (TS type annotations dropped).
+ * If the canonical predicate ever changes, change THIS function to match.
+ *
+ * Returns true iff `event` is a tolerated trailing event relative to the
+ * signed root: a `source: 'verifier'` event of type `verifier_verdict` whose
+ * `payload.traceRootHash` strictly equals `signedRoot`. An omitted `source`
+ * defaults to 'supervisor' and is therefore REJECTED. Pure; no I/O.
+ */
+function isToleratedTrailingEvent(event, signedRoot) {
+  if (event.source !== 'verifier') return false;
+  if (event.type !== 'verifier_verdict') return false;
+  const payload = event.payload;
+  if (typeof payload !== 'object' || payload === null) return false;
+  return payload.traceRootHash === signedRoot;
 }
 
 /* ------------------------------------------------------------------ *
@@ -1422,6 +1451,39 @@ function summarizePayload(evt) {
       return 'role=' + p.role + '   (content may be redacted)';
     case 'verifier_verdict':
       return 'overall=' + p.overallVerdict + '   checks=' + (p.checks ? p.checks.length : 0) + '   (see Verifier Verdict panel)';
+    case 'plan_proposed': {
+      if (p.parseStatus === 'ok' && p.plan && typeof p.plan === 'object') {
+        const steps = Array.isArray(p.plan.steps) ? p.plan.steps.length : '?';
+        return 'advisory plan   goal="' + (p.plan.goal || '') + '"   steps=' + steps;
+      }
+      return 'advisory plan   parseStatus=' + p.parseStatus + (p.reason ? '   reason=' + p.reason : '');
+    }
+    case 'plan_approved': {
+      const steps = p.plan && Array.isArray(p.plan.steps) ? p.plan.steps.length : '?';
+      return 'approvalId=' + p.approvalId + '   edited=' + p.edited + '   steps=' + steps;
+    }
+    case 'plan_rejected':
+      return 'approvalId=' + p.approvalId + (p.reason ? '   reason=' + p.reason : '');
+    // Human decision events (#10 Slice 1 — run/recordHuman appends; source=human):
+    // the operator's Accept / Reject / Request-changes verdict, chain-bound.
+    case 'human_accepted':
+    case 'human_rejected':
+    case 'human_corrected_output':
+      return (
+        'decision=' + (p.decision || '?') +
+        (typeof p.changedFileCount === 'number' ? '   changedFiles=' + p.changedFileCount : '')
+      );
+    // Session checkpoint events (#10 Slice 2 foundation): a short sha + file counts.
+    case 'checkpoint_created':
+      return (
+        'sha=' + (typeof p.sha === 'string' ? p.sha.slice(0, 12) : '?') +
+        (typeof p.fileCount === 'number' ? '   files=' + p.fileCount : '')
+      );
+    case 'checkpoint_restored':
+      return (
+        'sha=' + (typeof p.sha === 'string' ? p.sha.slice(0, 12) : '?') +
+        (typeof p.restoredFileCount === 'number' ? '   restoredFiles=' + p.restoredFileCount : '')
+      );
     default:
       return JSON.stringify(p);
   }
@@ -1443,6 +1505,19 @@ function renderActorClaims() {
   }
 
   root.appendChild(fieldBlock('Plan', c.plan));
+  // CROSS-REFERENCE (plan Track C): when the actor's claimed plan coexists
+  // with a chain-bound plan_approved event, point the reader at the
+  // tamper-evident copy. Display-only — the claim itself stays the actor's
+  // unverified words; the existing fieldBlock above is untouched.
+  if (c.plan && derivePlanApproval(state.trace)) {
+    root.appendChild(
+      el('p', {
+        className: 'plan-claims-xref',
+        text:
+          'See the chain-bound plan above — this run also carries an operator-approved plan recorded in the tamper-evident trace (Plan block, verdict pane).',
+      }),
+    );
+  }
   root.appendChild(fieldBlock('Self-reported summary', c.summary));
 
   if (Array.isArray(c.claimedChangedFiles) && c.claimedChangedFiles.length) {
@@ -1478,6 +1553,465 @@ function fieldBlock(label, value) {
   return wrap;
 }
 
+/**
+ * ASSURANCE QUALIFIER for the full (PRODUCT-tier) verdict banner — FROZEN
+ * WORDING (Slice 0 evidence contract). The word AUTHORITATIVE stays keyed to
+ * the TRUST-ROOT TIER (a product-key signature + consistent bundle); this
+ * qualifier only grades HOW the verifier ran, read from the verdict's
+ * `verifierIsolation` evidence:
+ *   - 'independent-sandboxed' → "AUTHORITATIVE — independently verified
+ *     (sandboxed)". The ONLY state allowed the full-trust styling
+ *     (verdict-assurance-full); "fully verified" copy is RESERVED for it
+ *     (same rule as the evidence-summary fullVerified cell).
+ *   - anything else — 'inline-unsandboxed' OR ABSENT — → "AUTHORITATIVE
+ *     (signature) — degraded assurance: inline check". An ABSENT
+ *     verifierIsolation means UNKNOWN and must NEVER be presented as
+ *     independently sandboxed (never overclaim from absence of evidence).
+ * DEMO-AUTHORITATIVE is untouched by this qualifier (it never reaches the
+ * product banner). Pure + defensive; never throws.
+ */
+function deriveVerdictAssurance(verdict, trace) {
+  let isolation =
+    verdict && typeof verdict.verifierIsolation === 'string' ? verdict.verifierIsolation : null;
+  if (isolation == null) {
+    // The persisted verifier_verdict EVENT payload is the canonical carrier of
+    // verifierIsolation (a standalone verdict.json may predate the field).
+    const list = Array.isArray(trace) ? trace : [];
+    for (const e of list) {
+      if (
+        e &&
+        e.type === 'verifier_verdict' &&
+        e.payload &&
+        typeof e.payload.verifierIsolation === 'string'
+      ) {
+        isolation = e.payload.verifierIsolation;
+        break;
+      }
+    }
+  }
+  // STRICT equality: only the exact evidence string earns full assurance.
+  const independent = isolation === 'independent-sandboxed';
+  return {
+    verifierIsolation: isolation,
+    independent,
+    text: independent
+      ? 'AUTHORITATIVE — independently verified (sandboxed)'
+      : 'AUTHORITATIVE (signature) — degraded assurance: inline check',
+    className: independent ? 'verdict-assurance-full' : 'verdict-assurance-degraded',
+  };
+}
+
+/**
+ * Render a verdict signature keyId as a colon-grouped fingerprint of 4-hex
+ * pairs ("3f9a:71bc:0e44:d2a8"). PINNED replica of formatFingerprintForDisplay
+ * (extension/src/verifierKeyExchange.ts) — keep the two byte-for-byte in sync
+ * so the badge here matches the fingerprint the key-exchange flow exports.
+ * Display-only; confers no trust.
+ */
+function formatKeyIdFingerprint(fingerprint) {
+  const groups = String(fingerprint).match(/.{1,4}/g);
+  return groups ? groups.join(':') : String(fingerprint);
+}
+
+/* ------------------------------------------------------------------ *
+ * CHANGE-REVIEW EVIDENCE (review Track C) — advisory rendering of the
+ * review_requested / review_findings trace events (frozen contract Slice 0,
+ * canonical doc spikes/p0-contracts/trace.ts). DISPLAY-ONLY: nothing here is
+ * a trust input and nothing here can upgrade, restyle, or speak for the
+ * verdict. The ORDERING INVARIANT (review_findings MUST precede
+ * verifier_verdict) means the signed verdict root already commits to the
+ * findings — a tampered or moved findings event breaks the chain/root binding
+ * and the EXISTING inconsistent logic fires; this section adds NO trust logic.
+ * ------------------------------------------------------------------ */
+
+/** First review_requested event payload in the trace, or null. */
+function deriveReviewRequest(trace) {
+  const list = Array.isArray(trace) ? trace : [];
+  for (const e of list) {
+    if (e && e.type === 'review_requested' && e.payload && typeof e.payload === 'object') {
+      return e.payload;
+    }
+  }
+  return null;
+}
+
+/** First review_findings event payload in the trace, or null. */
+function deriveReviewFindings(trace) {
+  const list = Array.isArray(trace) ? trace : [];
+  for (const e of list) {
+    if (e && e.type === 'review_findings' && e.payload && typeof e.payload === 'object') {
+      return e.payload;
+    }
+  }
+  return null;
+}
+
+/** Human-readable diff size; defensive about malformed payloads. */
+function formatDiffBytes(n) {
+  if (typeof n !== 'number' || !Number.isFinite(n) || n < 0) return '(unknown size)';
+  if (n < 1024) return n + ' B';
+  if (n < 1024 * 1024) return (n / 1024).toFixed(1) + ' KiB';
+  return (n / (1024 * 1024)).toFixed(1) + ' MiB';
+}
+
+/**
+ * Append the change-review evidence blocks (request header + advisory model
+ * findings) to the verdict body, BELOW the verdict pane — the caption's
+ * "verdict above". NON-REVIEW BUNDLES (the common case — builds) take the
+ * early return: ZERO visual change.
+ */
+function appendReviewEvidence(root) {
+  const req = deriveReviewRequest(state.trace);
+  const fin = deriveReviewFindings(state.trace);
+  if (!req && !fin) return;
+
+  if (req) {
+    const wrap = el('div', { className: 'field review-request' });
+    wrap.appendChild(el('div', { className: 'field-label', text: 'Change review request' }));
+    const meta = el('div', { className: 'review-request-meta' });
+    const scopeText =
+      req.scope === 'working-tree'
+        ? 'working tree'
+        : req.scope === 'branch'
+          ? 'branch vs ' + (typeof req.baseRef === 'string' && req.baseRef ? req.baseRef : '(unspecified base)')
+          : '(unknown scope: ' + String(req.scope) + ')';
+    meta.appendChild(el('span', { className: 'chip review-scope', text: scopeText }));
+    meta.appendChild(
+      el('span', { className: 'chip chip-dim review-diff-size', text: 'diff ' + formatDiffBytes(req.diffBytes) }),
+    );
+    const sha = typeof req.diffSha256 === 'string' && req.diffSha256 ? req.diffSha256 : '';
+    meta.appendChild(
+      el('code', {
+        className: 'mono review-diff-sha',
+        text: sha ? 'sha256 ' + sha.slice(0, 16) + '…' : 'sha256 (none)',
+        title: sha ? 'diff sha256: ' + sha : '',
+      }),
+    );
+    wrap.appendChild(meta);
+    if (req.truncated === true) {
+      // HONESTY MARKER: the model reviewed a capped diff, not the whole change.
+      wrap.appendChild(
+        el('div', {
+          className: 'review-truncated-marker',
+          text: '⚠ diff truncated before model review — the findings below cover only the truncated diff',
+        }),
+      );
+    }
+    root.appendChild(wrap);
+  }
+
+  if (fin) root.appendChild(buildReviewFindingsSection(fin));
+}
+
+/**
+ * Build the advisory model-findings container. HARD separation from the
+ * verdict pane: its own clearly-labeled container, NEVER the
+ * verdict-assurance-full styling, NEVER the AUTHORITATIVE vocabulary —
+ * findings are model OPINION and can never read as verification.
+ */
+function buildReviewFindingsSection(fin) {
+  const section = el('div', { className: 'review-findings-advisory' });
+  section.appendChild(
+    el('div', {
+      className: 'review-findings-heading',
+      text: 'Model findings — advisory (model opinion, not verified)',
+    }),
+  );
+  section.appendChild(
+    el('p', {
+      className: 'review-findings-caption',
+      text: 'These findings are model opinion. Only the verdict above reflects verified checks.',
+    }),
+  );
+
+  // DEFENSIVE HONESTY: the contract requires the LITERAL advisory:true. If it
+  // is absent or anything else, say so visibly — never silently normalize.
+  if (fin.advisory !== true) {
+    section.appendChild(
+      el('div', {
+        className: 'review-advisory-integrity-warning',
+        text:
+          '⚠ integrity: this findings event is missing the required advisory:true marker (frozen contract). ' +
+          'Treat it with extra caution — it is still model opinion, never verification.',
+      }),
+    );
+  }
+
+  const findings = Array.isArray(fin.findings) ? fin.findings : [];
+  if (fin.parseStatus === 'ok') {
+    if (findings.length === 0) {
+      section.appendChild(
+        el('p', { className: 'empty review-findings-empty', text: 'No findings reported (advisory).' }),
+      );
+    } else {
+      const tbl = el('table', { className: 'mini-table review-findings-table' });
+      for (const f of findings) {
+        const row = f && typeof f === 'object' ? f : {};
+        const tr = el('tr');
+        const sevTd = el('td');
+        const sev =
+          row.severity === 'info' || row.severity === 'warn' || row.severity === 'high' ? row.severity : 'unknown';
+        sevTd.appendChild(el('span', { className: 'finding-sev finding-sev-' + sev, text: sev }));
+        tr.appendChild(sevTd);
+        const whereTd = el('td');
+        const where =
+          (row.file || '(unknown file)') + (typeof row.startLine === 'number' ? ':' + row.startLine : '');
+        whereTd.appendChild(el('code', { className: 'mono finding-where', text: where }));
+        tr.appendChild(whereTd);
+        tr.appendChild(el('td', { className: 'finding-title', text: row.title || '(untitled finding)' }));
+        tr.appendChild(el('td', { className: 'finding-detail', text: row.detail || '' }));
+        tbl.appendChild(tr);
+      }
+      section.appendChild(tbl);
+    }
+  } else if (fin.parseStatus === 'parse-failed' || fin.parseStatus === 'unavailable') {
+    // HONEST MARKER — never an empty table that implies a clean bill.
+    const msg =
+      fin.parseStatus === 'parse-failed'
+        ? 'Model findings could not be parsed — no findings are shown. This is NOT a clean bill.'
+        : 'Model review unavailable — no findings were produced. This is NOT a clean bill.';
+    section.appendChild(
+      el('div', {
+        className: 'review-findings-unavailable',
+        text: '⚠ ' + msg + (typeof fin.reason === 'string' && fin.reason ? ' Reason: ' + fin.reason : ''),
+      }),
+    );
+  } else {
+    // Unknown parseStatus — the same honest treatment, never a silent clean bill.
+    section.appendChild(
+      el('div', {
+        className: 'review-findings-unavailable',
+        text:
+          '⚠ Model findings carry an unrecognized parseStatus (' +
+          JSON.stringify(fin.parseStatus) +
+          ') — no findings are shown. This is NOT a clean bill.',
+      }),
+    );
+  }
+
+  if (typeof fin.actor === 'string' && fin.actor) {
+    section.appendChild(el('div', { className: 'review-findings-actor', text: 'Advisory reviewer: ' + fin.actor }));
+  }
+  return section;
+}
+
+/* ------------------------------------------------------------------ *
+ * PLAN EVIDENCE (plan Track C) — rendering of the plan_proposed /
+ * plan_approved / plan_rejected trace events (frozen contract plan Slice 0,
+ * canonical doc spikes/p0-contracts/trace.ts). DISPLAY-ONLY: nothing here is
+ * a trust input and nothing here can upgrade, restyle, or speak for the
+ * verdict. A plan is MODEL OPINION at proposal time and OPERATOR-APPROVED
+ * INTENT after approval — NEITHER is verified. The ORDERING INVARIANT (ALL
+ * plan events MUST precede verifier_verdict; a plan event is NEVER a
+ * tolerated trailing event) means the signed verdict root already commits to
+ * the whole plan history — a tampered or moved plan event breaks the
+ * chain/root binding and the EXISTING inconsistent logic fires; this section
+ * adds NO trust logic.
+ * ------------------------------------------------------------------ */
+
+/** First plan_proposed event payload in the trace, or null. */
+function derivePlanProposal(trace) {
+  const list = Array.isArray(trace) ? trace : [];
+  for (const e of list) {
+    if (e && e.type === 'plan_proposed' && e.payload && typeof e.payload === 'object') {
+      return e.payload;
+    }
+  }
+  return null;
+}
+
+/** First plan_approved event payload in the trace, or null. */
+function derivePlanApproval(trace) {
+  const list = Array.isArray(trace) ? trace : [];
+  for (const e of list) {
+    if (e && e.type === 'plan_approved' && e.payload && typeof e.payload === 'object') {
+      return e.payload;
+    }
+  }
+  return null;
+}
+
+/** First plan_rejected event payload in the trace, or null. */
+function derivePlanRejection(trace) {
+  const list = Array.isArray(trace) ? trace : [];
+  for (const e of list) {
+    if (e && e.type === 'plan_rejected' && e.payload && typeof e.payload === 'object') {
+      return e.payload;
+    }
+  }
+  return null;
+}
+
+/**
+ * Append the plan evidence block to the verdict body, BELOW the verdict pane —
+ * the same hard-separation doctrine as the advisory findings. NO-PLAN BUNDLES
+ * (the common case — plain builds) take the early return: ZERO DOM change.
+ */
+function appendPlanEvidence(root) {
+  const proposed = derivePlanProposal(state.trace);
+  const approved = derivePlanApproval(state.trace);
+  const rejected = derivePlanRejection(state.trace);
+  if (!proposed && !approved && !rejected) return;
+  root.appendChild(buildPlanSection(proposed, approved, rejected));
+}
+
+/**
+ * Render a BuildPlan's content: goal, numbered steps (title/detail, optional
+ * files chips), and risks. Defensive about malformed payloads — degrades,
+ * never throws. Display-only.
+ */
+function buildPlanBody(plan) {
+  const body = el('div', { className: 'plan-body' });
+  const p = plan && typeof plan === 'object' ? plan : {};
+  const goal = el('div', { className: 'plan-goal' });
+  goal.appendChild(el('span', { className: 'plan-goal-label', text: 'Goal: ' }));
+  goal.appendChild(
+    el('span', { className: 'plan-goal-text', text: typeof p.goal === 'string' ? p.goal : '(no goal)' }),
+  );
+  body.appendChild(goal);
+  const steps = Array.isArray(p.steps) ? p.steps : [];
+  if (steps.length) {
+    const ol = el('ol', { className: 'plan-steps' });
+    for (const s of steps) {
+      const step = s && typeof s === 'object' ? s : {};
+      const li = el('li', { className: 'plan-step' });
+      li.appendChild(el('div', { className: 'plan-step-title', text: step.title || '(untitled step)' }));
+      if (step.detail) li.appendChild(el('div', { className: 'plan-step-detail', text: step.detail }));
+      if (Array.isArray(step.files) && step.files.length) {
+        const files = el('div', { className: 'plan-step-files' });
+        for (const f of step.files) {
+          files.appendChild(el('code', { className: 'plan-file-chip', text: String(f) }));
+        }
+        li.appendChild(files);
+      }
+      ol.appendChild(li);
+    }
+    body.appendChild(ol);
+  }
+  if (Array.isArray(p.risks) && p.risks.length) {
+    const risks = el('div', { className: 'plan-risks' });
+    risks.appendChild(el('span', { className: 'plan-risks-label', text: 'Risks: ' }));
+    risks.appendChild(el('span', { className: 'plan-risks-text', text: p.risks.map(String).join(' · ') }));
+    body.appendChild(risks);
+  }
+  return body;
+}
+
+/**
+ * Build the Plan container. HARD separation from the verdict pane: its own
+ * clearly-labeled advisory container, NEVER the verdict-assurance styling,
+ * NEVER the AUTHORITATIVE vocabulary, NEVER a trust-palette color — a plan is
+ * model opinion (proposed) or operator-approved intent (approved); neither is
+ * verification. Tamper-evidence comes from the hash chain, not from here.
+ */
+function buildPlanSection(proposed, approved, rejected) {
+  const section = el('div', { className: 'plan-evidence-advisory' });
+  section.appendChild(el('div', { className: 'plan-heading', text: 'Plan' }));
+  section.appendChild(
+    el('p', {
+      className: 'plan-caption',
+      text:
+        'A plan is model opinion at proposal time and operator-approved intent after approval. ' +
+        'Neither is verified — only the verdict above reflects verified checks.',
+    }),
+  );
+
+  // DEFENSIVE HONESTY: the contract requires the LITERAL advisory:true on
+  // plan_proposed. If it is absent or anything else, say so visibly — never
+  // silently normalize.
+  if (proposed && proposed.advisory !== true) {
+    section.appendChild(
+      el('div', {
+        className: 'plan-advisory-integrity-warning',
+        text:
+          '⚠ integrity: this plan proposal is missing the required advisory:true marker (frozen contract). ' +
+          'Treat it with extra caution — it is still model opinion, never verification.',
+      }),
+    );
+  }
+
+  if (rejected) {
+    // The honest no-build marker — a rejected plan never ran.
+    section.appendChild(
+      el('div', {
+        className: 'plan-rejected-marker',
+        text:
+          'Plan rejected — no build was run from this plan.' +
+          (typeof rejected.reason === 'string' && rejected.reason ? ' Reason: ' + rejected.reason : ''),
+      }),
+    );
+  }
+
+  if (approved) {
+    // The FINAL (possibly operator-edited) plan is the PRIMARY content.
+    const block = el('div', { className: 'plan-approved' });
+    block.appendChild(
+      el('div', {
+        className: 'plan-approved-label',
+        text: 'Approved plan — operator-approved intent (not verified)',
+      }),
+    );
+    if (approved.edited === true) {
+      block.appendChild(el('span', { className: 'plan-edited-chip', text: 'edited by operator' }));
+    }
+    block.appendChild(buildPlanBody(approved.plan));
+    section.appendChild(block);
+    // The proposal collapses to a one-line note — the approval is what ran.
+    section.appendChild(
+      el('p', {
+        className: 'plan-proposal-note',
+        text:
+          approved.edited === true
+            ? 'Proposed version differs — the operator edited the plan before approving; the chain still carries the original proposal.'
+            : 'Approved as proposed.',
+      }),
+    );
+  } else if (proposed) {
+    if (proposed.parseStatus === 'ok' && proposed.plan && typeof proposed.plan === 'object') {
+      const block = el('div', { className: 'plan-proposed' });
+      block.appendChild(
+        el('div', {
+          className: 'plan-proposed-label',
+          text: 'Proposed plan — advisory (model opinion, not verified)',
+        }),
+      );
+      block.appendChild(buildPlanBody(proposed.plan));
+      section.appendChild(block);
+    } else if (proposed.parseStatus === 'parse-failed' || proposed.parseStatus === 'unavailable') {
+      // HONEST MARKER — never a fabricated plan, never silence.
+      const msg =
+        proposed.parseStatus === 'parse-failed'
+          ? 'Plan could not be parsed — no plan content is shown. This is NOT a plan.'
+          : 'Plan unavailable — no plan content is shown. This is NOT a plan.';
+      section.appendChild(
+        el('div', {
+          className: 'plan-unavailable',
+          text:
+            '⚠ ' +
+            msg +
+            (typeof proposed.reason === 'string' && proposed.reason ? ' Reason: ' + proposed.reason : ''),
+        }),
+      );
+    } else {
+      // Unknown parseStatus — the same honest treatment, never a silent plan.
+      section.appendChild(
+        el('div', {
+          className: 'plan-unavailable',
+          text:
+            '⚠ Plan proposal carries an unrecognized parseStatus (' +
+            JSON.stringify(proposed.parseStatus) +
+            ') — no plan content is shown. This is NOT a plan.',
+        }),
+      );
+    }
+  }
+
+  if (proposed && typeof proposed.actor === 'string' && proposed.actor) {
+    section.appendChild(el('div', { className: 'plan-actor', text: 'Advisory planner: ' + proposed.actor }));
+  }
+  return section;
+}
+
 function renderVerifierVerdict() {
   const root = document.getElementById('verifier-verdict-body');
   const card = document.getElementById('verifier-verdict-card');
@@ -1487,6 +2021,11 @@ function renderVerifierVerdict() {
   if (!v) {
     if (card) card.classList.remove('verdict-untrusted');
     root.appendChild(el('p', { className: 'empty', text: 'No verifier verdict in this trace. The run is unverified.' }));
+    // Review evidence (if any) is still honest display — but with no verdict
+    // there is nothing verified "above"; the advisory framing stands alone.
+    appendReviewEvidence(root);
+    // Plan evidence too — the same stand-alone advisory framing.
+    appendPlanEvidence(root);
     return;
   }
 
@@ -1494,8 +2033,13 @@ function renderVerifierVerdict() {
   // of these hold:
   //   (1) the Ed25519 signature over the verdict object VERIFIES, AND
   //   (2) the loaded trace's hash chain is intact (verifyChainBrowser.ok), AND
-  //   (3) the recomputed trace root === verdict.traceRootHash.
-  // A valid signature with a broken chain OR a non-matching root means the
+  //   (3) the signed verdict.traceRootHash BINDS to the loaded trace under the
+  //       BUNDLE ROOT-BINDING RULE (verifyTraceIntegrity.rootMatches): a strict
+  //       whole-file root match, OR the signed root equals the running chain
+  //       hash at some event index i with every event after i an exclusively
+  //       tolerated trailing verifier_verdict recording of that SAME root
+  //       (canonical doc: spikes/p0-contracts/trace.ts).
+  // A valid signature with a broken chain OR a non-binding root means the
   // verdict is cryptographically authentic but is NOT bound to the trace shown
   // here — the EVIDENCE BUNDLE is untrusted/inconsistent, so we de-authoritate.
   const res = state.sigResult;
@@ -1551,9 +2095,29 @@ function renderVerifierVerdict() {
 
   // Overall verdict banner.
   if (verified) {
-    const banner = el('div', { className: 'verdict-banner verdict-' + v.overallVerdict });
+    // ASSURANCE QUALIFIER (frozen wording): AUTHORITATIVE stays keyed to the
+    // product trust-root tier; the qualifier grades HOW the verifier ran. Only
+    // an explicit verifierIsolation:'independent-sandboxed' earns the
+    // full-trust styling — inline or ABSENT isolation reads as degraded.
+    const assurance = deriveVerdictAssurance(v, state.trace);
+    const banner = el('div', {
+      className: 'verdict-banner verdict-' + v.overallVerdict + ' ' + assurance.className,
+    });
     banner.appendChild(el('span', { className: 'verdict-label', text: 'OVERALL VERDICT' }));
     banner.appendChild(el('span', { className: 'verdict-value', text: (v.overallVerdict || 'unknown').toUpperCase() }));
+    banner.appendChild(el('span', { className: 'verdict-assurance', text: assurance.text }));
+    // FINGERPRINT BADGE (Slice 3): surface WHICH key signed the verdict, as the
+    // colon-grouped fingerprint the key-exchange flow exports, so a reader can
+    // compare it with the sender's published fingerprint out-of-band. PRODUCT
+    // banner ONLY (the DEMO-AUTHORITATIVE banner below is untouched). Display
+    // evidence — the trust gate above already verified the signature.
+    if (v.signature && typeof v.signature.keyId === 'string' && v.signature.keyId.length > 0) {
+      banner.appendChild(el('span', {
+        className: 'verdict-keyid',
+        text: 'Verified by key ' + formatKeyIdFingerprint(v.signature.keyId),
+        title: "Verdict keyId — compare with the sender's exported fingerprint.",
+      }));
+    }
     root.appendChild(banner);
   } else if (demoAuthoritative) {
     // DEMO-AUTHORITATIVE: chain + root verified against the built-in DEMO trust
@@ -1629,6 +2193,14 @@ function renderVerifierVerdict() {
   rootHash.appendChild(el('div', { className: 'field-label', text: 'Bound trace_root_hash' }));
   rootHash.appendChild(el('code', { className: 'field-value mono', text: v.traceRootHash || '(none)' }));
   root.appendChild(rootHash);
+
+  // CHANGE-REVIEW EVIDENCE (review Track C): request header + advisory model
+  // findings, BELOW the verdict pane. No-op for non-review bundles.
+  appendReviewEvidence(root);
+
+  // PLAN EVIDENCE (plan Track C): proposed/approved/rejected plan, BELOW the
+  // verdict pane. No-op for non-plan bundles.
+  appendPlanEvidence(root);
 }
 
 /**
@@ -1747,11 +2319,19 @@ function buildChainBadge(chain, bundleConsistent) {
     badge.appendChild(el('span', { className: 'sig-check', text: '✓' }));
     const txt = el('span');
     txt.appendChild(el('strong', { text: 'evidence bundle verified ✓' }));
+    // When the signed root binds via the ROOT-BINDING TOLERANCE (the verdict's
+    // own recording trails the signed root in trace.jsonl), say so honestly
+    // rather than implying a strict whole-file match.
+    const tolerated = typeof chain.toleratedTrailingCount === 'number' && chain.toleratedTrailingCount > 0;
     txt.appendChild(
       el('span', {
-        text:
-          ' — hash chain intact and trace root matches the signed verdict ' +
-          '(' + shortHash(chain.recomputedRoot) + ').',
+        text: tolerated
+          ? ' — hash chain intact; the signed root binds at event #' + chain.boundIndex +
+            ' (' + shortHash(chain.verdictRoot) + '), followed only by ' + chain.toleratedTrailingCount +
+            ' tolerated verifier_verdict recording event' + (chain.toleratedTrailingCount === 1 ? '' : 's') +
+            ' of that same root.'
+          : ' — hash chain intact and trace root matches the signed verdict ' +
+            '(' + shortHash(chain.recomputedRoot) + ').',
       }),
     );
     badge.appendChild(txt);
@@ -2033,9 +2613,16 @@ async function verifySignatureAndRerender() {
 
 /**
  * Verify the loaded trace's hash chain and bind its root to the verdict.
- * Returns { chainOk, brokenIndex, recomputedRoot, verdictRoot, rootMatches }.
- * `recomputedRoot` is the root computed from the loaded events;
- * `rootMatches` compares it to `verdict.traceRootHash`. NEVER throws.
+ * Returns { chainOk, brokenIndex, recomputedRoot, verdictRoot, rootMatches,
+ * boundIndex, toleratedTrailingCount }. `recomputedRoot` is the whole-file
+ * root computed from the loaded events; `rootMatches` is the BUNDLE
+ * ROOT-BINDING RULE (canonical doc: spikes/p0-contracts/trace.ts) — a strict
+ * whole-file match, OR the signed root equals the running chain hash at some
+ * event index i (`boundIndex`) with every event AFTER i an exclusively
+ * tolerated trailing event (isToleratedTrailingEvent: a `source:'verifier'`
+ * `verifier_verdict` carrying that SAME signed root). Any other trailing
+ * event, a trailing verdict bound to a DIFFERENT root, or a signed root
+ * matching no running hash → rootMatches false (INCONSISTENT). NEVER throws.
  */
 async function verifyTraceIntegrity(events, verdict) {
   const verdictRoot = (verdict && verdict.traceRootHash) || null;
@@ -2052,17 +2639,60 @@ async function verifyTraceIntegrity(events, verdict) {
   // an empty bundle and render authoritative. Belt-and-suspenders with the
   // empty-list guard in verifyChainBrowser (which already forces chainOk:false).
   const recomputedIsGenesis = recomputedRoot === GENESIS_HASH;
-  const rootMatches =
-    !recomputedIsGenesis &&
-    typeof verdictRoot === 'string' &&
-    verdictRoot.length > 0 &&
-    recomputedRoot === verdictRoot;
+  const haveVerdictRoot = typeof verdictRoot === 'string' && verdictRoot.length > 0;
+  const list = Array.isArray(events) ? events : [];
+
+  // Strict whole-file match — the original (and still preferred) binding.
+  const strictMatch = !recomputedIsGenesis && haveVerdictRoot && recomputedRoot === verdictRoot;
+
+  // ROOT-BINDING TOLERANCE: the runner signs the verdict over the trace root,
+  // THEN appends the verifier_verdict event, and the bundle writer copies
+  // trace.jsonl VERBATIM — so a real persisted bundle's whole-file root is one
+  // (or more) verdict-recording events PAST the signed root. Find the LATEST
+  // index whose running hash equals the signed root, then require every later
+  // event to be a tolerated trailing event (the verdict's own recording —
+  // evidence OF the signing, not activity after it). The hash at boundIndex is
+  // only authentic if the chain verifies, which bundleConsistent already
+  // requires via chainOk — and chainOk covers the trailing events too.
+  let boundIndex = -1;
+  let toleratedTrailingCount = 0;
+  let toleratedMatch = false;
+  if (!strictMatch && !recomputedIsGenesis && haveVerdictRoot) {
+    for (let i = list.length - 1; i >= 0; i--) {
+      const e = list[i];
+      if (e && e.hash === verdictRoot) {
+        boundIndex = i;
+        break;
+      }
+    }
+    if (boundIndex !== -1) {
+      toleratedMatch = true;
+      for (let j = boundIndex + 1; j < list.length; j++) {
+        const e = list[j];
+        // A missing/null slot, or ANY non-tolerated trailing event (wrong type,
+        // wrong/omitted source, or a verdict bound to a different root), breaks
+        // the tolerance → INCONSISTENT.
+        if (!e || !isToleratedTrailingEvent(e, verdictRoot)) {
+          toleratedMatch = false;
+          break;
+        }
+      }
+      if (toleratedMatch) toleratedTrailingCount = list.length - 1 - boundIndex;
+      else boundIndex = -1;
+    }
+  } else if (strictMatch) {
+    boundIndex = list.length - 1;
+  }
+
+  const rootMatches = strictMatch || toleratedMatch;
   return {
     chainOk: !!chain.ok && !recomputedIsGenesis,
     brokenIndex: chain.brokenIndex,
     recomputedRoot,
     verdictRoot,
     rootMatches,
+    boundIndex,
+    toleratedTrailingCount,
   };
 }
 

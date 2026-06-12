@@ -512,6 +512,249 @@ input[type="file"] {
   font-size: 18px;
   letter-spacing: 1px;
 }
+/* ASSURANCE QUALIFIER on the full (product AUTHORITATIVE) banner. The
+ * full-trust (blue --verdict) styling is RESERVED for an explicit
+ * verifierIsolation:'independent-sandboxed'; an inline or ABSENT isolation
+ * renders the degraded (amber --warn) qualifier instead — matching the
+ * evidence-summary rule that full/"fully verified" presentation is
+ * independent-sandboxed-only. */
+.verdict-assurance-full,
+.verdict-assurance-degraded {
+  flex-wrap: wrap;
+}
+.verdict-banner .verdict-assurance {
+  flex-basis: 100%;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.5px;
+  margin-top: 4px;
+}
+.verdict-assurance-full .verdict-assurance {
+  color: var(--verdict);
+}
+.verdict-assurance-degraded .verdict-assurance {
+  color: var(--warn);
+}
+/* FINGERPRINT BADGE (Slice 3) — the colon-grouped keyId fingerprint on the
+ * product AUTHORITATIVE banner ("Verified by key 3f9a:71bc:0e44:d2a8"). */
+.verdict-banner .verdict-keyid {
+  flex-basis: 100%;
+  font-size: 11px;
+  font-family: var(--mono, monospace);
+  letter-spacing: 0.5px;
+  margin-top: 2px;
+  opacity: 0.85;
+}
+/* CHANGE-REVIEW EVIDENCE (review Track C) — advisory request header +
+ * model-findings styling. DELIBERATELY outside the trust palette: severity
+ * chips use neutral grey + an orchid/magenta accent pair — NEVER the verdict
+ * blue, the demo sky, pass green, fail red, or the degraded amber — so model
+ * OPINION can never be mistaken for a verified (or failed) trust state. */
+.review-request-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  align-items: center;
+}
+.review-diff-sha {
+  font-family: var(--mono);
+  font-size: 11px;
+  color: var(--text-dim);
+}
+.review-truncated-marker {
+  margin-top: 6px;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--warn);
+}
+.review-findings-advisory {
+  margin-top: 14px;
+  padding: 10px 12px;
+  border: 1px dashed var(--border);
+  border-radius: 8px;
+  background: rgba(107, 118, 134, 0.08); /* neutral wash — not a trust tint */
+}
+.review-findings-heading {
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 0.4px;
+  color: var(--text-dim);
+}
+.review-findings-caption {
+  margin: 4px 0 8px;
+  font-size: 11px;
+  color: var(--text-dim);
+}
+.review-advisory-integrity-warning {
+  margin: 6px 0;
+  font-size: 12px;
+  font-weight: 700;
+  color: var(--warn);
+}
+.review-findings-unavailable {
+  margin: 6px 0;
+  font-size: 12px;
+  color: var(--warn);
+}
+.review-findings-empty {
+  color: var(--text-dim);
+}
+.review-findings-table td {
+  vertical-align: top;
+}
+.finding-sev {
+  font-size: 11px;
+  font-family: var(--mono);
+  padding: 1px 7px;
+  border-radius: 4px;
+  border: 1px solid var(--neutral);
+  color: var(--neutral);
+  white-space: nowrap;
+}
+.finding-sev-warn {
+  color: #c98fe0; /* orchid — already in the decision-chip palette, NOT amber */
+  border-color: #c98fe0;
+}
+.finding-sev-high {
+  color: #d9588f; /* magenta — clearly distinct from the fail red */
+  border-color: #d9588f;
+  font-weight: 700;
+}
+.finding-where {
+  font-family: var(--mono);
+  font-size: 11px;
+}
+.review-findings-actor {
+  margin-top: 8px;
+  font-size: 11px;
+  color: var(--text-dim);
+}
+/* PLAN EVIDENCE (plan Track C) — proposed/approved/rejected plan styling.
+ * DELIBERATELY outside the trust palette: the section shares the findings
+ * box's neutral dashed treatment; the approved-intent block earns only a
+ * firmer NEUTRAL border — NEVER the verdict blue, the demo sky, pass green,
+ * fail red, or the degraded amber — so a plan (model opinion, then
+ * operator-approved intent; neither verified) can never read as a trust
+ * state. The "edited" chip reuses the decision-chip orchid. */
+.plan-evidence-advisory {
+  margin-top: 14px;
+  padding: 10px 12px;
+  border: 1px dashed var(--border);
+  border-radius: 8px;
+  background: rgba(107, 118, 134, 0.08); /* the findings box's neutral wash */
+}
+.plan-heading {
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 0.4px;
+  color: var(--text-dim);
+}
+.plan-caption {
+  margin: 4px 0 8px;
+  font-size: 11px;
+  color: var(--text-dim);
+}
+.plan-advisory-integrity-warning {
+  margin: 6px 0;
+  font-size: 12px;
+  font-weight: 700;
+  color: var(--warn);
+}
+.plan-unavailable {
+  margin: 6px 0;
+  font-size: 12px;
+  color: var(--warn);
+}
+.plan-rejected-marker {
+  margin: 6px 0;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-dim);
+}
+.plan-proposed,
+.plan-approved {
+  margin: 8px 0 0;
+  padding: 8px 10px;
+  border: 1px dashed var(--neutral);
+  border-radius: 6px;
+}
+.plan-approved {
+  border-style: solid; /* firmer for operator-approved intent — still NEUTRAL */
+}
+.plan-proposed-label,
+.plan-approved-label {
+  font-size: 12px;
+  font-weight: 700;
+  color: var(--text-dim);
+}
+.plan-edited-chip {
+  display: inline-block;
+  margin-left: 8px;
+  font-size: 11px;
+  font-family: var(--mono);
+  padding: 1px 7px;
+  border-radius: 4px;
+  border: 1px solid #c98fe0; /* orchid — the decision-chip palette, NOT a trust color */
+  color: #c98fe0;
+  white-space: nowrap;
+}
+.plan-proposal-note {
+  margin: 6px 0 0;
+  font-size: 11px;
+  color: var(--text-dim);
+}
+.plan-goal {
+  margin-top: 6px;
+  font-size: 12px;
+}
+.plan-goal-label {
+  color: var(--text-dim);
+}
+.plan-goal-text {
+  font-weight: 600;
+}
+.plan-steps {
+  margin: 6px 0 0;
+  padding-left: 20px;
+  font-size: 12px;
+}
+.plan-step {
+  margin: 4px 0;
+}
+.plan-step-title {
+  font-weight: 600;
+}
+.plan-step-detail {
+  color: var(--text-dim);
+}
+.plan-file-chip {
+  display: inline-block;
+  margin: 2px 4px 0 0;
+  font-size: 11px;
+  font-family: var(--mono);
+  padding: 0 6px;
+  border-radius: 4px;
+  border: 1px solid var(--neutral);
+  color: var(--neutral);
+}
+.plan-risks {
+  margin-top: 6px;
+  font-size: 12px;
+}
+.plan-risks-label {
+  font-weight: 600;
+  color: var(--text-dim);
+}
+.plan-actor {
+  margin-top: 8px;
+  font-size: 11px;
+  color: var(--text-dim);
+}
+.plan-claims-xref {
+  margin: 4px 0 10px;
+  font-size: 11px;
+  color: var(--text-dim);
+}
 .verdict-pass {
   background: rgba(63, 181, 104, 0.18);
   border: 1px solid var(--pass);
@@ -1087,6 +1330,86 @@ input[type="file"] {
   flex-direction: column;
   gap: 8px;
 }
+/* SESSION CHECKPOINT affordance (#10 Slice 3) — small, unobtrusive run-scoped
+   strip under the trust badges: advisory copy + the "Restore checkpoint…"
+   button. Deliberately quiet (dim text, plain button): a checkpoint is an
+   advisory convenience, never an assurance surface. */
+.checkpoint-strip {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-top: 8px;
+  font-size: 11px;
+}
+.checkpoint-note {
+  color: var(--text-dim);
+  flex: 1;
+}
+.checkpoint-restore-btn {
+  font-size: 11px;
+  padding: 3px 10px;
+  white-space: nowrap;
+}
+
+/* GOVERNED-TERMINAL BROKER CHIPS — run-scoped "Command decisions" strip under
+   the trust badges (sibling of the checkpoint strip; same quiet styling). Each
+   row: the command line, aggregated per-decision chips, hosts, and the honest
+   observe-only posture note. Deliberately quiet: this is an evidence readout,
+   never an assurance surface. */
+.command-chips-strip {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin-top: 8px;
+  font-size: 11px;
+}
+.command-chips-title {
+  color: var(--text-dim);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  font-size: 10px;
+}
+.command-chip-row {
+  display: flex;
+  align-items: baseline;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+.command-chip-row-between .command-chip-cmd {
+  font-style: italic;
+}
+.command-chip-cmd {
+  font-family: var(--mono, monospace);
+  color: var(--text-dim);
+  overflow-wrap: anywhere;
+}
+.command-chip-exit {
+  color: var(--text-dim);
+  white-space: nowrap;
+}
+.decision-chip {
+  border: 1px solid var(--border, rgba(128, 128, 128, 0.4));
+  border-radius: 9px;
+  padding: 0 7px;
+  white-space: nowrap;
+}
+.decision-chip-deny {
+  border-color: var(--fail);
+  color: var(--fail);
+}
+.command-chip-hosts {
+  color: var(--text-dim);
+  overflow-wrap: anywhere;
+}
+.command-chip-posture {
+  color: var(--text-dim);
+  font-style: italic;
+  white-space: nowrap;
+}
+.command-chips-more {
+  color: var(--text-dim);
+}
+
 .failure-card {
   border: 1px solid var(--fail);
   border-left-width: 4px;
@@ -1248,6 +1571,13 @@ input[type="file"] {
   color: var(--fail);
   border-color: var(--fail);
   font-weight: 700;
+}
+/* HONESTY SURFACING (Slice 3) — the structured degraded reason: WHY independent
+ * sandboxed verification did not engage. Amber like the assurance pill. */
+.abr-isolation-reason {
+  font-size: 11px;
+  color: var(--warn);
+  margin-bottom: 10px;
 }
 .abr-check-table {
   margin-top: 4px;
@@ -1707,13 +2037,17 @@ input[type="file"] {
    recedes (opacity + grayscale, NOT removal — the stack stays visible but quiet).
    At Inline the claims/verdict split stays legible (it is about the proposed
    diff). Scoped to the live view's evidence sections only. ---- */
+/* data-tier lives ON #live-view itself (live.js setFrictionSurface), so the
+   element must be written as #live-view[data-tier=…] — a descendant-combinator
+   form ("[data-tier=…] #live-view …") NEVER matches and is dead CSS (caught
+   2026-06-12; pinned by test/askScrimCss.test.mjs). */
 [data-tier="ask"] #live-badges-card,
 [data-tier="ask"] .claims-verdict,
-[data-tier="ask"] #live-view > .card,
-[data-tier="ask"] #live-view .derived-grid,
+#live-view[data-tier="ask"] > .card,
+#live-view[data-tier="ask"] .derived-grid,
 [data-tier="inline"] #live-badges-card,
-[data-tier="inline"] #live-view > .card,
-[data-tier="inline"] #live-view .derived-grid {
+#live-view[data-tier="inline"] > .card,
+#live-view[data-tier="inline"] .derived-grid {
   opacity: 0.26;
   filter: grayscale(0.5);
   transition: opacity 0.45s ease, filter 0.45s ease;
@@ -1723,6 +2057,28 @@ input[type="file"] {
   opacity: 0.92;
   filter: none;
   transition: opacity 0.45s ease, filter 0.45s ease;
+}
+
+/* ---- ASK SCRIM (§6 "Ask overlay"): a grayscale, semi-transparent veil over the
+   receded evidence at the Ask tier — the unmistakable "this needs your decision"
+   moment. PURELY VISUAL: pointer-events:none — it blocks nothing and grants
+   nothing (friction axis only, exactly like the ladder). The friction header
+   (which holds the ladder) and the Ask surface sit ABOVE the veil: they ARE the
+   Ask view. ---- */
+#live-view[data-tier="ask"]::before {
+  content: '';
+  position: fixed;
+  inset: 0;
+  background: linear-gradient(rgba(118, 118, 122, 0.14), rgba(92, 92, 96, 0.2));
+  backdrop-filter: grayscale(0.55);
+  -webkit-backdrop-filter: grayscale(0.55);
+  pointer-events: none;
+  z-index: 3;
+}
+#live-view[data-tier="ask"] > .friction-header,
+#live-view[data-tier="ask"] #ask-surface {
+  position: relative;
+  z-index: 4;
 }
 
 /* ---- SOFT side-chat card (§5.8): present but visually capped (violet). States
@@ -1979,7 +2335,7 @@ input[type="file"] {
    Ask surface itself + the friction header (which holds the ladder) must NOT dim
    — they ARE the Ask view. Re-assert full visibility for them. */
 [data-tier="ask"] #ask-surface,
-[data-tier="ask"] #live-view > .friction-header {
+#live-view[data-tier="ask"] > .friction-header {
   opacity: 1 !important;
   filter: none !important;
 }

@@ -8,6 +8,151 @@ import { fileURLToPath as fileURLToPath4 } from "node:url";
 import { spawn, spawnSync } from "node:child_process";
 import { randomUUID as randomUUID2 } from "node:crypto";
 
+// ../spikes/p0-contracts/lifecycle.ts
+var LEGAL_TRANSITIONS = {
+  created: ["worktree_ready", "failed", "aborted"],
+  worktree_ready: ["sandbox_ready", "failed", "aborted"],
+  sandbox_ready: ["executing", "failed", "aborted"],
+  executing: ["completed", "failed", "aborted"],
+  completed: [],
+  failed: [],
+  aborted: []
+};
+function canTransition(from, to) {
+  const allowed = LEGAL_TRANSITIONS[from];
+  if (!allowed) return false;
+  return allowed.includes(to);
+}
+function isTerminalState(state) {
+  return LEGAL_TRANSITIONS[state]?.length === 0;
+}
+
+// ../spikes/p0-contracts/provenance.ts
+var UNTRUSTED_PROVENANCE = [
+  "web",
+  "tool-output",
+  "mcp"
+];
+
+// ../spikes/p0-contracts/policy.ts
+var POLICY_DEFAULT_VERBS = ["allow", "deny", "ask"];
+function isPlainObject(v) {
+  return typeof v === "object" && v !== null && !Array.isArray(v);
+}
+function isStringArray(v) {
+  return Array.isArray(v) && v.every((x) => typeof x === "string");
+}
+function isStringMatrix(v) {
+  return Array.isArray(v) && v.every((row) => isStringArray(row));
+}
+function validateDefaultVerb(value, path7, errors) {
+  if (typeof value !== "string" || !POLICY_DEFAULT_VERBS.includes(value)) {
+    errors.push(
+      `${path7} must be one of ${POLICY_DEFAULT_VERBS.join(" | ")}, got ${describe(value)}`
+    );
+  }
+}
+function describe(v) {
+  if (v === null) return "null";
+  if (Array.isArray(v)) return "array";
+  return typeof v;
+}
+function parsePolicy(raw) {
+  const errors = [];
+  if (!isPlainObject(raw)) {
+    return { errors: [`policy must be an object, got ${describe(raw)}`] };
+  }
+  if (typeof raw.version !== "number" || !Number.isFinite(raw.version)) {
+    errors.push(`version must be a finite number, got ${describe(raw.version)}`);
+  }
+  let defaults;
+  if (!isPlainObject(raw.defaults)) {
+    errors.push(`defaults must be an object, got ${describe(raw.defaults)}`);
+  } else {
+    const d = raw.defaults;
+    validateDefaultVerb(d.file_read, "defaults.file_read", errors);
+    validateDefaultVerb(d.file_write, "defaults.file_write", errors);
+    validateDefaultVerb(d.command, "defaults.command", errors);
+    validateDefaultVerb(d.network, "defaults.network", errors);
+    validateDefaultVerb(d.mcp, "defaults.mcp", errors);
+    if (errors.length === 0) {
+      defaults = {
+        file_read: d.file_read,
+        file_write: d.file_write,
+        command: d.command,
+        network: d.network,
+        mcp: d.mcp
+      };
+    }
+  }
+  let allow;
+  if (!isPlainObject(raw.allow)) {
+    errors.push(`allow must be an object, got ${describe(raw.allow)}`);
+  } else {
+    const a = raw.allow;
+    if (!isStringArray(a.read_paths)) errors.push("allow.read_paths must be a string[]");
+    if (!isStringArray(a.write_paths)) errors.push("allow.write_paths must be a string[]");
+    if (!isStringMatrix(a.commands)) errors.push("allow.commands must be a string[][]");
+    if (!isStringArray(a.network)) errors.push("allow.network must be a string[]");
+    allow = {
+      read_paths: isStringArray(a.read_paths) ? a.read_paths : [],
+      write_paths: isStringArray(a.write_paths) ? a.write_paths : [],
+      commands: isStringMatrix(a.commands) ? a.commands : [],
+      network: isStringArray(a.network) ? a.network : []
+    };
+  }
+  let deny;
+  if (!isPlainObject(raw.deny)) {
+    errors.push(`deny must be an object, got ${describe(raw.deny)}`);
+  } else {
+    const dn = raw.deny;
+    if (!isStringArray(dn.read_paths)) errors.push("deny.read_paths must be a string[]");
+    if (!isStringArray(dn.write_paths)) errors.push("deny.write_paths must be a string[]");
+    if (!isStringMatrix(dn.commands)) errors.push("deny.commands must be a string[][]");
+    deny = {
+      read_paths: isStringArray(dn.read_paths) ? dn.read_paths : [],
+      write_paths: isStringArray(dn.write_paths) ? dn.write_paths : [],
+      commands: isStringMatrix(dn.commands) ? dn.commands : []
+    };
+  }
+  let verify;
+  if (!isStringMatrix(raw.verify)) {
+    errors.push("verify must be a string[][]");
+  } else {
+    verify = raw.verify.map((row) => Object.freeze([...row]));
+  }
+  if (errors.length > 0) {
+    return { errors };
+  }
+  const policy = {
+    version: raw.version,
+    defaults,
+    allow,
+    deny,
+    verify: Object.freeze(verify)
+  };
+  return { policy, errors: [] };
+}
+
+// ../spikes/p0-contracts/trace.ts
+var TRACE_EVENT_VERSION = 1;
+
+// ../spikes/p0-contracts/sandbox.ts
+function requestedEgressMode(spec) {
+  return spec.network === "deny" ? "hard-deny" : spec.network.egressMode;
+}
+function negotiateEgress(runtime, spec) {
+  const requested = requestedEgressMode(spec);
+  const supported = typeof runtime.supportedEgressModes === "function" ? runtime.supportedEgressModes() : ["hard-deny"];
+  if (supported.includes(requested)) {
+    return { ok: true };
+  }
+  return {
+    ok: false,
+    reason: `runtime '${runtime.name}' cannot honor egressMode '${requested}': it supports only [${supported.join(", ")}]. Refusing to provision rather than silently downgrading the egress guarantee.`
+  };
+}
+
 // ../spikes/p0-sandbox/egress-proxy.ts
 import { createServer } from "node:http";
 import { connect as netConnect } from "node:net";
@@ -460,9 +605,9 @@ function denyNetworkConfig() {
 }
 var SOFT_EGRESS_POSTURE_MESSAGE = "egress posture: SOFT application-layer allowlist (proxy-honoring only; NOT a hard boundary; bypassable by proxy-stripping clients)";
 var softEgressWarned = false;
-function softEgressNotAcknowledgedError() {
+function softEgressNotAcknowledgedError(reason) {
   return new Error(
-    "DockerSandboxRuntime: network:{ allow } on the Docker-local runtime is an APPLICATION-LAYER (proxy-only) egress allowlist, NOT a hard boundary \u2014 a process that strips the HTTP(S) proxy env vars or opens a raw socket can bypass it. It therefore FAILS CLOSED (no egress) unless explicitly acknowledged. Pass network:{ allow, acknowledgeSoftEgress: true } to opt into the soft allowlist with eyes open, or use network:'deny' for a hard boundary (--network none) / the remote plane for a hard egress allowlist."
+    `DockerSandboxRuntime: ${reason} On the Docker-local runtime a network:{ allow } spec is an APPLICATION-LAYER (proxy-only) egress allowlist, NOT a hard boundary \u2014 a process that strips the HTTP(S) proxy env vars or opens a raw socket can bypass it. Pass network:{ allow, egressMode: 'soft-proxy-allow' } to opt into the soft allowlist with eyes open, or use network:'deny' for a hard boundary (--network none); a hard egress allowlist (egressMode:'hard-allowlist') is the remote plane's job, not this runtime's.`
   );
 }
 function signalSoftEgressPosture(onDecision) {
@@ -540,9 +685,22 @@ var DockerSandboxRuntime = class {
       hardEgress: spec.network === "deny"
     };
   }
+  /**
+   * The egress modes the Docker-local runtime can STRUCTURALLY honor:
+   *   - 'hard-deny'        — `--network none`: no interface/route/DNS (hard).
+   *   - 'soft-proxy-allow' — the application-layer (proxy-only) allowlist.
+   * It deliberately does NOT list 'hard-allowlist': a hard network-namespace
+   * default-DROP allowlist is the Firecracker remote-plane's job, so a spec
+   * requesting it is rejected by {@link negotiateEgress} rather than silently
+   * downgraded to the soft proxy posture.
+   */
+  supportedEgressModes() {
+    return ["hard-deny", "soft-proxy-allow"];
+  }
   async createSandbox(spec) {
-    if (spec.network !== "deny" && spec.network.acknowledgeSoftEgress !== true) {
-      throw softEgressNotAcknowledgedError();
+    const negotiated = negotiateEgress(this, spec);
+    if (!negotiated.ok) {
+      throw softEgressNotAcknowledgedError(negotiated.reason);
     }
     const containerName = containerNameFor(spec.runId);
     let net;
@@ -655,135 +813,6 @@ function buildInjectedEnv(allow = []) {
 import { createHash } from "node:crypto";
 import { appendFileSync, readFileSync, existsSync, mkdirSync as mkdirSync2 } from "node:fs";
 import { dirname as dirname2 } from "node:path";
-
-// ../spikes/p0-contracts/lifecycle.ts
-var LEGAL_TRANSITIONS = {
-  created: ["worktree_ready", "failed", "aborted"],
-  worktree_ready: ["sandbox_ready", "failed", "aborted"],
-  sandbox_ready: ["executing", "failed", "aborted"],
-  executing: ["completed", "failed", "aborted"],
-  completed: [],
-  failed: [],
-  aborted: []
-};
-function canTransition(from, to) {
-  const allowed = LEGAL_TRANSITIONS[from];
-  if (!allowed) return false;
-  return allowed.includes(to);
-}
-function isTerminalState(state) {
-  return LEGAL_TRANSITIONS[state]?.length === 0;
-}
-
-// ../spikes/p0-contracts/provenance.ts
-var UNTRUSTED_PROVENANCE = [
-  "web",
-  "tool-output",
-  "mcp"
-];
-
-// ../spikes/p0-contracts/policy.ts
-var POLICY_DEFAULT_VERBS = ["allow", "deny", "ask"];
-function isPlainObject(v) {
-  return typeof v === "object" && v !== null && !Array.isArray(v);
-}
-function isStringArray(v) {
-  return Array.isArray(v) && v.every((x) => typeof x === "string");
-}
-function isStringMatrix(v) {
-  return Array.isArray(v) && v.every((row) => isStringArray(row));
-}
-function validateDefaultVerb(value, path7, errors) {
-  if (typeof value !== "string" || !POLICY_DEFAULT_VERBS.includes(value)) {
-    errors.push(
-      `${path7} must be one of ${POLICY_DEFAULT_VERBS.join(" | ")}, got ${describe(value)}`
-    );
-  }
-}
-function describe(v) {
-  if (v === null) return "null";
-  if (Array.isArray(v)) return "array";
-  return typeof v;
-}
-function parsePolicy(raw) {
-  const errors = [];
-  if (!isPlainObject(raw)) {
-    return { errors: [`policy must be an object, got ${describe(raw)}`] };
-  }
-  if (typeof raw.version !== "number" || !Number.isFinite(raw.version)) {
-    errors.push(`version must be a finite number, got ${describe(raw.version)}`);
-  }
-  let defaults;
-  if (!isPlainObject(raw.defaults)) {
-    errors.push(`defaults must be an object, got ${describe(raw.defaults)}`);
-  } else {
-    const d = raw.defaults;
-    validateDefaultVerb(d.file_read, "defaults.file_read", errors);
-    validateDefaultVerb(d.file_write, "defaults.file_write", errors);
-    validateDefaultVerb(d.command, "defaults.command", errors);
-    validateDefaultVerb(d.network, "defaults.network", errors);
-    validateDefaultVerb(d.mcp, "defaults.mcp", errors);
-    if (errors.length === 0) {
-      defaults = {
-        file_read: d.file_read,
-        file_write: d.file_write,
-        command: d.command,
-        network: d.network,
-        mcp: d.mcp
-      };
-    }
-  }
-  let allow;
-  if (!isPlainObject(raw.allow)) {
-    errors.push(`allow must be an object, got ${describe(raw.allow)}`);
-  } else {
-    const a = raw.allow;
-    if (!isStringArray(a.read_paths)) errors.push("allow.read_paths must be a string[]");
-    if (!isStringArray(a.write_paths)) errors.push("allow.write_paths must be a string[]");
-    if (!isStringMatrix(a.commands)) errors.push("allow.commands must be a string[][]");
-    if (!isStringArray(a.network)) errors.push("allow.network must be a string[]");
-    allow = {
-      read_paths: isStringArray(a.read_paths) ? a.read_paths : [],
-      write_paths: isStringArray(a.write_paths) ? a.write_paths : [],
-      commands: isStringMatrix(a.commands) ? a.commands : [],
-      network: isStringArray(a.network) ? a.network : []
-    };
-  }
-  let deny;
-  if (!isPlainObject(raw.deny)) {
-    errors.push(`deny must be an object, got ${describe(raw.deny)}`);
-  } else {
-    const dn = raw.deny;
-    if (!isStringArray(dn.read_paths)) errors.push("deny.read_paths must be a string[]");
-    if (!isStringArray(dn.write_paths)) errors.push("deny.write_paths must be a string[]");
-    if (!isStringMatrix(dn.commands)) errors.push("deny.commands must be a string[][]");
-    deny = {
-      read_paths: isStringArray(dn.read_paths) ? dn.read_paths : [],
-      write_paths: isStringArray(dn.write_paths) ? dn.write_paths : [],
-      commands: isStringMatrix(dn.commands) ? dn.commands : []
-    };
-  }
-  let verify;
-  if (!isStringMatrix(raw.verify)) {
-    errors.push("verify must be a string[][]");
-  } else {
-    verify = raw.verify.map((row) => Object.freeze([...row]));
-  }
-  if (errors.length > 0) {
-    return { errors };
-  }
-  const policy = {
-    version: raw.version,
-    defaults,
-    allow,
-    deny,
-    verify: Object.freeze(verify)
-  };
-  return { policy, errors: [] };
-}
-
-// ../spikes/p0-contracts/trace.ts
-var TRACE_EVENT_VERSION = 1;
 
 // ../spikes/p0-trace/canonical-json.ts
 function isPlainArray(value) {
@@ -1168,6 +1197,9 @@ function decideRaw(policy, request) {
       const port = readPort(request.payload);
       if (host !== void 0 && networkAllowMatches(policy.allow.network, host, port)) return "allow";
       return verbToDecision(policy.defaults.network);
+    }
+    case "mcp": {
+      return verbToDecision(policy.defaults.mcp);
     }
     default: {
       const _exhaustive = request.tool;

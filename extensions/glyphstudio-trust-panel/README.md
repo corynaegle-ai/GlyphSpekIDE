@@ -41,6 +41,33 @@ non-negotiable properties preserved:
    A bad/missing signature, a tampered verdict/chain, a signing key that is not an
    out-of-band trust root, or a runtime lacking Web Crypto Ed25519 all keep the
    verdict out of product-authoritative — never silently "verified".
+3. **Assurance is earned, not asserted.** A product-AUTHORITATIVE banner carries an
+   honest **assurance qualifier** derived from the bundle's persisted isolation
+   evidence, and the full-trust presentation is **reserved**:
+   - **"AUTHORITATIVE — independently verified (sandboxed)"** (full-trust blue)
+     **only** when `verifierIsolation` is `independent-sandboxed` — the verify
+     targets really re-ran in the verifier's **own fresh `network:deny` container**,
+     separate from the actor, and the verdict was signed over the trace root by the
+     actor-inaccessible key. This is the shipped product path (not a demo label)
+     whenever an isolation runtime is present: the machine-scoped
+     `glyphstudio.verifierRuntime` setting selects it (`auto` default — Docker is
+     **detected, never required**; `docker` / `firecracker` explicit; `off` never
+     isolates).
+   - **"AUTHORITATIVE (signature) — degraded assurance: inline check"** (amber)
+     for an inline or unknown-isolation verdict. No isolation runtime → the build
+     still completes and the verdict is still signed, but it is honestly `degraded`
+     with a visible structured reason (e.g. "docker daemon not running",
+     "runtime preference 'off'…") — never `full`, never blocked.
+   - The banner also shows a **fingerprint badge** ("Verified by key
+     `xxxx:xxxx:xxxx:xxxx`") naming the verdict's signing key, for comparison with
+     a fingerprint exchanged out-of-band: **GlyphStudio: Export Verifier Public
+     Key** (`glyphstudio.exportVerifierKey`) on the sender side and **GlyphStudio:
+     Trust a Verifier Key…** (`glyphstudio.trustVerifierKey`) on the reviewer
+     side.
+
+   Recorded real-runtime evidence for both postures (full twin over a real Docker
+   container + degraded twin with the runtime preference off):
+   `docs/verifier-authoritative-evidence-2026-06-11.md`.
 
 ### Trust division (host vs webview)
 
@@ -105,7 +132,11 @@ proves the bundle is internally consistent; the panel shows full product
 **AUTHORITATIVE** only when the signing key also matches an **out-of-band** trust
 root (the extension keystore or `glyphstudio.trustedVerifierKeys`). A bundle whose key
 is only its own embedded copy renders as **valid-but-untrusted-key**. (The shipped
-demo sample is signed by the built-in demo key → **DEMO-AUTHORITATIVE**.)
+demo sample is signed by the built-in demo key → **DEMO-AUTHORITATIVE** — that tier
+is permanent and correct for demo-key bundles, independent of the product
+AUTHORITATIVE path.) Within product-AUTHORITATIVE, the full-trust qualifier follows
+the bundle's isolation evidence as described above: independent-sandboxed → full;
+inline/unknown → degraded (amber).
 
 ### Packaging a VSIX for Open VSX (no Microsoft Marketplace)
 

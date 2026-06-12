@@ -8,10 +8,367 @@ var __export = (target, all) => {
     __defProp(target, name, { get: all[name], enumerable: true });
 };
 
+// ../spikes/p0-sandbox/egress-proxy.ts
+import { createServer } from "node:http";
+import { connect as netConnect } from "node:net";
+import { randomUUID as randomUUID2 } from "node:crypto";
+import { request as httpRequest } from "node:http";
+function splitHostPort(authority) {
+  const trimmed = authority.trim();
+  if (trimmed.startsWith("[")) {
+    const close = trimmed.indexOf("]");
+    if (close !== -1) {
+      const host = trimmed.slice(0, close + 1);
+      const rest = trimmed.slice(close + 1);
+      if (rest.startsWith(":")) {
+        const port2 = Number(rest.slice(1));
+        return Number.isInteger(port2) ? { host, port: port2 } : { host };
+      }
+      return { host };
+    }
+  }
+  const idx = trimmed.lastIndexOf(":");
+  if (idx === -1) return { host: trimmed };
+  const portStr = trimmed.slice(idx + 1);
+  const port = Number(portStr);
+  if (portStr.length > 0 && Number.isInteger(port) && /^\d+$/.test(portStr)) {
+    return { host: trimmed.slice(0, idx), port };
+  }
+  return { host: trimmed };
+}
+function isIpLiteral(host) {
+  const h = host.trim();
+  if (h.length === 0) return false;
+  if (h.startsWith("[") && h.endsWith("]")) return true;
+  if (h.includes(":")) return true;
+  const v4 = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/.exec(h);
+  if (v4) {
+    return v4.slice(1).every((o) => {
+      const n = Number(o);
+      return n >= 0 && n <= 255;
+    });
+  }
+  return false;
+}
+function isHostAllowed(allow, host, port) {
+  const targetHost = host.toLowerCase();
+  for (const entry of allow) {
+    const { host: aHost, port: aPort } = splitHostPort(entry);
+    if (aHost.toLowerCase() !== targetHost) continue;
+    if (aPort === void 0) return true;
+    if (aPort === port) return true;
+  }
+  return false;
+}
+function targetForHttp(req) {
+  const rawUrl = req.url ?? "";
+  if (/^[a-zA-Z][a-zA-Z0-9+.-]*:\/\//.test(rawUrl)) {
+    try {
+      const u = new URL(rawUrl);
+      const host = u.hostname;
+      const port = u.port ? Number(u.port) : DEFAULT_HTTP_PORT;
+      if (host) return { host, port };
+    } catch {
+    }
+  }
+  const hostHeader = req.headers.host;
+  if (typeof hostHeader === "string" && hostHeader.length > 0) {
+    const { host, port } = splitHostPort(hostHeader);
+    if (host) return { host, port: port ?? DEFAULT_HTTP_PORT };
+  }
+  return void 0;
+}
+function startEgressProxy(options) {
+  const allow = options.allow;
+  const bindHost = options.bindHost ?? "0.0.0.0";
+  const bindPort = options.bindPort ?? 0;
+  const denyDirectIp = options.denyDirectIp ?? true;
+  const observeAll = options.observeAll ?? false;
+  const upstreamLookup = {};
+  for (const [k, v] of Object.entries(options.upstreamLookup ?? {})) {
+    upstreamLookup[k.toLowerCase()] = v;
+  }
+  const dialHost = (requestedHost) => upstreamLookup[requestedHost.toLowerCase()] ?? requestedHost;
+  const health = {
+    decisionFailures: 0,
+    tunnelFailures: 0,
+    bytesFailures: 0,
+    closeFailures: 0
+  };
+  const emit = (d) => {
+    try {
+      options.onDecision?.(d);
+    } catch {
+      health.decisionFailures += 1;
+    }
+  };
+  const server2 = createServer();
+  server2.on("request", (clientReq, clientRes) => {
+    const target = targetForHttp(clientReq);
+    if (!target) {
+      emit({
+        id: randomUUID2(),
+        ts: Date.now(),
+        kind: "http",
+        decision: "deny",
+        host: "",
+        port: 0,
+        method: clientReq.method,
+        reason: "no-target"
+      });
+      clientRes.writeHead(400, { "content-type": "text/plain" });
+      clientRes.end("egress proxy: could not determine target host\n");
+      return;
+    }
+    const allowed = observeAll || isHostAllowed(allow, target.host, target.port);
+    if (!observeAll) {
+      if (denyDirectIp && isIpLiteral(target.host)) {
+        emit({
+          id: randomUUID2(),
+          ts: Date.now(),
+          kind: "http",
+          decision: "deny",
+          host: target.host,
+          port: target.port,
+          method: clientReq.method,
+          reason: "direct-ip"
+        });
+        clientRes.writeHead(403, { "content-type": "text/plain" });
+        clientRes.end(
+          `egress denied: direct IP literal not permitted (use an allowlisted name; the proxy is the controlled resolver): ${target.host}:${target.port}
+`
+        );
+        clientReq.resume();
+        return;
+      }
+    }
+    emit({
+      id: randomUUID2(),
+      ts: Date.now(),
+      kind: "http",
+      decision: allowed ? "allow" : "deny",
+      // Observe-not-block ALLOWS are OBSERVATIONS, not policy authorizations: mark
+      // them so a consumer can never mistake a soft-plane observe for a real allow.
+      ...observeAll ? { enforcement: "observe-only" } : {},
+      host: target.host,
+      port: target.port,
+      method: clientReq.method,
+      reason: observeAll ? "observed" : "allowlist"
+    });
+    if (!allowed) {
+      clientRes.writeHead(403, { "content-type": "text/plain" });
+      clientRes.end(
+        `egress denied by allowlist: ${target.host}:${target.port}
+`
+      );
+      clientReq.resume();
+      return;
+    }
+    const upstream = httpRequest(
+      {
+        host: dialHost(target.host),
+        port: target.port,
+        method: clientReq.method,
+        // Strip the absolute-form prefix: upstream expects an origin-form path.
+        path: originFormPath(clientReq.url ?? "/"),
+        headers: clientReq.headers
+      },
+      (upstreamRes) => {
+        clientRes.writeHead(upstreamRes.statusCode ?? 502, upstreamRes.headers);
+        upstreamRes.pipe(clientRes);
+      }
+    );
+    upstream.on("error", (err) => {
+      if (!clientRes.headersSent) {
+        clientRes.writeHead(502, { "content-type": "text/plain" });
+      }
+      clientRes.end(`egress proxy upstream error: ${err.message}
+`);
+    });
+    clientReq.pipe(upstream);
+  });
+  server2.on("connect", (req, clientSocket, head) => {
+    clientSocket.on("error", () => {
+    });
+    const authority = req.url ?? "";
+    const { host, port } = splitHostPort(authority);
+    const targetPort = port ?? DEFAULT_HTTPS_PORT;
+    if (!observeAll) {
+      if (denyDirectIp && host.length > 0 && isIpLiteral(host)) {
+        emit({
+          id: randomUUID2(),
+          ts: Date.now(),
+          kind: "connect",
+          decision: "deny",
+          host,
+          port: targetPort,
+          reason: "direct-ip"
+        });
+        clientSocket.write(
+          `HTTP/1.1 403 Forbidden\r
+Content-Type: text/plain\r
+Connection: close\r
+\r
+egress denied: direct IP literal not permitted (use an allowlisted name; the proxy is the controlled resolver): ${host}:${targetPort}
+`
+        );
+        clientSocket.end();
+        return;
+      }
+    }
+    const allowed = host.length > 0 && (observeAll || isHostAllowed(allow, host, targetPort));
+    const observeOnly = observeAll && host.length > 0;
+    emit({
+      id: randomUUID2(),
+      ts: Date.now(),
+      kind: "connect",
+      decision: allowed ? "allow" : "deny",
+      ...observeOnly ? { enforcement: "observe-only" } : {},
+      host,
+      port: targetPort,
+      reason: host.length === 0 ? "no-target" : observeAll ? "observed" : "allowlist"
+    });
+    if (!allowed) {
+      clientSocket.write(
+        `HTTP/1.1 403 Forbidden\r
+Content-Type: text/plain\r
+Connection: close\r
+\r
+egress denied by allowlist: ${host}:${targetPort}
+`
+      );
+      clientSocket.end();
+      return;
+    }
+    let observer;
+    let bytesUp = 0;
+    let bytesDown = 0;
+    let openedAt = 0;
+    let closed = false;
+    const tunnelId = randomUUID2();
+    const upstream = netConnect(targetPort, dialHost(host), () => {
+      clientSocket.write("HTTP/1.1 200 Connection Established\r\n\r\n");
+      if (head && head.length > 0) upstream.write(head);
+      if (options.onTunnel) {
+        try {
+          observer = options.onTunnel({ host, port: targetPort, id: tunnelId });
+        } catch {
+          observer = void 0;
+          health.tunnelFailures += 1;
+        }
+        openedAt = Date.now();
+        if (head && head.length > 0) {
+          bytesUp += head.length;
+          try {
+            observer?.onBytes?.("up", head.length);
+          } catch {
+            health.bytesFailures += 1;
+          }
+        }
+        clientSocket.on("data", (chunk) => {
+          bytesUp += chunk.length;
+          try {
+            observer?.onBytes?.("up", chunk.length);
+          } catch {
+            health.bytesFailures += 1;
+          }
+        });
+        upstream.on("data", (chunk) => {
+          bytesDown += chunk.length;
+          try {
+            observer?.onBytes?.("down", chunk.length);
+          } catch {
+            health.bytesFailures += 1;
+          }
+        });
+      }
+      upstream.pipe(clientSocket);
+      clientSocket.pipe(upstream);
+    });
+    const emitClose = () => {
+      if (closed || !options.onTunnel || openedAt === 0) return;
+      closed = true;
+      try {
+        observer?.onClose?.({
+          bytesUp,
+          bytesDown,
+          durationMs: Date.now() - openedAt
+        });
+      } catch {
+        health.closeFailures += 1;
+      }
+    };
+    const teardownPair = () => {
+      emitClose();
+      upstream.destroy();
+      clientSocket.destroy();
+    };
+    upstream.on("error", teardownPair);
+    clientSocket.on("error", teardownPair);
+    upstream.on("close", emitClose);
+    clientSocket.on("close", emitClose);
+  });
+  server2.on("clientError", (_err, socket) => {
+    if (socket.writable) {
+      socket.end("HTTP/1.1 400 Bad Request\r\nConnection: close\r\n\r\n");
+    } else {
+      socket.destroy();
+    }
+  });
+  return new Promise((resolve5, reject) => {
+    server2.once("error", reject);
+    server2.listen(bindPort, bindHost, () => {
+      server2.removeListener("error", reject);
+      const addr = server2.address();
+      if (addr === null || typeof addr === "string") {
+        reject(new Error("egress proxy: failed to resolve bound address"));
+        return;
+      }
+      const port = addr.port;
+      const proxyHost = bindHost === "0.0.0.0" || bindHost === "::" ? "127.0.0.1" : bindHost;
+      resolve5({
+        port,
+        url: `http://${proxyHost}:${port}`,
+        proxyHost,
+        observerHealth() {
+          return { ...health };
+        },
+        close() {
+          return new Promise((res) => {
+            server2.close(() => res());
+            const anyServer = server2;
+            anyServer.closeAllConnections?.();
+          });
+        }
+      });
+    });
+  });
+}
+function originFormPath(rawUrl) {
+  if (/^[a-zA-Z][a-zA-Z0-9+.-]*:\/\//.test(rawUrl)) {
+    try {
+      const u = new URL(rawUrl);
+      return u.pathname + u.search;
+    } catch {
+      return rawUrl;
+    }
+  }
+  return rawUrl || "/";
+}
+var LOOPBACK_NO_PROXY, DEFAULT_HTTP_PORT, DEFAULT_HTTPS_PORT;
+var init_egress_proxy = __esm({
+  "../spikes/p0-sandbox/egress-proxy.ts"() {
+    LOOPBACK_NO_PROXY = "localhost,127.0.0.1,::1";
+    DEFAULT_HTTP_PORT = 80;
+    DEFAULT_HTTPS_PORT = 443;
+  }
+});
+
 // ../spikes/p0-supervisor/code-index/discover.ts
 var discover_exports = {};
 __export(discover_exports, {
-  discoverFiles: () => discoverFiles
+  discoverFiles: () => discoverFiles,
+  filterIndexablePaths: () => filterIndexablePaths
 });
 import { promises as fs2 } from "node:fs";
 import * as path3 from "node:path";
@@ -159,6 +516,58 @@ async function discoverFiles(opts) {
   results.sort((a, b) => a.path < b.path ? -1 : a.path > b.path ? 1 : 0);
   return results;
 }
+function normalizeRelPath(raw) {
+  if (typeof raw !== "string") return void 0;
+  const posix = raw.replace(/\\/g, "/").replace(/^\.\//, "").replace(/\/+$/, "");
+  if (posix.length === 0 || posix === ".") return void 0;
+  if (posix.startsWith("/") || /^[A-Za-z]:/.test(posix)) return void 0;
+  const segments = posix.split("/");
+  if (segments.some((s) => s.length === 0 || s === "." || s === "..")) return void 0;
+  return posix;
+}
+async function filterIndexablePaths(workspaceRoot, relPaths, opts) {
+  const mode = opts?.mode ?? "existing";
+  let root;
+  try {
+    root = await fs2.realpath(path3.resolve(workspaceRoot));
+  } catch {
+    return [];
+  }
+  const ignorePatterns = [
+    ...await readRootIgnore(root, ".gitignore"),
+    ...await readRootIgnore(root, ".glyphstudioignore"),
+    ...compileExtraIgnore(opts?.extraIgnore)
+  ];
+  const out = [];
+  const seen = /* @__PURE__ */ new Set();
+  for (const raw of relPaths) {
+    const relPath = normalizeRelPath(raw);
+    if (relPath === void 0 || seen.has(relPath)) continue;
+    seen.add(relPath);
+    const segments = relPath.split("/");
+    if (isHardDenied(segments)) continue;
+    if (matchesIgnore(relPath, segments, ignorePatterns)) continue;
+    if (!isAllowedTextFile(segments[segments.length - 1] ?? "")) continue;
+    const joined = path3.join(root, ...segments);
+    if (mode === "path-only") {
+      out.push({ path: relPath, absPath: joined });
+      continue;
+    }
+    try {
+      const lst = await fs2.lstat(joined);
+      if (lst.isSymbolicLink() || !lst.isFile()) continue;
+      const real = await fs2.realpath(joined);
+      if (real !== root && !real.startsWith(root + path3.sep)) continue;
+      if (lst.size > MAX_FILE_BYTES) continue;
+      if (await looksBinary(joined)) continue;
+    } catch {
+      continue;
+    }
+    out.push({ path: relPath, absPath: joined });
+  }
+  out.sort((a, b) => a.path < b.path ? -1 : a.path > b.path ? 1 : 0);
+  return out;
+}
 var DENY_SEGMENTS, DENY_FILENAME_PREDICATES, GENERATED_FILENAME_PREDICATES, TEXT_EXTENSIONS, MAX_FILE_BYTES, BINARY_SNIFF_BYTES;
 var init_discover = __esm({
   "../spikes/p0-supervisor/code-index/discover.ts"() {
@@ -256,10 +665,111 @@ var init_discover = __esm({
   }
 });
 
+// ../spikes/p0-supervisor/code-index/structure-chunk.ts
+function rulesFor(relPath) {
+  const dot2 = relPath.lastIndexOf(".");
+  if (dot2 < 0) return void 0;
+  return BOUNDARY_RULES[relPath.slice(dot2 + 1).toLowerCase()];
+}
+function chunkFileStructure(relPath, text, opts) {
+  const rules = rulesFor(relPath);
+  if (!rules) return chunkFileLines(relPath, text, opts);
+  const lines = text.split(/\r?\n/);
+  if (lines.length === 1 && lines[0] === "") return [];
+  const boundaries = [];
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
+    if (rules.some((r) => r.test(line))) boundaries.push(i);
+  }
+  if (boundaries.length === 0) return chunkFileLines(relPath, text, opts);
+  const units = [];
+  if (boundaries[0] > 0) units.push({ start: 0, end: boundaries[0] - 1 });
+  for (let b = 0; b < boundaries.length; b++) {
+    units.push({
+      start: boundaries[b],
+      end: b + 1 < boundaries.length ? boundaries[b + 1] - 1 : lines.length - 1
+    });
+  }
+  const chunkLinesCap = Math.max(1, opts?.chunkLines ?? DEFAULT_CHUNK_LINES);
+  const maxChars = Math.max(1, opts?.maxChars ?? DEFAULT_MAX_CHARS);
+  const prefix = new Array(lines.length + 1);
+  prefix[0] = 0;
+  for (let i = 0; i < lines.length; i++) prefix[i + 1] = prefix[i] + lines[i].length + 1;
+  const joinedChars = (a, b) => prefix[b + 1] - prefix[a] - 1;
+  const merged = [];
+  for (const u of units) {
+    const prev = merged[merged.length - 1];
+    if (prev !== void 0 && u.end - prev.start + 1 <= chunkLinesCap && joinedChars(prev.start, u.end) <= maxChars) {
+      prev.end = u.end;
+    } else {
+      merged.push({ ...u });
+    }
+  }
+  const chunks = [];
+  for (const u of merged) {
+    const unitLineCount = u.end - u.start + 1;
+    const unitText = lines.slice(u.start, u.end + 1).join("\n");
+    if (unitLineCount <= STRUCTURE_MAX_UNIT_LINES && unitText.length <= maxChars) {
+      const trimmed = unitText.trim();
+      if (trimmed.length > 0) chunks.push(makeChunk(relPath, u.start + 1, u.end + 1, trimmed));
+    } else {
+      chunks.push(...windowLines(relPath, lines.slice(u.start, u.end + 1), u.start + 1, opts));
+    }
+  }
+  return chunks;
+}
+var STRUCTURE_MAX_UNIT_LINES, MOD, BRACE_DECL, ARROW_ASSIGN, PY_RULES, MD_RULES, JS_RULES, BRACE_RULES, BOUNDARY_RULES;
+var init_structure_chunk = __esm({
+  "../spikes/p0-supervisor/code-index/structure-chunk.ts"() {
+    init_chunk();
+    STRUCTURE_MAX_UNIT_LINES = 120;
+    MOD = String.raw`(?:(?:export|default|declare|public|private|protected|internal|static|final|abstract|override|sealed|partial|virtual|open|data|inline|unsafe|extern|async|pub(?:\([^)]*\))?)\s+)*`;
+    BRACE_DECL = new RegExp(
+      String.raw`^[ \t]*${MOD}(?:function|class|interface|enum|struct|trait|impl|fn|func|fun|type|namespace|protocol|extension|record|object|union)\s+[A-Za-z_$<(\[]`
+    );
+    ARROW_ASSIGN = /^(?:export\s+)?(?:const|let|var)\s+[A-Za-z_$][\w$]*[^=]*=\s*(?:async\s+)?(?:function\b|\([^)]*\)\s*(?::[^=>]*)?=>|[A-Za-z_$][\w$]*\s*=>)/;
+    PY_RULES = [/^[ \t]*(?:async\s+)?def\s+[A-Za-z_]/, /^[ \t]*class\s+[A-Za-z_]/];
+    MD_RULES = [/^#{1,6}\s/];
+    JS_RULES = [BRACE_DECL, ARROW_ASSIGN];
+    BRACE_RULES = [BRACE_DECL];
+    BOUNDARY_RULES = {
+      ts: JS_RULES,
+      tsx: JS_RULES,
+      js: JS_RULES,
+      jsx: JS_RULES,
+      mjs: JS_RULES,
+      cjs: JS_RULES,
+      go: BRACE_RULES,
+      rs: BRACE_RULES,
+      java: BRACE_RULES,
+      kt: BRACE_RULES,
+      c: BRACE_RULES,
+      h: BRACE_RULES,
+      cc: BRACE_RULES,
+      cpp: BRACE_RULES,
+      hpp: BRACE_RULES,
+      cs: BRACE_RULES,
+      swift: BRACE_RULES,
+      php: BRACE_RULES,
+      py: PY_RULES,
+      md: MD_RULES,
+      mdx: MD_RULES
+      // Everything else (json, yaml, css, sh, sql, txt, …): no entry → no
+      // boundaries → bit-for-bit 'lines' fallback.
+    };
+  }
+});
+
 // ../spikes/p0-supervisor/code-index/chunk.ts
 var chunk_exports = {};
 __export(chunk_exports, {
-  chunkFile: () => chunkFile
+  DEFAULT_CHUNK_LINES: () => DEFAULT_CHUNK_LINES,
+  DEFAULT_MAX_CHARS: () => DEFAULT_MAX_CHARS,
+  DEFAULT_OVERLAP: () => DEFAULT_OVERLAP,
+  chunkFile: () => chunkFile,
+  chunkFileLines: () => chunkFileLines,
+  makeChunk: () => makeChunk,
+  windowLines: () => windowLines
 });
 import { createHash as createHash4 } from "node:crypto";
 function sha256Hex(text) {
@@ -276,18 +786,25 @@ function makeChunk(relPath, startLine, endLine, text) {
   };
 }
 function chunkFile(relPath, text, opts) {
+  if (opts?.strategy === "lines") return chunkFileLines(relPath, text, opts);
+  return chunkFileStructure(relPath, text, opts);
+}
+function chunkFileLines(relPath, text, opts) {
+  const lines = text.split(/\r?\n/);
+  if (lines.length === 1 && lines[0] === "") return [];
+  return windowLines(relPath, lines, 1, opts);
+}
+function windowLines(relPath, lines, firstLineNumber, opts) {
   const chunkLines = Math.max(1, opts?.chunkLines ?? DEFAULT_CHUNK_LINES);
   const overlap = Math.max(0, opts?.overlap ?? DEFAULT_OVERLAP);
   const maxChars = Math.max(1, opts?.maxChars ?? DEFAULT_MAX_CHARS);
   const step = Math.max(1, chunkLines - overlap);
-  const lines = text.split(/\r?\n/);
-  if (lines.length === 1 && lines[0] === "") return [];
   const chunks = [];
   for (let start = 0; start < lines.length; start += step) {
     const end = Math.min(start + chunkLines, lines.length);
     const windowText = lines.slice(start, end).join("\n");
-    const startLine = start + 1;
-    const endLine = end;
+    const startLine = firstLineNumber + start;
+    const endLine = firstLineNumber + end - 1;
     if (windowText.length <= maxChars) {
       const trimmed = windowText.trim();
       if (trimmed.length > 0) {
@@ -319,17 +836,644 @@ function chunkFile(relPath, text, opts) {
 var DEFAULT_CHUNK_LINES, DEFAULT_OVERLAP, DEFAULT_MAX_CHARS;
 var init_chunk = __esm({
   "../spikes/p0-supervisor/code-index/chunk.ts"() {
+    init_structure_chunk();
     DEFAULT_CHUNK_LINES = 40;
     DEFAULT_OVERLAP = 8;
     DEFAULT_MAX_CHARS = 2e3;
   }
 });
 
+// ../spikes/p0-sandbox/firecracker-egress-rules.ts
+function splitEntry(entry) {
+  const trimmed = entry.trim();
+  if (trimmed.startsWith("[")) {
+    const close = trimmed.indexOf("]");
+    if (close !== -1) {
+      const host = trimmed.slice(0, close + 1);
+      const rest = trimmed.slice(close + 1);
+      if (rest.startsWith(":")) {
+        const port2 = Number(rest.slice(1));
+        return Number.isInteger(port2) ? { host, port: port2 } : { host };
+      }
+      return { host };
+    }
+  }
+  const idx = trimmed.lastIndexOf(":");
+  if (idx === -1) return { host: trimmed };
+  const portStr = trimmed.slice(idx + 1);
+  const port = Number(portStr);
+  if (portStr.length > 0 && /^\d+$/.test(portStr) && Number.isInteger(port)) {
+    const head = trimmed.slice(0, idx);
+    if (head.includes(":")) return { host: trimmed };
+    return { host: head, port };
+  }
+  return { host: trimmed };
+}
+function isCidrLiteral(host) {
+  const slash = host.lastIndexOf("/");
+  if (slash === -1) return false;
+  const addr = host.slice(0, slash);
+  const prefix = host.slice(slash + 1);
+  if (!/^\d+$/.test(prefix)) return false;
+  return isIpLiteral(addr);
+}
+function rulesForEntry(entry, resolved) {
+  const { host, port } = splitEntry(entry);
+  if (host.length === 0) return [];
+  const mkRule = (cidr, hostname) => port === void 0 ? { cidr, origin: { entry, ...hostname ? { hostname } : {} } } : { cidr, port, protocol: "tcp", origin: { entry, ...hostname ? { hostname } : {} } };
+  if (isCidrLiteral(host) || isIpLiteral(host)) {
+    return [mkRule(host)];
+  }
+  const addrs = resolved?.get(host) ?? resolved?.get(host.toLowerCase());
+  if (!addrs || addrs.length === 0) return [];
+  return addrs.map((ip) => mkRule(ip, host));
+}
+function compileEgressRuleset(input, ctx) {
+  const base = {
+    nsName: ctx.nsName,
+    guestIp: ctx.guestIp,
+    basePolicy: "drop"
+    // fail-closed default-DENY — always.
+  };
+  if (input.network === "deny") {
+    return { ...base, egressMode: "hard-deny", accept: [], hardenedFromSoftMode: false };
+  }
+  const { allow, egressMode } = input.network;
+  const hardenedFromSoftMode = egressMode === "soft-proxy-allow";
+  if (egressMode === "hard-deny") {
+    return { ...base, egressMode, accept: [], hardenedFromSoftMode: false };
+  }
+  if (allow.length === 0) {
+    return { ...base, egressMode, accept: [], hardenedFromSoftMode };
+  }
+  const accept = [];
+  for (const entry of allow) {
+    accept.push(...rulesForEntry(entry, input.resolved));
+  }
+  return { ...base, egressMode, accept, hardenedFromSoftMode };
+}
+function toCidr(addr) {
+  const a = addr.trim();
+  if (a.includes("/")) return a.replace(/^\[|\]$/g, "");
+  const unwrapped = a.replace(/^\[|\]$/g, "");
+  const isV6 = unwrapped.includes(":");
+  return `${unwrapped}/${isV6 ? 128 : 32}`;
+}
+function serializeNftRuleset(r) {
+  const lines = [];
+  const table = `glyph_${sanitize(r.nsName)}`;
+  lines.push(`# hard egress ruleset for ns=${r.nsName} guest=${r.guestIp} mode=${r.egressMode}`);
+  if (r.hardenedFromSoftMode) {
+    lines.push(`# note: requested 'soft-proxy-allow' was HARDENED into a hard allowlist`);
+  }
+  lines.push(`table inet ${table} {`);
+  lines.push(`  chain output {`);
+  lines.push(`    type filter hook output priority 0; policy ${r.basePolicy};`);
+  lines.push(`    ip saddr ${r.guestIp} jump glyph_egress`);
+  lines.push(`  }`);
+  lines.push(`  chain forward {`);
+  lines.push(`    type filter hook forward priority 0; policy ${r.basePolicy};`);
+  lines.push(`    ip saddr ${r.guestIp} jump glyph_egress`);
+  lines.push(`  }`);
+  lines.push(`  chain glyph_egress {`);
+  if (r.accept.length === 0) {
+    lines.push(`    # deny-all: no ACCEPT exceptions (fail-closed)`);
+  }
+  for (const rule of r.accept) {
+    const cidr = toCidr(rule.cidr);
+    const fam = cidr.includes(":") ? "ip6" : "ip";
+    if (rule.port === void 0) {
+      lines.push(`    ${fam} daddr ${cidr} accept`);
+    } else {
+      const proto = rule.protocol ?? "tcp";
+      lines.push(`    ${fam} daddr ${cidr} ${proto} dport ${rule.port} accept`);
+    }
+  }
+  lines.push(`  }`);
+  lines.push(`}`);
+  return lines.join("\n") + "\n";
+}
+function sanitize(name) {
+  return name.replace(/[^A-Za-z0-9_]/g, "_");
+}
+var init_firecracker_egress_rules = __esm({
+  "../spikes/p0-sandbox/firecracker-egress-rules.ts"() {
+    init_egress_proxy();
+  }
+});
+
+// ../spikes/p0-sandbox/firecracker-netns.ts
+var firecracker_netns_exports = {};
+__export(firecracker_netns_exports, {
+  allocRunNet: () => allocRunNet,
+  compileHostIptables: () => compileHostIptables,
+  liveLaunch: () => liveLaunch,
+  writeRunArtifact: () => writeRunArtifact
+});
+import { spawn as spawn6 } from "node:child_process";
+import { createConnection } from "node:net";
+import { copyFile, mkdir as mkdir2, writeFile as writeFile2, stat, truncate } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join as join12 } from "node:path";
+import { fileURLToPath as fileURLToPath2 } from "node:url";
+function siblingFile(name) {
+  return join12(fileURLToPath2(new URL(".", import.meta.url)), name);
+}
+function run(cmd, args, opts = {}) {
+  return new Promise((resolve5) => {
+    const child = spawn6(cmd, args, { stdio: ["pipe", "pipe", "pipe"] });
+    let stdout = "";
+    let stderr = "";
+    let timer;
+    child.stdout.on("data", (d) => stdout += d.toString());
+    child.stderr.on("data", (d) => stderr += d.toString());
+    child.on("error", (e) => resolve5({ code: 127, stdout, stderr: stderr + String(e) }));
+    child.on("close", (code) => {
+      if (timer) clearTimeout(timer);
+      resolve5({ code: code ?? 1, stdout, stderr });
+    });
+    if (opts.timeoutMs) {
+      timer = setTimeout(() => {
+        try {
+          child.kill("SIGKILL");
+        } catch {
+        }
+      }, opts.timeoutMs);
+    }
+    if (opts.input) child.stdin.end(opts.input);
+    else child.stdin.end();
+  });
+}
+async function sudo(args, opts = {}) {
+  const r = await run("sudo", ["-n", ...args], opts);
+  if (r.code !== 0) {
+    throw new Error(`sudo ${args.join(" ")} failed (code ${r.code}): ${r.stderr || r.stdout}`);
+  }
+  return r.stdout;
+}
+async function fcApi(apiSock, path6, body) {
+  const r = await run("sudo", [
+    "-n",
+    "curl",
+    "-s",
+    "--show-error",
+    "--fail",
+    "--unix-socket",
+    apiSock,
+    "-X",
+    "PUT",
+    `http://localhost${path6}`,
+    "-H",
+    "Content-Type: application/json",
+    "-d",
+    JSON.stringify(body)
+  ]);
+  if (r.code !== 0) {
+    throw new Error(`firecracker API ${path6} failed: ${r.stderr || r.stdout}`);
+  }
+}
+function runIndex(runId) {
+  let h = 0;
+  for (let i = 0; i < runId.length; i++) h = h * 31 + runId.charCodeAt(i) & 65535;
+  return h % 250 + 1;
+}
+function allocRunNet(runId) {
+  const idx = runIndex(runId);
+  return {
+    idx,
+    tap: `gstap${idx}`,
+    hostIp: `172.30.${idx}.1`,
+    guestIp: `172.30.${idx}.2`,
+    netmask: "255.255.255.252",
+    prefix: 30,
+    cid: 3e4 + idx,
+    table: `glyph_fc_${idx}`
+  };
+}
+async function defaultEgressIface() {
+  const r = await run("ip", ["route", "get", "1.1.1.1"]);
+  const m = r.stdout.match(/\bdev\s+(\S+)/);
+  return m ? m[1] : "eth0";
+}
+function compileHostIptables(net, ruleset, egressIface) {
+  const forwardInsert = [];
+  forwardInsert.push([
+    "FORWARD",
+    "-d",
+    net.guestIp,
+    "-m",
+    "conntrack",
+    "--ctstate",
+    "ESTABLISHED,RELATED",
+    "-j",
+    "ACCEPT"
+  ]);
+  for (const rule of ruleset.accept) {
+    const dst = rule.cidr.includes("/") ? rule.cidr : rule.cidr.includes(":") ? `${rule.cidr}/128` : `${rule.cidr}/32`;
+    if (dst.includes(":")) continue;
+    const args = ["FORWARD", "-s", net.guestIp, "-d", dst];
+    if (rule.port !== void 0) {
+      args.push("-p", rule.protocol ?? "tcp", "--dport", String(rule.port));
+    }
+    args.push("-j", "ACCEPT");
+    forwardInsert.push(args);
+  }
+  forwardInsert.push(["FORWARD", "-s", net.guestIp, "-j", "DROP"]);
+  const natAppend = [
+    ["-t", "nat", "POSTROUTING", "-s", net.guestIp, "-o", egressIface, "-j", "MASQUERADE"]
+  ];
+  const comment = serializeHostRules(net, forwardInsert, natAppend);
+  return { forwardInsert, natAppend, comment };
+}
+function serializeHostRules(net, forwardInsert, natAppend) {
+  const out = [`# host-side egress confinement for guest=${net.guestIp} (run idx ${net.idx})`];
+  for (const r of [...forwardInsert].reverse()) out.push(`iptables -I ${r.join(" ")}`);
+  for (const r of natAppend) out.push(`iptables -A ${r.join(" ")}`);
+  return out.join("\n") + "\n";
+}
+async function provisionHost(runId, ruleset, mountPlan, resources) {
+  const net = allocRunNet(runId);
+  await mkdir2(FC_RUN_DIR, { recursive: true });
+  const base = join12(FC_RUN_DIR, `run-${net.idx}`);
+  const apiSock = `${base}.api`;
+  const vsockUds = `${base}.vsock`;
+  const rootfs = `${base}.ext4`;
+  const logPath = `${base}.log`;
+  const fcPidFile = `${base}.pid`;
+  const rulesPath = `${base}.rules`;
+  const egressIface = await defaultEgressIface();
+  const { forwardInsert, natAppend, comment } = compileHostIptables(net, ruleset, egressIface);
+  const mountImages = mountPlan.mounts.map((m) => ({
+    hostPath: m.hostPath,
+    guestPath: m.guestPath,
+    tag: m.tag,
+    readonly: m.readonly,
+    imagePath: `${base}.${m.tag}.ext4`
+  }));
+  const handles = {
+    net,
+    apiSock,
+    vsockUds,
+    rootfs,
+    logPath,
+    fcPidFile,
+    rulesPath,
+    forwardInsert,
+    natAppend,
+    mountImages
+  };
+  await teardownHost(handles).catch(() => {
+  });
+  await copyFile(FC_BASE_ROOTFS, rootfs);
+  await injectGuestPayload(rootfs);
+  for (const m of mountImages) {
+    await buildMountImage(m.hostPath, m.imagePath);
+  }
+  await sudo(["ip", "tuntap", "add", "dev", net.tap, "mode", "tap"]);
+  await sudo(["ip", "addr", "add", `${net.hostIp}/${net.prefix}`, "dev", net.tap]);
+  await sudo(["ip", "link", "set", net.tap, "up"]);
+  await sudo(["sysctl", "-w", "net.ipv4.ip_forward=1"]);
+  await writeFile2(rulesPath, comment);
+  for (const args of [...forwardInsert].reverse()) {
+    await sudo(["iptables", "-I", ...args]);
+  }
+  for (const args of natAppend) {
+    const [tableFlag, tableName, chain, ...rest] = args;
+    await sudo(["iptables", tableFlag, tableName, "-A", chain, ...rest]);
+  }
+  await bootFirecracker(handles, mountPlan, resources);
+  await waitForAgent(vsockUds);
+  return handles;
+}
+async function injectGuestPayload(rootfs) {
+  const agentSrc = siblingFile("firecracker-guest-agent.cjs");
+  const initSrc = siblingFile("firecracker-guest-init.sh");
+  const mnt = join12(tmpdir(), `gs-fcmnt-${process.pid}-${Date.now()}`);
+  await sudo(["mkdir", "-p", mnt]);
+  try {
+    await sudo(["mount", "-o", "loop", rootfs, mnt]);
+    await sudo(["mkdir", "-p", join12(mnt, "opt")]);
+    await sudo(["cp", agentSrc, join12(mnt, "opt", "glyph-guest-agent.cjs")]);
+    await sudo(["cp", initSrc, join12(mnt, "glyph-init")]);
+    await sudo(["chmod", "0755", join12(mnt, "glyph-init")]);
+    await sudo(["mkdir", "-p", join12(mnt, "workspace"), join12(mnt, "home", "agent")]);
+  } finally {
+    await sudo(["umount", mnt]).catch(() => {
+    });
+    await sudo(["rmdir", mnt]).catch(() => {
+    });
+  }
+}
+async function buildMountImage(hostDir, imagePath) {
+  const du = await run("du", ["-sm", hostDir]);
+  const usedMb = Number.parseInt(du.stdout.split("	")[0] ?? "1", 10) || 1;
+  const sizeMb = Math.max(64, Math.ceil(usedMb * 1.25) + 16);
+  await writeFile2(imagePath, Buffer.alloc(0));
+  await truncate(imagePath, sizeMb * 1024 * 1024);
+  const r = await run("mkfs.ext4", ["-F", "-q", "-d", hostDir, imagePath]);
+  if (r.code !== 0) {
+    throw new Error(
+      `mkfs.ext4 -d ${hostDir} -> ${imagePath} failed (code ${r.code}): ${r.stderr || r.stdout}`
+    );
+  }
+}
+async function writeBackMounts(handles) {
+  const uid = typeof process.getuid === "function" ? process.getuid() : 0;
+  const gid = typeof process.getgid === "function" ? process.getgid() : 0;
+  for (const m of handles.mountImages) {
+    if (m.readonly) continue;
+    try {
+      await stat(m.imagePath);
+    } catch {
+      continue;
+    }
+    const mnt = join12(tmpdir(), `gs-fcwb-${process.pid}-${handles.net.idx}-${m.tag}`);
+    await sudo(["mkdir", "-p", mnt]);
+    try {
+      await sudo(["mount", "-o", "loop", m.imagePath, mnt]);
+      await sudo(["rsync", "-a", "--delete", "--exclude", "/lost+found", `${mnt}/`, `${m.hostPath}/`]);
+      await sudo(["chown", "-R", `${uid}:${gid}`, m.hostPath]);
+    } finally {
+      await sudo(["umount", mnt]).catch(() => {
+      });
+      await sudo(["rmdir", mnt]).catch(() => {
+      });
+    }
+  }
+}
+async function bootFirecracker(handles, _mountPlan, resources) {
+  const { net, apiSock, vsockUds, rootfs, logPath, fcPidFile } = handles;
+  await sudo(["rm", "-f", apiSock, vsockUds]);
+  const launch = `setsid firecracker --api-sock ${apiSock} --id vm-glyph-${net.idx} >${logPath} 2>&1 & echo $! >${fcPidFile}`;
+  await sudo(["sh", "-c", launch]);
+  for (let i = 0; i < 100; i++) {
+    try {
+      await stat(apiSock);
+      break;
+    } catch {
+      await delay(50);
+    }
+  }
+  const guestMac = `AA:FC:00:00:${(net.idx >> 8 & 255).toString(16).padStart(2, "0")}:${(net.idx & 255).toString(16).padStart(2, "0")}`.toUpperCase();
+  const bootArgs = `console=ttyS0 reboot=k panic=1 pci=off init=/glyph-init ip=${net.guestIp}::${net.hostIp}:${net.netmask}:glyph:eth0:off`;
+  await fcApi(apiSock, "/boot-source", {
+    kernel_image_path: FC_KERNEL,
+    boot_args: bootArgs
+  });
+  await fcApi(apiSock, "/drives/rootfs", {
+    drive_id: "rootfs",
+    path_on_host: rootfs,
+    is_root_device: true,
+    is_read_only: false
+  });
+  for (const m of handles.mountImages) {
+    await fcApi(apiSock, `/drives/${m.tag}`, {
+      drive_id: m.tag,
+      path_on_host: m.imagePath,
+      is_root_device: false,
+      is_read_only: m.readonly
+    });
+  }
+  await fcApi(apiSock, "/machine-config", {
+    vcpu_count: resources?.vcpus ?? DEFAULT_GUEST_VCPUS,
+    mem_size_mib: resources?.memMib ?? DEFAULT_GUEST_MEM_MIB
+  });
+  await fcApi(apiSock, "/network-interfaces/eth0", {
+    iface_id: "eth0",
+    guest_mac: guestMac,
+    host_dev_name: net.tap
+  });
+  await fcApi(apiSock, "/vsock", { guest_cid: net.cid, uds_path: vsockUds });
+  await fcApi(apiSock, "/actions", { action_type: "InstanceStart" });
+  for (let i = 0; i < 100; i++) {
+    try {
+      await stat(vsockUds);
+      break;
+    } catch {
+      await delay(50);
+    }
+  }
+  await sudo(["chmod", "0666", vsockUds]).catch(() => {
+  });
+}
+function connectVsock(vsockUds, timeoutMs = 15e3) {
+  return new Promise((resolve5, reject) => {
+    const sock = createConnection(vsockUds, () => {
+      sock.write(`CONNECT ${GUEST_VSOCK_PORT}
+`);
+    });
+    let acc = Buffer.alloc(0);
+    let settled = false;
+    const timer = setTimeout(() => {
+      if (settled) return;
+      settled = true;
+      sock.destroy();
+      reject(new Error(`vsock handshake timed out after ${timeoutMs}ms`));
+    }, timeoutMs);
+    const onData = (d) => {
+      acc = Buffer.concat([acc, d]);
+      const nl = acc.indexOf(10);
+      if (nl === -1) return;
+      const line = acc.subarray(0, nl).toString("utf8");
+      if (line.startsWith("OK")) {
+        settled = true;
+        clearTimeout(timer);
+        sock.removeListener("data", onData);
+        resolve5({ socket: sock, leftover: acc.subarray(nl + 1) });
+      } else {
+        settled = true;
+        clearTimeout(timer);
+        sock.destroy();
+        reject(new Error(`vsock handshake refused: ${line}`));
+      }
+    };
+    sock.on("data", onData);
+    sock.on("error", (e) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      reject(e);
+    });
+  });
+}
+async function waitForAgent(vsockUds, timeoutMs = 6e4) {
+  const deadline = Date.now() + timeoutMs;
+  let lastErr = "never connected";
+  while (Date.now() < deadline) {
+    try {
+      const { socket } = await connectVsock(vsockUds, 3e3);
+      socket.destroy();
+      return;
+    } catch (e) {
+      lastErr = String(e.message ?? e);
+      await delay(500);
+    }
+  }
+  throw new Error(`guest agent never became ready on ${vsockUds}: ${lastErr}`);
+}
+async function execOverVsock(vsockUds, req) {
+  const { socket, leftover } = await connectVsock(vsockUds);
+  return new Promise((resolve5, reject) => {
+    let acc = leftover;
+    let settled = false;
+    const finish = (fn) => {
+      if (settled) return;
+      settled = true;
+      socket.destroy();
+      fn();
+    };
+    socket.on("data", (d) => {
+      acc = Buffer.concat([acc, d]);
+      let frames;
+      try {
+        ({ frames, rest: acc } = decodeFrames(acc));
+      } catch (e) {
+        finish(() => reject(e));
+        return;
+      }
+      if (frames.length > 0) finish(() => resolve5(frames[0]));
+    });
+    socket.on("error", (e) => finish(() => reject(e)));
+    socket.on("close", () => finish(() => reject(new Error("vsock closed before a result frame"))));
+    socket.write(encodeFrame(req));
+  });
+}
+async function teardownHost(handles, opts = {}) {
+  const { net, apiSock, vsockUds, rootfs, fcPidFile, rulesPath, forwardInsert, natAppend } = handles;
+  await run("sudo", ["-n", "sh", "-c", `[ -f ${fcPidFile} ] && kill -9 $(cat ${fcPidFile}) 2>/dev/null; true`]);
+  await run("sudo", ["-n", "pkill", "-9", "-f", `vm-glyph-${net.idx}`]);
+  let writeBackError;
+  if (opts.writeBack) {
+    await writeBackMounts(handles).catch((e) => {
+      writeBackError = e;
+    });
+  }
+  for (const args of forwardInsert) {
+    await run("sudo", ["-n", "iptables", "-D", ...args]);
+  }
+  for (const args of natAppend) {
+    const [tableFlag, tableName, chain, ...rest] = args;
+    await run("sudo", ["-n", "iptables", tableFlag, tableName, "-D", chain, ...rest]);
+  }
+  await run("sudo", ["-n", "ip", "link", "del", net.tap]);
+  const mountImagePaths = handles.mountImages.map((m) => m.imagePath);
+  await run("sudo", ["-n", "rm", "-f", apiSock, vsockUds, rootfs, fcPidFile, rulesPath, ...mountImagePaths]);
+  if (writeBackError) {
+    throw new Error(`teardown completed but mount write-back failed: ${writeBackError.message}`);
+  }
+}
+async function liveLaunch(args) {
+  const { runId, ruleset, mountPlan, resources } = args;
+  void serializeNftRuleset(ruleset);
+  const handles = await provisionHost(runId, ruleset, mountPlan, resources);
+  let closed = false;
+  return {
+    async exec(req) {
+      if (closed) return { exitCode: 1, stdout: "", stderr: "transport closed" };
+      return execOverVsock(handles.vsockUds, req);
+    },
+    async close() {
+      if (closed) return;
+      closed = true;
+      await teardownHost(handles, { writeBack: true });
+    }
+  };
+}
+async function writeRunArtifact(name, contents) {
+  const dir = join12(tmpdir(), "glyph-fc-artifacts");
+  await mkdir2(dir, { recursive: true });
+  const p = join12(dir, name);
+  await writeFile2(p, contents);
+  return p;
+}
+var FC_KERNEL, FC_BASE_ROOTFS, FC_RUN_DIR, GUEST_VSOCK_PORT, delay;
+var init_firecracker_netns = __esm({
+  "../spikes/p0-sandbox/firecracker-netns.ts"() {
+    init_firecracker_egress_rules();
+    init_firecracker_vsock();
+    FC_KERNEL = process.env.GLYPHSTUDIO_FC_KERNEL ?? "/opt/firecracker/kernels/vmlinux-5.10";
+    FC_BASE_ROOTFS = process.env.GLYPHSTUDIO_FC_ROOTFS ?? "/opt/firecracker/rootfs/build-small.ext4";
+    FC_RUN_DIR = process.env.GLYPHSTUDIO_FC_RUN_DIR ?? join12(tmpdir(), "glyph-fc-runs");
+    GUEST_VSOCK_PORT = 5e3;
+    delay = (ms) => new Promise((r) => setTimeout(r, ms));
+  }
+});
+
+// ../spikes/p0-sandbox/firecracker-vsock.ts
+function encodeFrame(obj) {
+  const body = Buffer.from(JSON.stringify(obj), "utf8");
+  if (body.length > MAX_FRAME_BYTES) {
+    throw new Error(
+      `encodeFrame: frame body of ${body.length} bytes exceeds the ${MAX_FRAME_BYTES}-byte limit`
+    );
+  }
+  const prefix = Buffer.allocUnsafe(LENGTH_PREFIX_BYTES);
+  prefix.writeUInt32BE(body.length, 0);
+  return Buffer.concat([prefix, body]);
+}
+function decodeFrames(buf) {
+  const frames = [];
+  let offset = 0;
+  while (buf.length - offset >= LENGTH_PREFIX_BYTES) {
+    const len = buf.readUInt32BE(offset);
+    if (len > MAX_FRAME_BYTES) {
+      throw new Error(
+        `decodeFrames: frame length ${len} exceeds the ${MAX_FRAME_BYTES}-byte limit`
+      );
+    }
+    const bodyStart = offset + LENGTH_PREFIX_BYTES;
+    const bodyEnd = bodyStart + len;
+    if (bodyEnd > buf.length) break;
+    const body = buf.subarray(bodyStart, bodyEnd).toString("utf8");
+    frames.push(JSON.parse(body));
+    offset = bodyEnd;
+  }
+  const rest = Buffer.from(buf.subarray(offset));
+  return { frames, rest };
+}
+function guestResources(spec) {
+  const limits = spec.resourceLimits;
+  const vcpusRaw = limits?.cpus ?? DEFAULT_GUEST_VCPUS;
+  const memRaw = limits?.memoryMb ?? DEFAULT_GUEST_MEM_MIB;
+  const vcpus = Math.max(1, Math.min(MAX_GUEST_VCPUS, Math.floor(vcpusRaw) || 1));
+  const memMib = Math.max(
+    MIN_GUEST_MEM_MIB,
+    Math.min(MAX_GUEST_MEM_MIB, Math.floor(memRaw) || DEFAULT_GUEST_MEM_MIB)
+  );
+  return { vcpus, memMib };
+}
+var MAX_FRAME_BYTES, LENGTH_PREFIX_BYTES, DEFAULT_GUEST_VCPUS, DEFAULT_GUEST_MEM_MIB, MAX_GUEST_VCPUS, MAX_GUEST_MEM_MIB, MIN_GUEST_MEM_MIB, realVsockLauncher;
+var init_firecracker_vsock = __esm({
+  "../spikes/p0-sandbox/firecracker-vsock.ts"() {
+    MAX_FRAME_BYTES = 64 * 1024 * 1024;
+    LENGTH_PREFIX_BYTES = 4;
+    DEFAULT_GUEST_VCPUS = 1;
+    DEFAULT_GUEST_MEM_MIB = 256;
+    MAX_GUEST_VCPUS = 8;
+    MAX_GUEST_MEM_MIB = 8192;
+    MIN_GUEST_MEM_MIB = 128;
+    realVsockLauncher = async (args) => {
+      if (process.platform !== "linux") {
+        throw new Error(
+          `FirecrackerSandboxRuntime live VM bring-up requires Linux+KVM \u2014 refusing to provision on platform '${process.platform}'.`
+        );
+      }
+      const { liveLaunch: liveLaunch2 } = await Promise.resolve().then(() => (init_firecracker_netns(), firecracker_netns_exports));
+      return liveLaunch2({
+        runId: args.spec.runId,
+        ruleset: args.ruleset,
+        mountPlan: args.mountPlan,
+        resources: guestResources(args.spec)
+      });
+    };
+  }
+});
+
 // ../spikes/p0-supervisor/bridge-server.ts
-import { createHash as createHash8 } from "node:crypto";
-import { readFileSync as readFileSync6, statSync as statSync3, realpathSync } from "node:fs";
+import { createHash as createHash9 } from "node:crypto";
+import { existsSync as existsSync9, readFileSync as readFileSync8, statSync as statSync4, realpathSync } from "node:fs";
 import { spawnSync as spawnSync2 } from "node:child_process";
-import { join as join12, resolve as resolve4 } from "node:path";
+import { join as join17, resolve as resolve4 } from "node:path";
 
 // ../spikes/p0-supervisor/run.ts
 import { randomUUID } from "node:crypto";
@@ -485,6 +1629,20 @@ function parsePolicy(raw) {
 var TRACE_EVENT_VERSION = 1;
 
 // ../spikes/p0-contracts/sandbox.ts
+function requestedEgressMode(spec) {
+  return spec.network === "deny" ? "hard-deny" : spec.network.egressMode;
+}
+function negotiateEgress(runtime, spec) {
+  const requested = requestedEgressMode(spec);
+  const supported = typeof runtime.supportedEgressModes === "function" ? runtime.supportedEgressModes() : ["hard-deny"];
+  if (supported.includes(requested)) {
+    return { ok: true };
+  }
+  return {
+    ok: false,
+    reason: `runtime '${runtime.name}' cannot honor egressMode '${requested}': it supports only [${supported.join(", ")}]. Refusing to provision rather than silently downgrading the egress guarantee.`
+  };
+}
 function runtimeCapabilities(runtime, spec) {
   if (typeof runtime.capabilities === "function") {
     return runtime.capabilities(spec);
@@ -569,6 +1727,19 @@ var BridgeMethod = {
    */
   ChatSend: "chat/send",
   /**
+   * DISCOVER the chat backends this supervisor can route a {@link ChatSend} turn
+   * to (the model-picker surface). SYNCHRONOUS request/result: the supervisor
+   * PROBES each known backend AT REQUEST TIME and reports an HONEST per-backend
+   * status — `'ok'` only when the probe succeeded (codex: its binary resolves on
+   * PATH; ollama: the local daemon answered) and `'unavailable'` with a short
+   * non-secret `detail` otherwise. `models` lists the LOCAL backend's installed
+   * model names (capped; names only) when the probe succeeded; a frontier CLI
+   * backend that picks its own model omits it. NO PHANTOM BACKENDS: the result
+   * never lists a backend the supervisor cannot actually route to, and never
+   * invents a model name. Carries non-secret ids/names only, NEVER a credential.
+   */
+  ChatBackends: "chat/backends",
+  /**
    * Fetch one explicit http(s) URL for `@Web` chat context. Synchronous
    * request/result, handled supervisor-side only: the extension never fetches web
    * content directly. The supervisor refuses unless a governed chat session already
@@ -606,14 +1777,21 @@ var BridgeMethod = {
    */
   RunCancel: "run/cancel",
   /**
-   * RESPOND to a PENDING approval (remote-control: the phone's `approvals.respond`).
-   * The only interactive approval today is a PENDING governed build: a build request
-   * created via {@link AgenticBuildStart} WITHOUT `approved:true` is held as a
-   * pending approval (codex NOT spawned) rather than refused. On `allow`, the
-   * supervisor GRANTS the authority and starts the held build down the SAME approved
-   * path (`approved:true`) — governed codex edits files + the signed verdict streams.
-   * On `deny`, the pending build is DISCARDED (a terminal `build/event` error, no
-   * codex). The result is only the ACK ({ approvalId, decision, runId? }). Additive:
+   * RESPOND to a PENDING approval (remote-control: the phone's `approvals.respond`;
+   * desktop: the MCP approval modal). Two pending-approval kinds resolve here:
+   *   - a PENDING governed build: a build request created via
+   *     {@link AgenticBuildStart} WITHOUT `approved:true` is held as a pending
+   *     approval (codex NOT spawned) rather than refused. On `allow`, the
+   *     supervisor GRANTS the authority and starts the held build down the SAME
+   *     approved path (`approved:true`) — governed codex edits files + the signed
+   *     verdict streams. On `deny`, the pending build is DISCARDED (a terminal
+   *     `build/event` error, no codex).
+   *   - a HELD `mcp/call` (#9 Slice 2): an ask/force_ask policy decision parks
+   *     the brokered MCP call (surfaced via the mirrored `approval_requested`
+   *     trace event) until this RPC's verdict — `allow` executes it exactly like
+   *     an up-front allow; `deny` (or the supervisor's approval timeout) yields
+   *     an honest 'denied' {@link McpCallResult}.
+   * The result is only the ACK ({ approvalId, decision, runId? }). Additive:
    * a direct `build/start {approved:true}` still starts immediately as today.
    */
   ApprovalRespond: "approval/respond",
@@ -645,7 +1823,116 @@ var BridgeMethod = {
    * LOCAL — nothing egresses code. Best-effort: on ANY error the result is
    * `{ ok:false }` with a short non-secret `error` (the command path never throws).
    */
-  IndexBuild: "index/build"
+  IndexBuild: "index/build",
+  /**
+   * INCREMENTALLY UPDATE the workspace's LOCAL code index from a batch of saved/
+   * watched file changes (the index-freshness loop). SYNCHRONOUS request/result:
+   * the supervisor filters the batch through the SAME discovery/ignore gates a full
+   * build uses (hard secret denylist, root .gitignore/.glyphstudioignore, text-source
+   * allowlist, size/binary caps), re-chunks the surviving changed files, re-embeds
+   * ONLY the windows whose content hash differs (per-window-hash diff — unchanged
+   * sibling windows keep their vectors), and EVICTS windows for deleted files.
+   * Session-bound EXACTLY like {@link IndexRetrieve}/{@link IndexBuild} (completed-
+   * handshake gate + the same canonical session-root binding) and it only ever
+   * updates the EXISTING per-workspace server-side index — when no index has been
+   * built for the session yet, it refuses (`{ ok:false }`) rather than triggering a
+   * cold build. Memory-only mutation: an encrypted persisted snapshot (if any) is
+   * refreshed by the NEXT full `index/build`, not by this RPC. Everything is LOCAL —
+   * nothing egresses code. Best-effort: on ANY error the result is `{ ok:false }`
+   * with a short non-secret `error` (the watch path never throws and never toasts).
+   */
+  IndexUpdate: "index/update",
+  /**
+   * Start a GOVERNED CHANGE REVIEW (#7 — "Review Changes (Verifier-Backed)"): ONE
+   * governed run over the workspace's PROPOSED state (the working tree, or a branch
+   * vs a base ref) producing a signed review artifact with TWO never-blurring
+   * layers — ADVISORY model findings plus the deterministic INDEPENDENT-VERIFIER
+   * verdict over the proposed state. COMPOSITION RULE: the `review_findings` trace
+   * event is appended BEFORE the verifier runs, so the signed verdict's
+   * `traceRootHash` COMMITS to the findings — tampering breaks the chain (see the
+   * ordering invariant in trace.ts). Findings are OPINIONS and never carry or
+   * influence assurance vocabulary. Mirrors build/start's ack-then-notifications
+   * style: the RESULT is only the ACK ({ runId }); the review STREAMS back as
+   * {@link BridgeNotification.ChangeReviewEvent} notifications, the terminal
+   * `result` carrying the {@link ChangeReview} render contract. Read-only over the
+   * proposed state (no authority grant needed: the reviewer edits nothing); carries
+   * no credential.
+   */
+  ChangeReviewStart: "review/start",
+  /**
+   * Start a GOVERNED PLAN RUN (#8 — plan mode): pre-build governed planning. The
+   * supervisor mints a run + hash-chained trace, runs ONE governed READ-ONLY model
+   * turn producing a structured {@link BuildPlan}, appends the `plan_proposed`
+   * trace event, and PARKS the run (the PendingBuild idiom) — no file is edited and
+   * no build starts. The user reviews/edits the plan in the IDE; a later
+   * {@link BridgeMethod.AgenticBuildStart} with the SAME `runId` carrying a
+   * `planApproval` resolves the parked run (the server mints the approvalId and
+   * appends `plan_approved` BEFORE executing, so the build runs on the SAME trace
+   * and the verifier verdict root-binds the whole plan history — see the ordering
+   * invariant in trace.ts), or a {@link BridgeMethod.BuildPlanReject} appends
+   * `plan_rejected` and closes the run. A plan is MODEL OPINION: advisory,
+   * tamper-evident via the chain, NEVER an assurance input. Mirrors review/start's
+   * ack-then-notifications style: the RESULT is only the ACK ({ runId }); the plan
+   * STREAMS back as {@link BridgeNotification.BuildPlanEvent} notifications, the
+   * terminal `result` carrying the {@link BuildPlanProposal} render contract.
+   * Read-only over the workspace (no authority grant needed: the planner edits
+   * nothing); carries no credential.
+   */
+  BuildPlanStart: "plan/start",
+  /**
+   * REJECT a PARKED plan run (#8). The supervisor appends the `plan_rejected`
+   * trace event (with the optional non-secret reason) and closes the run — no
+   * build ever starts on it. The result is only the ACK ({ runId, rejected }).
+   * Mirrors run/cancel's lightweight params/ack shape conventions.
+   */
+  BuildPlanReject: "plan/reject",
+  /**
+   * LIST the MCP servers + tools brokered for the session's workspace (#9 —
+   * governed MCP brokering). SYNCHRONOUS request/result: the supervisor — the
+   * ONLY component that owns MCP stdio server children (the extension/UI never
+   * spawns or speaks to one) — reports each server configured in
+   * `.glyphstudio/mcp.json` with an HONEST per-server status
+   * ('ok' | 'spawn-failed' | 'init-failed' | 'disabled') and its discovered
+   * tools. Tool input schemas cross the wire as RAW JSON STRINGS
+   * ({@link McpToolInfo.inputSchemaJson}) — third-party schemas we do not vouch
+   * for, never lifted into typed contract shapes. Carries non-secret
+   * names/descriptions only, NEVER a credential (server env, including any
+   * tokens, is configured supervisor-side and never crosses this wire).
+   */
+  McpList: "mcp/list",
+  /**
+   * BROKER one MCP tool call (#9). SYNCHRONOUS request/result: the supervisor
+   * routes EVERY call through the policy engine's decide() as tool kind 'mcp'
+   * with the capability string `mcp/<server>/<tool>` (see {@link mcpCapability})
+   * and traces it with the EXISTING policy_decision/tool_start/tool_end trace
+   * event types — ZERO new trace event types (a headline property of the MCP
+   * design). The result's raw JSON output carries the 'mcp' (UNTRUSTED)
+   * provenance label downstream: instruction-demoted data, never system/
+   * developer instructions. TRUST POSTURE: brokering governs the CALL boundary;
+   * the MCP server binary itself is third-party code running on the host —
+   * brokered calls ≠ a sandboxed server. Carries no credential on the wire.
+   */
+  McpCall: "mcp/call",
+  /**
+   * APPEND one HUMAN-ORIGIN event to a run's hash-chained trace (#10 Slice 1 —
+   * the apply/diff decision + session-checkpoint record path). SYNCHRONOUS
+   * request/result: the supervisor appends EXACTLY ONE event of the requested
+   * {@link RecordHumanParams.type} to the run's trace — through the run's LIVE
+   * TraceWriter when the run is still open, or by REHYDRATING the persisted
+   * trace.jsonl tail (adopting its hash/seq as the chain position) when the run
+   * has already closed — and returns the appended event's chain position
+   * ({ ok, seq, hash }): EVIDENCE the append really happened, not a claim.
+   *
+   * TRUST POSTURE: `source` is FORCED to 'human' SERVER-SIDE — a client cannot
+   * mint a supervisor/verifier-attributed event through this RPC. The payload
+   * is DATA, NOT AUTHORITY: a human event can never carry a verdict, never
+   * counts as verifier evidence, and never changes a run's assurance level
+   * (see the TraceEventSource invariants in trace.ts). Appends are REFUSED
+   * with an honest JSON-RPC error — NEVER a silent success — for an unknown
+   * runId, a missing trace file, or an unparseable/tamper-suspect chain tail
+   * (a tail whose last line cannot be parsed or lacks its hash-chain fields).
+   */
+  RecordHuman: "run/recordHuman"
 };
 var BridgeNotification = {
   /** A run lifecycle/trace event streamed back to the client for the panel. */
@@ -683,7 +1970,30 @@ var BridgeNotification = {
    * times out. Carries non-secret build COUNTS only (done/total/phase), never a
    * credential and never any code/chunk text.
    */
-  IndexProgress: "index/progress"
+  IndexProgress: "index/progress",
+  /**
+   * One change-review stream event (#7). After a
+   * {@link BridgeMethod.ChangeReviewStart} ack, the supervisor emits a sequence of
+   * these tagged with the same `runId`: `state` lifecycle markers, then exactly one
+   * terminal `result` (carrying the {@link ChangeReview} render contract — advisory
+   * findings + the signed verifier verdict) or `error`. The payload is a
+   * {@link ChangeReviewStreamEvent} — the review event discriminated union plus the
+   * `runId`. Carries non-secret review EVIDENCE (findings/verdict), never a
+   * credential.
+   */
+  ChangeReviewEvent: "review/event",
+  /**
+   * One plan-run stream event (#8). After a {@link BridgeMethod.BuildPlanStart}
+   * ack, the supervisor emits a sequence of these tagged with the same `runId`:
+   * `state` lifecycle markers, an optional `plan` event carrying the parsed
+   * {@link BuildPlan} as soon as it exists, then exactly one terminal `result`
+   * (the run is now PARKED awaiting approval/rejection; carries the
+   * {@link BuildPlanProposal} render contract) or `error`. The payload is a
+   * {@link BuildPlanStreamEvent} — the plan event discriminated union plus the
+   * `runId`. Carries non-secret plan TEXT (goal/steps/risks the UI renders),
+   * never a credential.
+   */
+  BuildPlanEvent: "plan/event"
 };
 var BridgeErrorCode = {
   /** Malformed envelope / JSON parse failure on the wire. */
@@ -714,6 +2024,9 @@ var AUTONOMY_TIERS = [
   "auto",
   "turbo"
 ];
+function isShapeObj(o) {
+  return typeof o === "object" && o !== null && !Array.isArray(o);
+}
 function shapeNonEmptyString(v) {
   return typeof v === "string" && v.trim().length > 0;
 }
@@ -724,6 +2037,228 @@ function computeBuildAssurance(input) {
   const independentlyVerified = input.verifierIsolation === "independent-sandboxed" && input.verifyRan === true && input.overall !== "error" && isBuildVerdictSignaturePresent(input.signature);
   return independentlyVerified ? "full" : "degraded";
 }
+function assertBuildReviewVerdictWellFormed(verdict) {
+  const problems = [];
+  if (!isShapeObj(verdict)) return { ok: false, problems: ["not-an-object"] };
+  const overall = verdict.overall;
+  if (overall !== "pass" && overall !== "fail" && overall !== "error") {
+    problems.push("verdict.overall");
+  }
+  const assurance = verdict.assurance;
+  if (assurance !== "full" && assurance !== "degraded") {
+    problems.push("verdict.assurance");
+  }
+  const isolation = verdict.verifierIsolation;
+  if (isolation !== "inline-unsandboxed" && isolation !== "independent-sandboxed") {
+    problems.push("verdict.verifierIsolation");
+  }
+  if (!shapeNonEmptyString(verdict.traceRootHash)) problems.push("verdict.traceRootHash");
+  if (assurance === "full") {
+    if (isolation !== "independent-sandboxed") {
+      problems.push("assurance:full-requires-independent-sandboxed");
+    }
+    if (verdict.verifyRan !== true) {
+      problems.push("assurance:full-requires-verifyRan");
+    }
+    if (overall === "error") {
+      problems.push("assurance:full-cannot-be-error");
+    }
+    if (!isBuildVerdictSignaturePresent(verdict.signature)) {
+      problems.push("assurance:full-requires-signature");
+    }
+  }
+  return problems.length ? { ok: false, problems } : { ok: true };
+}
+var CHANGE_REVIEW_SCOPES = [
+  "working-tree",
+  "branch"
+];
+var CHANGE_REVIEW_PARSE_STATUSES = [
+  "ok",
+  "parse-failed",
+  "unavailable"
+];
+function assertChangeReviewWellFormed(review) {
+  if (!isShapeObj(review)) return { ok: false, problems: ["not-an-object"] };
+  const problems = [];
+  if (!shapeNonEmptyString(review.runId)) problems.push("review.runId");
+  if (!CHANGE_REVIEW_SCOPES.includes(review.scope)) {
+    problems.push("review.scope");
+  }
+  if (!shapeNonEmptyString(review.diffSha256)) problems.push("review.diffSha256");
+  const findings = review.findings;
+  if (!isShapeObj(findings)) {
+    problems.push("review.findings");
+  } else {
+    if (findings.advisory !== true) problems.push("review.findings.advisory");
+    if (!CHANGE_REVIEW_PARSE_STATUSES.includes(
+      findings.parseStatus
+    )) {
+      problems.push("review.findings.parseStatus");
+    }
+    if (!Array.isArray(findings.items)) problems.push("review.findings.items");
+  }
+  if (!isShapeObj(review.verdict)) {
+    problems.push("review.verdict");
+  } else {
+    const verdict = assertBuildReviewVerdictWellFormed(review.verdict);
+    if (verdict.ok === false) problems.push(...verdict.problems);
+  }
+  return problems.length ? { ok: false, problems } : { ok: true };
+}
+var PLAN_PARSE_STATUSES = [
+  "ok",
+  "parse-failed",
+  "unavailable"
+];
+var MAX_PLAN_STEPS = 20;
+var MAX_PLAN_GOAL_CHARS = 300;
+var MAX_PLAN_STEP_TITLE_CHARS = 120;
+var MAX_PLAN_STEP_DETAIL_CHARS = 600;
+var MAX_PLAN_RISKS = 10;
+var MAX_PLAN_RISK_CHARS = 300;
+var MAX_PLAN_FILES_PER_STEP = 10;
+var MAX_PLAN_FILE_CHARS = 260;
+function planPathLooksAbsolute(p) {
+  return p.startsWith("/") || /^[A-Za-z]:[\\/]/.test(p) || p.startsWith("\\\\");
+}
+function planPathHasTraversal(p) {
+  return p.split(/[\\/]/).some((seg) => seg === "..");
+}
+function assertBuildPlanWellFormed(plan) {
+  if (!isShapeObj(plan)) {
+    throw new Error("malformed BuildPlan: not-an-object");
+  }
+  const problems = [];
+  if (!shapeNonEmptyString(plan.goal)) {
+    problems.push("plan.goal");
+  } else if (plan.goal.length > MAX_PLAN_GOAL_CHARS) {
+    problems.push("plan.goal.over-cap");
+  }
+  if (!Array.isArray(plan.steps)) {
+    problems.push("plan.steps");
+  } else if (plan.steps.length === 0) {
+    problems.push("plan.steps.empty");
+  } else if (plan.steps.length > MAX_PLAN_STEPS) {
+    problems.push("plan.steps.over-cap");
+  } else {
+    plan.steps.forEach((step, i) => {
+      if (!isShapeObj(step)) {
+        problems.push(`plan.steps[${i}]`);
+        return;
+      }
+      if (!shapeNonEmptyString(step.title)) {
+        problems.push(`plan.steps[${i}].title`);
+      } else if (step.title.length > MAX_PLAN_STEP_TITLE_CHARS) {
+        problems.push(`plan.steps[${i}].title.over-cap`);
+      }
+      if (!shapeNonEmptyString(step.detail)) {
+        problems.push(`plan.steps[${i}].detail`);
+      } else if (step.detail.length > MAX_PLAN_STEP_DETAIL_CHARS) {
+        problems.push(`plan.steps[${i}].detail.over-cap`);
+      }
+      if (step.files !== void 0) {
+        if (!Array.isArray(step.files)) {
+          problems.push(`plan.steps[${i}].files`);
+        } else if (step.files.length > MAX_PLAN_FILES_PER_STEP) {
+          problems.push(`plan.steps[${i}].files.over-cap`);
+        } else {
+          step.files.forEach((file, j) => {
+            if (typeof file !== "string" || file.trim().length === 0 || file.length > MAX_PLAN_FILE_CHARS || planPathLooksAbsolute(file) || planPathHasTraversal(file)) {
+              problems.push(`plan.steps[${i}].files[${j}]`);
+            }
+          });
+        }
+      }
+    });
+  }
+  if (plan.risks !== void 0) {
+    if (!Array.isArray(plan.risks)) {
+      problems.push("plan.risks");
+    } else if (plan.risks.length > MAX_PLAN_RISKS) {
+      problems.push("plan.risks.over-cap");
+    } else {
+      plan.risks.forEach((risk, i) => {
+        if (typeof risk !== "string" || risk.trim().length === 0) {
+          problems.push(`plan.risks[${i}]`);
+        } else if (risk.length > MAX_PLAN_RISK_CHARS) {
+          problems.push(`plan.risks[${i}].over-cap`);
+        }
+      });
+    }
+  }
+  if (problems.length > 0) {
+    throw new Error(`malformed BuildPlan: ${problems.join(", ")}`);
+  }
+}
+var MAX_MCP_SERVERS = 16;
+var MAX_MCP_TOOLS_PER_SERVER = 64;
+var MAX_MCP_SERVER_NAME_CHARS = 64;
+var MAX_MCP_TOOL_NAME_CHARS = 128;
+var MAX_MCP_ARGS_JSON_BYTES = 32768;
+var MAX_MCP_RESULT_JSON_BYTES = 262144;
+function mcpCapability(server2, tool) {
+  return `mcp/${server2}/${tool}`;
+}
+function mcpUtf8ByteLength(s) {
+  let bytes = 0;
+  for (let i = 0; i < s.length; i += 1) {
+    const code = s.codePointAt(i);
+    if (code <= 127) bytes += 1;
+    else if (code <= 2047) bytes += 2;
+    else if (code <= 65535) bytes += 3;
+    else {
+      bytes += 4;
+      i += 1;
+    }
+  }
+  return bytes;
+}
+function assertMcpCallWellFormed(call) {
+  if (!isShapeObj(call)) {
+    throw new Error("malformed McpCallParams: not-an-object");
+  }
+  const problems = [];
+  if (!shapeNonEmptyString(call.server)) {
+    problems.push("call.server");
+  } else if (call.server.length > MAX_MCP_SERVER_NAME_CHARS) {
+    problems.push("call.server.over-cap");
+  }
+  if (!shapeNonEmptyString(call.tool)) {
+    problems.push("call.tool");
+  } else if (call.tool.length > MAX_MCP_TOOL_NAME_CHARS) {
+    problems.push("call.tool.over-cap");
+  }
+  if (typeof call.argsJson !== "string") {
+    problems.push("call.argsJson");
+  } else if (mcpUtf8ByteLength(call.argsJson) > MAX_MCP_ARGS_JSON_BYTES) {
+    problems.push("call.argsJson.over-cap");
+  } else {
+    let parsed;
+    let parseFailed = false;
+    try {
+      parsed = JSON.parse(call.argsJson);
+    } catch {
+      parseFailed = true;
+    }
+    if (parseFailed) {
+      problems.push("call.argsJson.not-json");
+    } else if (!isShapeObj(parsed)) {
+      problems.push("call.argsJson.not-object");
+    }
+  }
+  if (problems.length > 0) {
+    throw new Error(`malformed McpCallParams: ${problems.join(", ")}`);
+  }
+}
+var RECORD_HUMAN_EVENT_TYPES = [
+  "human_accepted",
+  "human_rejected",
+  "human_corrected_output",
+  "checkpoint_created",
+  "checkpoint_restored"
+];
+var MAX_RECORD_HUMAN_PAYLOAD_BYTES = 16384;
 function validateRunRequest(input) {
   const missing = [];
   const req = input ?? {};
@@ -1126,7 +2661,7 @@ function networkSpecFromPolicy(policy, opts = {}) {
   }
   return {
     allow,
-    acknowledgeSoftEgress: opts.acknowledgeSoftEgress === true
+    egressMode: opts.hard ? "hard-allowlist" : "soft-proxy-allow"
   };
 }
 function splitHostPortEntry(entry) {
@@ -1257,6 +2792,9 @@ function decideRaw(policy, request) {
       const port = readPort(request.payload);
       if (host !== void 0 && networkAllowMatches(policy.allow.network, host, port)) return "allow";
       return verbToDecision(policy.defaults.network);
+    }
+    case "mcp": {
+      return verbToDecision(policy.defaults.mcp);
     }
     default: {
       const _exhaustive = request.tool;
@@ -1444,7 +2982,7 @@ function signEphemeral(checks, overallVerdict, traceRootHash, injectedKey) {
 }
 
 // ../spikes/p0-supervisor/terminal-session.ts
-import { join as join4 } from "node:path";
+import { join as join5 } from "node:path";
 import { generateKeyPairSync as generateKeyPairSync3 } from "node:crypto";
 
 // ../spikes/p0-sandbox/worktree.ts
@@ -1490,360 +3028,8 @@ function buildInjectedEnv(allow = []) {
 }
 
 // ../spikes/p0-governed-cli/governed-terminal-proxy.ts
+init_egress_proxy();
 import { randomUUID as randomUUID3 } from "node:crypto";
-
-// ../spikes/p0-sandbox/egress-proxy.ts
-import { createServer } from "node:http";
-import { connect as netConnect } from "node:net";
-import { randomUUID as randomUUID2 } from "node:crypto";
-import { request as httpRequest } from "node:http";
-var LOOPBACK_NO_PROXY = "localhost,127.0.0.1,::1";
-function splitHostPort(authority) {
-  const trimmed = authority.trim();
-  if (trimmed.startsWith("[")) {
-    const close = trimmed.indexOf("]");
-    if (close !== -1) {
-      const host = trimmed.slice(0, close + 1);
-      const rest = trimmed.slice(close + 1);
-      if (rest.startsWith(":")) {
-        const port2 = Number(rest.slice(1));
-        return Number.isInteger(port2) ? { host, port: port2 } : { host };
-      }
-      return { host };
-    }
-  }
-  const idx = trimmed.lastIndexOf(":");
-  if (idx === -1) return { host: trimmed };
-  const portStr = trimmed.slice(idx + 1);
-  const port = Number(portStr);
-  if (portStr.length > 0 && Number.isInteger(port) && /^\d+$/.test(portStr)) {
-    return { host: trimmed.slice(0, idx), port };
-  }
-  return { host: trimmed };
-}
-function isIpLiteral(host) {
-  const h = host.trim();
-  if (h.length === 0) return false;
-  if (h.startsWith("[") && h.endsWith("]")) return true;
-  if (h.includes(":")) return true;
-  const v4 = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/.exec(h);
-  if (v4) {
-    return v4.slice(1).every((o) => {
-      const n = Number(o);
-      return n >= 0 && n <= 255;
-    });
-  }
-  return false;
-}
-function isHostAllowed(allow, host, port) {
-  const targetHost = host.toLowerCase();
-  for (const entry of allow) {
-    const { host: aHost, port: aPort } = splitHostPort(entry);
-    if (aHost.toLowerCase() !== targetHost) continue;
-    if (aPort === void 0) return true;
-    if (aPort === port) return true;
-  }
-  return false;
-}
-var DEFAULT_HTTP_PORT = 80;
-var DEFAULT_HTTPS_PORT = 443;
-function targetForHttp(req) {
-  const rawUrl = req.url ?? "";
-  if (/^[a-zA-Z][a-zA-Z0-9+.-]*:\/\//.test(rawUrl)) {
-    try {
-      const u = new URL(rawUrl);
-      const host = u.hostname;
-      const port = u.port ? Number(u.port) : DEFAULT_HTTP_PORT;
-      if (host) return { host, port };
-    } catch {
-    }
-  }
-  const hostHeader = req.headers.host;
-  if (typeof hostHeader === "string" && hostHeader.length > 0) {
-    const { host, port } = splitHostPort(hostHeader);
-    if (host) return { host, port: port ?? DEFAULT_HTTP_PORT };
-  }
-  return void 0;
-}
-function startEgressProxy(options) {
-  const allow = options.allow;
-  const bindHost = options.bindHost ?? "0.0.0.0";
-  const bindPort = options.bindPort ?? 0;
-  const denyDirectIp = options.denyDirectIp ?? true;
-  const observeAll = options.observeAll ?? false;
-  const upstreamLookup = {};
-  for (const [k, v] of Object.entries(options.upstreamLookup ?? {})) {
-    upstreamLookup[k.toLowerCase()] = v;
-  }
-  const dialHost = (requestedHost) => upstreamLookup[requestedHost.toLowerCase()] ?? requestedHost;
-  const health = {
-    decisionFailures: 0,
-    tunnelFailures: 0,
-    bytesFailures: 0,
-    closeFailures: 0
-  };
-  const emit = (d) => {
-    try {
-      options.onDecision?.(d);
-    } catch {
-      health.decisionFailures += 1;
-    }
-  };
-  const server2 = createServer();
-  server2.on("request", (clientReq, clientRes) => {
-    const target = targetForHttp(clientReq);
-    if (!target) {
-      emit({
-        id: randomUUID2(),
-        ts: Date.now(),
-        kind: "http",
-        decision: "deny",
-        host: "",
-        port: 0,
-        method: clientReq.method,
-        reason: "no-target"
-      });
-      clientRes.writeHead(400, { "content-type": "text/plain" });
-      clientRes.end("egress proxy: could not determine target host\n");
-      return;
-    }
-    const allowed = observeAll || isHostAllowed(allow, target.host, target.port);
-    if (!observeAll) {
-      if (denyDirectIp && isIpLiteral(target.host)) {
-        emit({
-          id: randomUUID2(),
-          ts: Date.now(),
-          kind: "http",
-          decision: "deny",
-          host: target.host,
-          port: target.port,
-          method: clientReq.method,
-          reason: "direct-ip"
-        });
-        clientRes.writeHead(403, { "content-type": "text/plain" });
-        clientRes.end(
-          `egress denied: direct IP literal not permitted (use an allowlisted name; the proxy is the controlled resolver): ${target.host}:${target.port}
-`
-        );
-        clientReq.resume();
-        return;
-      }
-    }
-    emit({
-      id: randomUUID2(),
-      ts: Date.now(),
-      kind: "http",
-      decision: allowed ? "allow" : "deny",
-      // Observe-not-block ALLOWS are OBSERVATIONS, not policy authorizations: mark
-      // them so a consumer can never mistake a soft-plane observe for a real allow.
-      ...observeAll ? { enforcement: "observe-only" } : {},
-      host: target.host,
-      port: target.port,
-      method: clientReq.method,
-      reason: observeAll ? "observed" : "allowlist"
-    });
-    if (!allowed) {
-      clientRes.writeHead(403, { "content-type": "text/plain" });
-      clientRes.end(
-        `egress denied by allowlist: ${target.host}:${target.port}
-`
-      );
-      clientReq.resume();
-      return;
-    }
-    const upstream = httpRequest(
-      {
-        host: dialHost(target.host),
-        port: target.port,
-        method: clientReq.method,
-        // Strip the absolute-form prefix: upstream expects an origin-form path.
-        path: originFormPath(clientReq.url ?? "/"),
-        headers: clientReq.headers
-      },
-      (upstreamRes) => {
-        clientRes.writeHead(upstreamRes.statusCode ?? 502, upstreamRes.headers);
-        upstreamRes.pipe(clientRes);
-      }
-    );
-    upstream.on("error", (err) => {
-      if (!clientRes.headersSent) {
-        clientRes.writeHead(502, { "content-type": "text/plain" });
-      }
-      clientRes.end(`egress proxy upstream error: ${err.message}
-`);
-    });
-    clientReq.pipe(upstream);
-  });
-  server2.on("connect", (req, clientSocket, head) => {
-    clientSocket.on("error", () => {
-    });
-    const authority = req.url ?? "";
-    const { host, port } = splitHostPort(authority);
-    const targetPort = port ?? DEFAULT_HTTPS_PORT;
-    if (!observeAll) {
-      if (denyDirectIp && host.length > 0 && isIpLiteral(host)) {
-        emit({
-          id: randomUUID2(),
-          ts: Date.now(),
-          kind: "connect",
-          decision: "deny",
-          host,
-          port: targetPort,
-          reason: "direct-ip"
-        });
-        clientSocket.write(
-          `HTTP/1.1 403 Forbidden\r
-Content-Type: text/plain\r
-Connection: close\r
-\r
-egress denied: direct IP literal not permitted (use an allowlisted name; the proxy is the controlled resolver): ${host}:${targetPort}
-`
-        );
-        clientSocket.end();
-        return;
-      }
-    }
-    const allowed = host.length > 0 && (observeAll || isHostAllowed(allow, host, targetPort));
-    const observeOnly = observeAll && host.length > 0;
-    emit({
-      id: randomUUID2(),
-      ts: Date.now(),
-      kind: "connect",
-      decision: allowed ? "allow" : "deny",
-      ...observeOnly ? { enforcement: "observe-only" } : {},
-      host,
-      port: targetPort,
-      reason: host.length === 0 ? "no-target" : observeAll ? "observed" : "allowlist"
-    });
-    if (!allowed) {
-      clientSocket.write(
-        `HTTP/1.1 403 Forbidden\r
-Content-Type: text/plain\r
-Connection: close\r
-\r
-egress denied by allowlist: ${host}:${targetPort}
-`
-      );
-      clientSocket.end();
-      return;
-    }
-    let observer;
-    let bytesUp = 0;
-    let bytesDown = 0;
-    let openedAt = 0;
-    let closed = false;
-    const tunnelId = randomUUID2();
-    const upstream = netConnect(targetPort, dialHost(host), () => {
-      clientSocket.write("HTTP/1.1 200 Connection Established\r\n\r\n");
-      if (head && head.length > 0) upstream.write(head);
-      if (options.onTunnel) {
-        try {
-          observer = options.onTunnel({ host, port: targetPort, id: tunnelId });
-        } catch {
-          observer = void 0;
-          health.tunnelFailures += 1;
-        }
-        openedAt = Date.now();
-        if (head && head.length > 0) {
-          bytesUp += head.length;
-          try {
-            observer?.onBytes?.("up", head.length);
-          } catch {
-            health.bytesFailures += 1;
-          }
-        }
-        clientSocket.on("data", (chunk) => {
-          bytesUp += chunk.length;
-          try {
-            observer?.onBytes?.("up", chunk.length);
-          } catch {
-            health.bytesFailures += 1;
-          }
-        });
-        upstream.on("data", (chunk) => {
-          bytesDown += chunk.length;
-          try {
-            observer?.onBytes?.("down", chunk.length);
-          } catch {
-            health.bytesFailures += 1;
-          }
-        });
-      }
-      upstream.pipe(clientSocket);
-      clientSocket.pipe(upstream);
-    });
-    const emitClose = () => {
-      if (closed || !options.onTunnel || openedAt === 0) return;
-      closed = true;
-      try {
-        observer?.onClose?.({
-          bytesUp,
-          bytesDown,
-          durationMs: Date.now() - openedAt
-        });
-      } catch {
-        health.closeFailures += 1;
-      }
-    };
-    const teardownPair = () => {
-      emitClose();
-      upstream.destroy();
-      clientSocket.destroy();
-    };
-    upstream.on("error", teardownPair);
-    clientSocket.on("error", teardownPair);
-    upstream.on("close", emitClose);
-    clientSocket.on("close", emitClose);
-  });
-  server2.on("clientError", (_err, socket) => {
-    if (socket.writable) {
-      socket.end("HTTP/1.1 400 Bad Request\r\nConnection: close\r\n\r\n");
-    } else {
-      socket.destroy();
-    }
-  });
-  return new Promise((resolve5, reject) => {
-    server2.once("error", reject);
-    server2.listen(bindPort, bindHost, () => {
-      server2.removeListener("error", reject);
-      const addr = server2.address();
-      if (addr === null || typeof addr === "string") {
-        reject(new Error("egress proxy: failed to resolve bound address"));
-        return;
-      }
-      const port = addr.port;
-      const proxyHost = bindHost === "0.0.0.0" || bindHost === "::" ? "127.0.0.1" : bindHost;
-      resolve5({
-        port,
-        url: `http://${proxyHost}:${port}`,
-        proxyHost,
-        observerHealth() {
-          return { ...health };
-        },
-        close() {
-          return new Promise((res) => {
-            server2.close(() => res());
-            const anyServer = server2;
-            anyServer.closeAllConnections?.();
-          });
-        }
-      });
-    });
-  });
-}
-function originFormPath(rawUrl) {
-  if (/^[a-zA-Z][a-zA-Z0-9+.-]*:\/\//.test(rawUrl)) {
-    try {
-      const u = new URL(rawUrl);
-      return u.pathname + u.search;
-    } catch {
-      return rawUrl;
-    }
-  }
-  return rawUrl || "/";
-}
-
-// ../spikes/p0-governed-cli/governed-terminal-proxy.ts
 var DEFAULT_ORIGIN_ASSURANCE = "narrow-api";
 var DEFAULT_MODEL_ENDPOINTS = [
   // NARROW provider API origins: a dedicated host that serves essentially nothing
@@ -1979,6 +3165,66 @@ async function startGovernedTerminalProxy(opts) {
   };
 }
 
+// ../spikes/p0-sandbox/mount-prep.ts
+import { readdirSync, rmSync as rmSync2 } from "node:fs";
+import { join as join4, relative, sep } from "node:path";
+function toRelPosix(worktreeDir, abs) {
+  return relative(worktreeDir, abs).split(sep).join("/");
+}
+function isDeniedRead(policy, relPath, runId) {
+  const decision = decide(policy, {
+    runId,
+    tool: "file_read",
+    payload: { path: relPath },
+    provenanceLabel: "user",
+    requestedCapability: `file_read:${relPath}`
+  });
+  return decision === "deny";
+}
+function walkAndMask(worktreeDir, dir, policy, runId, onMasked, out) {
+  let entries;
+  try {
+    entries = readdirSync(dir, { withFileTypes: true });
+  } catch {
+    return;
+  }
+  for (const entry of entries) {
+    const abs = join4(dir, entry.name);
+    const relPosix = toRelPosix(worktreeDir, abs);
+    if (relPosix === ".git" || relPosix.startsWith(".git/")) continue;
+    if (entry.isSymbolicLink()) {
+      if (isDeniedRead(policy, relPosix, runId)) {
+        mask(abs, relPosix, "symlink", onMasked, out);
+      }
+      continue;
+    }
+    if (entry.isDirectory()) {
+      walkAndMask(worktreeDir, abs, policy, runId, onMasked, out);
+      continue;
+    }
+    if (isDeniedRead(policy, relPosix, runId)) {
+      mask(abs, relPosix, "file", onMasked, out);
+    }
+  }
+}
+function mask(abs, relPosix, kind, onMasked, out) {
+  const record = { path: relPosix, decision: "deny", kind };
+  out.push(record);
+  if (onMasked) {
+    try {
+      onMasked(record);
+    } catch {
+    }
+  }
+  rmSync2(abs, { force: true });
+}
+function sanitizeMount(opts) {
+  const { worktreeDir, policy, runId, onMasked } = opts;
+  const masked = [];
+  walkAndMask(worktreeDir, worktreeDir, policy, runId, onMasked, masked);
+  return { masked };
+}
+
 // ../spikes/p0-supervisor/terminal-session.ts
 function deriveSandboxTrust(caps) {
   if (caps.fsIsolated && caps.hardEgress) return "trusted";
@@ -1990,7 +3236,7 @@ async function startTerminalSession(opts) {
   const now = opts.now ?? Date.now;
   const { runId, runDir } = facts;
   const lifecycle = opts.lifecycle ?? new RunLifecycle("created");
-  const sink = opts.sink ?? createTraceWriter(join4(runSubdirPath(runDir, "trace"), "trace.jsonl"));
+  const sink = opts.sink ?? createTraceWriter(join5(runSubdirPath(runDir, "trace"), "trace.jsonl"));
   const endpoints = opts.modelEndpoints ?? DEFAULT_MODEL_ENDPOINTS;
   const isolation = opts.isolation;
   const allow = [
@@ -2061,10 +3307,10 @@ async function startTerminalSession(opts) {
       env: {},
       ...isolation.resourceLimits ? { resourceLimits: isolation.resourceLimits } : {},
       // EXPLICIT soft-egress opt-in: the runtime's allowlist is application-layer on
-      // Docker-local, acknowledged here with eyes open (the derived posture reflects
-      // it honestly). network:'deny' would be hard but would also cut the actor off
-      // from its model endpoint entirely.
-      network: { allow, acknowledgeSoftEgress: true }
+      // Docker-local, chosen here with eyes open via egressMode:'soft-proxy-allow'
+      // (the derived posture reflects it honestly). network:'deny' would be hard but
+      // would also cut the actor off from its model endpoint entirely.
+      network: { allow, egressMode: "soft-proxy-allow" }
     };
     const caps = runtimeCapabilities(isolationRuntime, isolationSpec);
     openedTrust = deriveSandboxTrust(caps);
@@ -2127,9 +3373,33 @@ async function startTerminalSession(opts) {
       worktreeDir = createWorktree(
         isolation.repoPath,
         runId,
-        join4(runDir, "worktree")
+        join5(runDir, "worktree")
       ).worktreeDir;
-      const home = createSyntheticHome(join4(runDir, "home"));
+      let maskedCount = 0;
+      sanitizeMount({
+        worktreeDir,
+        policy: isolation.policy,
+        runId,
+        onMasked: (m) => {
+          maskedCount += 1;
+          const payload = {
+            tool: "file_read",
+            requestedCapability: `file_read:${m.path}`,
+            decision: m.decision,
+            // The session's existing label convention for boundary-governance
+            // events (egressProjector, provisioning refusal): 'tool-output'.
+            provenanceLabel: "tool-output",
+            path: m.path,
+            // Distinguishes this HARD, provision-time structural removal from a
+            // soft per-access broker decision: the file is gone from the mount.
+            enforcement: "structural_mount_mask",
+            kind: m.kind
+          };
+          appendAndStream("policy_decision", payload, "policy");
+        }
+      });
+      void maskedCount;
+      const home = createSyntheticHome(join5(runDir, "home"));
       const env = buildInjectedEnv(isolation.envAllow ?? []);
       const spec = { ...isolationSpec, workdir: worktreeDir, home, env };
       sandbox = await isolationRuntime.createSandbox(spec);
@@ -2222,7 +3492,7 @@ async function startTerminalSession(opts) {
     });
     return finalVerdict;
   };
-  return { runId, proxyUrl: proxy.url, stop };
+  return { runId, proxyUrl: proxy.url, stop, appendTraceEvent: appendAndStream };
 }
 function finalizeTerminalRun(opts) {
   const { runId, sink, lifecycle, emit } = opts;
@@ -2308,6 +3578,7 @@ function signTerminalVerdict(core, injectedKey) {
 }
 
 // ../spikes/p0-governed-cli/cli-agent-launcher.ts
+init_egress_proxy();
 import { spawn } from "node:child_process";
 import { accessSync, constants as fsConstants, statSync } from "node:fs";
 import { delimiter as pathDelimiter, join as pathJoin } from "node:path";
@@ -2414,7 +3685,7 @@ function buildGovernedEnvResult(opts) {
 }
 
 // ../spikes/p0-supervisor/index-residency.ts
-import { resolve, relative, isAbsolute } from "node:path";
+import { resolve, relative as relative2, isAbsolute } from "node:path";
 function resolveIndexResidency(opts) {
   const { policy } = opts;
   if (policy.highSecurity) {
@@ -2450,7 +3721,7 @@ function resolveIndexResidency(opts) {
       }
       const root = resolve(policy.workspaceRoot);
       const persistDir = resolve(root, ".glyphstudio", "index");
-      const rel = relative(root, persistDir);
+      const rel = relative2(root, persistDir);
       if (rel.startsWith("..") || isAbsolute(rel)) {
         throw new Error(
           "index residency: persist dir escapes the workspace root (never user-global / server-side)"
@@ -2803,7 +4074,7 @@ import {
   writeFileSync
 } from "node:fs";
 import { homedir } from "node:os";
-import { dirname as dirname3, join as join5, resolve as resolve2 } from "node:path";
+import { dirname as dirname3, join as join6, resolve as resolve2 } from "node:path";
 var ALGORITHM = "aes-256-gcm";
 var KEY_BYTES = 32;
 var IV_BYTES = 12;
@@ -2837,12 +4108,12 @@ function decryptBlob(key, blob) {
   return Buffer.concat([decipher.update(ciphertext), decipher.final()]);
 }
 function defaultKeyDir() {
-  return join5(homedir(), ".glyphstudio", "index-keys");
+  return join6(homedir(), ".glyphstudio", "index-keys");
 }
 function keyFileFor(keyDir, workspaceRoot) {
   const canonical = resolve2(workspaceRoot);
   const digest = createHash3("sha256").update(canonical).digest("hex");
-  return join5(keyDir, `${digest}.key`);
+  return join6(keyDir, `${digest}.key`);
 }
 function getWorkspaceKey(workspaceRoot, keyDir) {
   const dir = keyDir ?? defaultKeyDir();
@@ -2865,7 +4136,7 @@ function getWorkspaceKey(workspaceRoot, keyDir) {
 // ../spikes/p0-supervisor/code-index/persisted-store.ts
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { existsSync as existsSync3 } from "node:fs";
-import { join as join6 } from "node:path";
+import { join as join7 } from "node:path";
 var INDEX_FILE = "index.enc";
 var MAGIC = Buffer.from("GSI2", "ascii");
 var MAGIC_LEGACY = Buffer.from("GSI1", "ascii");
@@ -2996,12 +4267,12 @@ async function saveIndex(opts) {
   const plaintext = serializeChunks(chunks, opts.embedderId);
   const blob = encryptBlob(opts.key, plaintext);
   await mkdir(opts.persistDir, { recursive: true });
-  const file = join6(opts.persistDir, INDEX_FILE);
+  const file = join7(opts.persistDir, INDEX_FILE);
   await writeFile(file, blob);
   return file;
 }
 async function loadIndex(opts) {
-  const file = join6(opts.persistDir, INDEX_FILE);
+  const file = join7(opts.persistDir, INDEX_FILE);
   if (!existsSync3(file)) {
     return null;
   }
@@ -3205,6 +4476,130 @@ async function buildIndex(opts) {
     residency: decision.effective
   };
 }
+async function updateIndex(opts) {
+  const totalStart = performance.now();
+  const { workspaceRoot, embedder, store } = opts;
+  const filterPaths = opts.filterPaths ?? (await Promise.resolve().then(() => (init_discover(), discover_exports))).filterIndexablePaths;
+  const loadChunksForFiles = opts.loadChunksForFiles ?? defaultLoadChunksForFiles;
+  const deletedSet = new Set(opts.deletedPaths);
+  const changedSet = new Set(opts.changedPaths.filter((p) => !deletedSet.has(p)));
+  const inputCount = changedSet.size + deletedSet.size;
+  if (inputCount === 0) {
+    return zeroUpdateStats(performance.now() - totalStart);
+  }
+  const survivors = await filterPaths(workspaceRoot, [...changedSet], {
+    mode: "existing",
+    ...opts.extraIgnore ? { extraIgnore: opts.extraIgnore } : {}
+  });
+  const survivorPaths = new Set(survivors.map((f) => f.path));
+  const deletables = await filterPaths(workspaceRoot, [...deletedSet], {
+    mode: "path-only",
+    ...opts.extraIgnore ? { extraIgnore: opts.extraIgnore } : {}
+  });
+  const manifest = store.manifest();
+  const manifestPaths = /* @__PURE__ */ new Set();
+  for (const id of manifest.keys()) manifestPaths.add(pathFromChunkId(id));
+  const evictPaths = /* @__PURE__ */ new Set();
+  for (const f of deletables) {
+    if (manifestPaths.has(f.path)) evictPaths.add(f.path);
+  }
+  for (const p of changedSet) {
+    if (!survivorPaths.has(p) && manifestPaths.has(p)) evictPaths.add(p);
+  }
+  const ignored = inputCount - survivorPaths.size - evictPaths.size >= 0 ? inputCount - survivorPaths.size - evictPaths.size : 0;
+  const freshChunks = survivors.length > 0 ? await loadChunksForFiles(survivors, opts.chunkOptions) : [];
+  const manifestIdsByPath = /* @__PURE__ */ new Map();
+  for (const id of manifest.keys()) {
+    const p = pathFromChunkId(id);
+    const set = manifestIdsByPath.get(p);
+    if (set) set.add(id);
+    else manifestIdsByPath.set(p, /* @__PURE__ */ new Set([id]));
+  }
+  const freshIdsByPath = /* @__PURE__ */ new Map();
+  for (const chunk of freshChunks) {
+    const set = freshIdsByPath.get(chunk.path);
+    if (set) set.add(chunk.id);
+    else freshIdsByPath.set(chunk.path, /* @__PURE__ */ new Set([chunk.id]));
+  }
+  const toEmbed = [];
+  let reused = 0;
+  for (const chunk of freshChunks) {
+    const storedHash = manifest.get(chunk.id);
+    if (storedHash === void 0 || storedHash !== chunk.hash) toEmbed.push(chunk);
+    else reused++;
+  }
+  const pathsToRemove = [...evictPaths];
+  for (const file of survivors) {
+    const priorIds = manifestIdsByPath.get(file.path);
+    if (!priorIds) continue;
+    const freshIds = freshIdsByPath.get(file.path) ?? /* @__PURE__ */ new Set();
+    let hasOrphan = false;
+    for (const priorId of priorIds) {
+      if (!freshIds.has(priorId)) {
+        hasOrphan = true;
+        break;
+      }
+    }
+    if (!hasOrphan) continue;
+    pathsToRemove.push(file.path);
+    const already = new Set(toEmbed.map((c) => c.id));
+    for (const chunk of freshChunks) {
+      if (chunk.path === file.path && !already.has(chunk.id)) {
+        toEmbed.push(chunk);
+        reused--;
+      }
+    }
+  }
+  if (pathsToRemove.length > 0) {
+    store.removeByPath(pathsToRemove);
+  }
+  let embedMs = 0;
+  if (toEmbed.length > 0) {
+    const embedStart = performance.now();
+    const vectors = await embedder.embed(toEmbed.map((c) => c.text));
+    embedMs = performance.now() - embedStart;
+    if (vectors.length !== toEmbed.length) {
+      throw new Error(
+        `indexer: embedder returned ${vectors.length} vectors for ${toEmbed.length} texts (order/count must match)`
+      );
+    }
+    store.upsert(toEmbed.map((chunk, i) => ({ ...chunk, vector: vectors[i] })));
+  }
+  if (opts.keywordIndex) {
+    if (pathsToRemove.length > 0) {
+      opts.keywordIndex.removeByPath(pathsToRemove);
+    }
+    if (freshChunks.length > 0) {
+      opts.keywordIndex.add(freshChunks);
+    }
+  }
+  return {
+    files: survivors.length,
+    ignored,
+    embedded: toEmbed.length,
+    reused,
+    evictedPaths: evictPaths.size,
+    embedMs,
+    totalMs: performance.now() - totalStart
+  };
+}
+function zeroUpdateStats(totalMs) {
+  return { files: 0, ignored: 0, embedded: 0, reused: 0, evictedPaths: 0, embedMs: 0, totalMs };
+}
+var defaultLoadChunksForFiles = async (files, chunkOptions) => {
+  const { chunkFile: chunkFile2 } = await Promise.resolve().then(() => (init_chunk(), chunk_exports));
+  const chunks = [];
+  for (const file of files) {
+    let text;
+    try {
+      text = await readFile2(file.absPath, "utf8");
+    } catch {
+      continue;
+    }
+    chunks.push(...chunkFile2(file.path, text, chunkOptions));
+  }
+  return chunks;
+};
 function encryptAtRestHook(key, plaintext) {
   return encryptBlob(key, Buffer.from(plaintext, "utf8"));
 }
@@ -3303,30 +4698,30 @@ function dedupeAdjacentHits(hits, opts = {}) {
       continue;
     }
     const sorted = group.slice().sort((a, b) => a.chunk.startLine - b.chunk.startLine || a.chunk.endLine - b.chunk.endLine);
-    let run = [sorted[0]];
+    let run2 = [sorted[0]];
     const flush = () => {
-      regions.push(run.length === 1 ? run[0] : mergeRegion(run));
-      run = [];
+      regions.push(run2.length === 1 ? run2[0] : mergeRegion(run2));
+      run2 = [];
     };
     for (let i = 1; i < sorted.length; i++) {
-      const prev = run[run.length - 1];
+      const prev = run2[run2.length - 1];
       const cur = sorted[i];
       const overlapOrAdjacent = cur.chunk.startLine <= prev.chunk.endLine + 1 + adjacencyGap;
       if (!overlapOrAdjacent) {
         flush();
-        run = [cur];
+        run2 = [cur];
         continue;
       }
-      const start = run[0].chunk.startLine;
-      const end = Math.max(run[run.length - 1].chunk.endLine, cur.chunk.endLine);
+      const start = run2[0].chunk.startLine;
+      const end = Math.max(run2[run2.length - 1].chunk.endLine, cur.chunk.endLine);
       const projectedLines = end - start + 1;
-      const projectedChars = projectedMergedChars([...run, cur]);
+      const projectedChars = projectedMergedChars([...run2, cur]);
       if (projectedLines > maxLines || projectedChars > maxChars) {
         flush();
-        run = [cur];
+        run2 = [cur];
         continue;
       }
-      run.push(cur);
+      run2.push(cur);
     }
     flush();
   }
@@ -3336,11 +4731,11 @@ function dedupeAdjacentHits(hits, opts = {}) {
   });
   return regions;
 }
-function buildMergedText(run) {
+function buildMergedText(run2) {
   const lineByNumber = /* @__PURE__ */ new Map();
   let minLine = Infinity;
   let maxLine = -Infinity;
-  for (const hit of run) {
+  for (const hit of run2) {
     const lines = hit.chunk.text.split("\n");
     for (let i = 0; i < lines.length; i++) {
       const lineNo = hit.chunk.startLine + i;
@@ -3356,16 +4751,16 @@ function buildMergedText(run) {
   }
   return out.join("\n");
 }
-function projectedMergedChars(run) {
-  return buildMergedText(run).length;
+function projectedMergedChars(run2) {
+  return buildMergedText(run2).length;
 }
-function mergeRegion(run) {
-  const path6 = run[0].chunk.path;
-  const startLine = Math.min(...run.map((h) => h.chunk.startLine));
-  const endLine = Math.max(...run.map((h) => h.chunk.endLine));
-  const text = buildMergedText(run);
-  const score = Math.max(...run.map((h) => h.score));
-  const relevances = run.map((h) => h.relevance).filter((r) => r !== void 0);
+function mergeRegion(run2) {
+  const path6 = run2[0].chunk.path;
+  const startLine = Math.min(...run2.map((h) => h.chunk.startLine));
+  const endLine = Math.max(...run2.map((h) => h.chunk.endLine));
+  const text = buildMergedText(run2);
+  const score = Math.max(...run2.map((h) => h.score));
+  const relevances = run2.map((h) => h.relevance).filter((r) => r !== void 0);
   const relevance = relevances.length > 0 ? Math.max(...relevances) : void 0;
   const chunk = {
     id: `${path6}:${startLine}-${endLine}`,
@@ -3375,7 +4770,7 @@ function mergeRegion(run) {
     text,
     // Synthetic region — not a stored chunk. Carry the first constituent's hash as
     // an informational placeholder (no incremental-index lookup uses a region id).
-    hash: run[0].chunk.hash
+    hash: run2[0].chunk.hash
   };
   return relevance === void 0 ? { chunk, score } : { chunk, score, relevance };
 }
@@ -4147,15 +5542,15 @@ function tokenizeCodeAware(text) {
   const tokens = [];
   const idRuns = text.match(/[A-Za-z0-9_]+/g);
   if (idRuns === null) return tokens;
-  for (const run of idRuns) {
+  for (const run2 of idRuns) {
     const seen = /* @__PURE__ */ new Set();
     const emit = (tok) => {
       if (tok.length === 0 || seen.has(tok)) return;
       seen.add(tok);
       tokens.push(tok);
     };
-    emit(run.replace(/_/g, "").toLowerCase());
-    for (const piece of run.split("_")) {
+    emit(run2.replace(/_/g, "").toLowerCase());
+    for (const piece of run2.split("_")) {
       if (piece.length === 0) continue;
       for (const part of splitIdentifier(piece)) {
         if (part.length > 0) emit(part.toLowerCase());
@@ -4164,8 +5559,8 @@ function tokenizeCodeAware(text) {
   }
   return tokens;
 }
-function splitIdentifier(run) {
-  return run.split(
+function splitIdentifier(run2) {
+  return run2.split(
     /(?<=[a-z0-9])(?=[A-Z])|(?<=[A-Z])(?=[A-Z][a-z])|(?<=[A-Za-z])(?=[0-9])|(?<=[0-9])(?=[A-Za-z])/
   );
 }
@@ -4283,10 +5678,613 @@ var BM25KeywordIndex = class {
   }
 };
 
+// ../spikes/p0-supervisor/mcp-config.ts
+import { readFileSync as readFileSync4 } from "node:fs";
+import { join as join9 } from "node:path";
+var MCP_CONFIG_RELATIVE_PATH = ".glyphstudio/mcp.json";
+var TRANSPORT_ISH_KEYS = ["url", "serverUrl", "transport", "type", "headers"];
+var KNOWN_ENTRY_KEYS = ["command", "args", "env"];
+function isPlainObject3(v) {
+  return typeof v === "object" && v !== null && !Array.isArray(v);
+}
+function loadEntry(name, raw) {
+  if (!isPlainObject3(raw)) {
+    return { name, ok: false, reason: "entry is not an object" };
+  }
+  const command = raw.command;
+  const hasCommand = typeof command === "string" && command.trim().length > 0;
+  const transportIsh = TRANSPORT_ISH_KEYS.filter((k) => raw[k] !== void 0);
+  if (!hasCommand && transportIsh.length > 0) {
+    return {
+      name,
+      ok: false,
+      reason: `unsupported transport (entry carries ${transportIsh.join(", ")}) \u2014 v1 brokers stdio servers only (command + args + env)`
+    };
+  }
+  if (!hasCommand) {
+    return { name, ok: false, reason: 'entry has no non-empty string "command"' };
+  }
+  let args = [];
+  if (raw.args !== void 0) {
+    if (!Array.isArray(raw.args) || !raw.args.every((a) => typeof a === "string")) {
+      return { name, ok: false, reason: '"args" must be an array of strings' };
+    }
+    args = raw.args;
+  }
+  let env = {};
+  if (raw.env !== void 0) {
+    if (!isPlainObject3(raw.env)) {
+      return { name, ok: false, reason: '"env" must be an object of string values' };
+    }
+    for (const [k, v] of Object.entries(raw.env)) {
+      if (typeof v !== "string") {
+        return {
+          name,
+          ok: false,
+          reason: `"env.${k}" is not a string \u2014 env values are LITERAL strings only`
+        };
+      }
+      env[k] = v;
+    }
+  }
+  const ignoredKeys = Object.keys(raw).filter((k) => !KNOWN_ENTRY_KEYS.includes(k));
+  return {
+    name,
+    ok: true,
+    spec: { name, command: command.trim(), args, env, ignoredKeys }
+  };
+}
+function loadMcpConfig(workspaceRoot) {
+  const path6 = join9(workspaceRoot, MCP_CONFIG_RELATIVE_PATH);
+  let rawText;
+  try {
+    rawText = readFileSync4(path6, "utf8");
+  } catch {
+    return { entries: [] };
+  }
+  let parsed;
+  try {
+    parsed = JSON.parse(rawText);
+  } catch (err) {
+    return {
+      entries: [],
+      fileError: `${MCP_CONFIG_RELATIVE_PATH} is not valid JSON: ${String(err?.message ?? err)}`
+    };
+  }
+  if (!isPlainObject3(parsed)) {
+    return { entries: [], fileError: `${MCP_CONFIG_RELATIVE_PATH} top level is not an object` };
+  }
+  const serversRaw = parsed.mcpServers;
+  if (serversRaw === void 0) {
+    return { entries: [] };
+  }
+  if (!isPlainObject3(serversRaw)) {
+    return { entries: [], fileError: '"mcpServers" is not an object' };
+  }
+  const entries = [];
+  let usable = 0;
+  for (const [name, raw] of Object.entries(serversRaw)) {
+    if (name.length > MAX_MCP_SERVER_NAME_CHARS) {
+      entries.push({
+        name: name.slice(0, MAX_MCP_SERVER_NAME_CHARS),
+        ok: false,
+        reason: `server name exceeds ${MAX_MCP_SERVER_NAME_CHARS} chars (${name.length})`
+      });
+      continue;
+    }
+    if (name.trim().length === 0) {
+      entries.push({ name, ok: false, reason: "server name is empty" });
+      continue;
+    }
+    if (usable >= MAX_MCP_SERVERS) {
+      entries.push({
+        name,
+        ok: false,
+        reason: `over the ${MAX_MCP_SERVERS}-server cap \u2014 entry not brokered`
+      });
+      continue;
+    }
+    const entry = loadEntry(name, raw);
+    if (entry.ok) usable += 1;
+    entries.push(entry);
+  }
+  return { entries };
+}
+
+// ../spikes/p0-supervisor/mcp-client.ts
+import { spawn as spawn2 } from "node:child_process";
+var MCP_PROTOCOL_VERSION = "2025-03-26";
+var DEFAULT_MCP_CALL_TIMEOUT_MS = 3e4;
+var DEFAULT_MCP_INIT_TIMEOUT_MS = 1e4;
+var DISPOSE_KILL_GRACE_MS = 2e3;
+function buildMcpSpawnEnv(configEnv, baseEnv = process.env) {
+  const out = {};
+  if (baseEnv.PATH !== void 0) out.PATH = baseEnv.PATH;
+  if (baseEnv.HOME !== void 0) out.HOME = baseEnv.HOME;
+  for (const [k, v] of Object.entries(configEnv)) out[k] = v;
+  return out;
+}
+function utf8Bytes(s) {
+  return Buffer.byteLength(s, "utf8");
+}
+var McpStdioClient = class {
+  spec;
+  callTimeoutMs;
+  initTimeoutMs;
+  logLine;
+  child;
+  nextId = 1;
+  pending = /* @__PURE__ */ new Map();
+  stdoutBuffer = "";
+  /** In-flight lazy start (de-dupes concurrent first uses). */
+  startPromise;
+  statusValue = "idle";
+  statusReasonValue;
+  negotiatedVersion;
+  constructor(spec, opts = {}) {
+    this.spec = spec;
+    this.callTimeoutMs = opts.callTimeoutMs ?? DEFAULT_MCP_CALL_TIMEOUT_MS;
+    this.initTimeoutMs = opts.initTimeoutMs ?? DEFAULT_MCP_INIT_TIMEOUT_MS;
+    this.logLine = opts.logLine ?? (() => {
+    });
+  }
+  /** The server name this client brokers. */
+  get name() {
+    return this.spec.name;
+  }
+  /**
+   * The HONEST status `mcp/list` reports for this client right now:
+   * 'ok' once initialized, 'spawn-failed' / 'init-failed' after a failure
+   * (including a crash/EOF after a successful start — the child is GONE, so
+   * the next list reports it as failed, never as silently healthy).
+   */
+  get status() {
+    if (this.statusValue === "ok") return "ok";
+    if (this.statusValue === "init-failed") return "init-failed";
+    return "spawn-failed";
+  }
+  /** Short, non-secret reason accompanying a non-'ok' {@link status}. */
+  get statusReason() {
+    return this.statusReasonValue;
+  }
+  /** The protocolVersion the server answered initialize with (once started). */
+  get protocolVersion() {
+    return this.negotiatedVersion;
+  }
+  /**
+   * Spec identity, used by the broker to detect a config edit (a changed
+   * command/args/env must produce a NEW child, never reuse a stale one).
+   */
+  get specIdentity() {
+    return JSON.stringify({
+      command: this.spec.command,
+      args: this.spec.args,
+      env: this.spec.env
+    });
+  }
+  /* ---------------------------------------------------------------- *
+   * Lifecycle
+   * ---------------------------------------------------------------- */
+  /** Lazily spawn + initialize the child. Rejects with the honest failure reason. */
+  ensureStarted() {
+    if (this.statusValue === "ok") return Promise.resolve();
+    if (this.statusValue === "disposed") {
+      return Promise.reject(new Error("client is disposed"));
+    }
+    if (this.statusValue === "spawn-failed" || this.statusValue === "init-failed") {
+      return Promise.reject(
+        new Error(this.statusReasonValue ?? `server is ${this.statusValue}`)
+      );
+    }
+    if (this.startPromise) return this.startPromise;
+    this.startPromise = this.start().finally(() => {
+      this.startPromise = void 0;
+    });
+    return this.startPromise;
+  }
+  async start() {
+    const env = buildMcpSpawnEnv(this.spec.env);
+    let child;
+    try {
+      child = spawn2(this.spec.command, [...this.spec.args], {
+        env,
+        stdio: ["pipe", "pipe", "pipe"]
+      });
+    } catch (err) {
+      this.fail("spawn-failed", `spawn failed: ${String(err?.message ?? err)}`);
+      throw new Error(this.statusReasonValue);
+    }
+    this.child = child;
+    child.on("error", (err) => {
+      this.fail("spawn-failed", `spawn failed: ${String(err?.message ?? err)}`);
+    });
+    child.on("exit", (code, signal) => {
+      const why = `MCP server '${this.spec.name}' exited (code ${code ?? "null"}, signal ${signal ?? "null"})`;
+      if (this.statusValue !== "disposed") {
+        this.fail(this.statusValue === "ok" ? "spawn-failed" : "init-failed", why);
+      } else {
+        this.rejectAllPending(new Error(why));
+      }
+    });
+    child.stdout?.on("data", (chunk) => this.ingest(chunk));
+    child.stderr?.on("data", (chunk) => {
+      const text = chunk.toString("utf8").trimEnd();
+      if (text.length > 0) this.logLine(`[mcp:${this.spec.name}] ${text}`);
+    });
+    try {
+      const initResult = await this.request(
+        "initialize",
+        {
+          protocolVersion: MCP_PROTOCOL_VERSION,
+          capabilities: {},
+          clientInfo: { name: "glyphstudio-supervisor", version: "0.0.0-p0" }
+        },
+        this.initTimeoutMs
+      );
+      const serverVersion = initResult && typeof initResult.protocolVersion === "string" ? initResult.protocolVersion : void 0;
+      if (!serverVersion) {
+        throw new Error("initialize result carries no protocolVersion");
+      }
+      this.negotiatedVersion = serverVersion;
+      this.notify("notifications/initialized", {});
+      this.statusValue = "ok";
+      this.statusReasonValue = void 0;
+    } catch (err) {
+      const reason = `initialize failed: ${String(err?.message ?? err)}`;
+      this.fail("init-failed", reason);
+      this.killChild();
+      throw new Error(this.statusReasonValue ?? reason);
+    }
+  }
+  /**
+   * Record a failure state + settle all in-flight calls honestly. FIRST
+   * FAILURE WINS: a later, derived failure (e.g. the initialize request
+   * rejecting BECAUSE the spawn errored) never re-labels the root cause.
+   */
+  fail(status, reason) {
+    if (this.statusValue === "disposed" || this.statusValue === "spawn-failed" || this.statusValue === "init-failed") {
+      this.rejectAllPending(new Error(reason));
+      return;
+    }
+    this.statusValue = status;
+    this.statusReasonValue = reason;
+    this.rejectAllPending(new Error(reason));
+  }
+  rejectAllPending(err) {
+    for (const [, p] of this.pending) {
+      clearTimeout(p.timer);
+      p.reject(err);
+    }
+    this.pending.clear();
+  }
+  killChild() {
+    try {
+      this.child?.kill("SIGKILL");
+    } catch {
+    }
+  }
+  /**
+   * Dispose the client: SIGTERM the child, SIGKILL after a grace period,
+   * settle anything in flight. Idempotent; resolve-never-reject.
+   */
+  async dispose() {
+    if (this.statusValue === "disposed") return;
+    this.statusValue = "disposed";
+    this.statusReasonValue = "disposed";
+    this.rejectAllPending(new Error("client disposed"));
+    const child = this.child;
+    this.child = void 0;
+    if (!child || child.exitCode !== null || child.signalCode !== null) return;
+    await new Promise((resolve5) => {
+      const killTimer = setTimeout(() => {
+        try {
+          child.kill("SIGKILL");
+        } catch {
+        }
+      }, DISPOSE_KILL_GRACE_MS);
+      killTimer.unref?.();
+      const floorTimer = setTimeout(() => resolve5(), DISPOSE_KILL_GRACE_MS + 1e3);
+      floorTimer.unref?.();
+      child.once("exit", () => {
+        clearTimeout(killTimer);
+        clearTimeout(floorTimer);
+        resolve5();
+      });
+      try {
+        child.kill("SIGTERM");
+      } catch {
+        clearTimeout(killTimer);
+        clearTimeout(floorTimer);
+        resolve5();
+      }
+    });
+  }
+  /* ---------------------------------------------------------------- *
+   * Wire (newline-delimited JSON-RPC 2.0)
+   * ---------------------------------------------------------------- */
+  ingest(chunk) {
+    this.stdoutBuffer += chunk.toString("utf8");
+    let nl;
+    while ((nl = this.stdoutBuffer.indexOf("\n")) !== -1) {
+      const line = this.stdoutBuffer.slice(0, nl).replace(/\r$/, "");
+      this.stdoutBuffer = this.stdoutBuffer.slice(nl + 1);
+      if (line.trim().length === 0) continue;
+      this.handleLine(line);
+    }
+  }
+  handleLine(line) {
+    let msg;
+    try {
+      msg = JSON.parse(line);
+    } catch {
+      this.logLine(`[mcp:${this.spec.name}] dropping non-JSON stdout line`);
+      return;
+    }
+    if (typeof msg !== "object" || msg === null) return;
+    const m = msg;
+    if (typeof m.id === "number" && (m.result !== void 0 || m.error !== void 0)) {
+      const p = this.pending.get(m.id);
+      if (!p) return;
+      this.pending.delete(m.id);
+      clearTimeout(p.timer);
+      if (m.error !== void 0) {
+        const e = m.error;
+        p.reject(
+          new Error(
+            `server error ${String(e?.code ?? "?")}: ${String(e?.message ?? "unknown error")}`
+          )
+        );
+      } else {
+        p.resolve(m.result);
+      }
+      return;
+    }
+    if (typeof m.id === "number" && typeof m.method === "string") {
+      this.send({
+        jsonrpc: "2.0",
+        id: m.id,
+        error: { code: -32601, message: `method not supported by this client: ${m.method}` }
+      });
+      return;
+    }
+  }
+  send(obj) {
+    const stdin = this.child?.stdin;
+    if (!stdin || !stdin.writable) return;
+    try {
+      stdin.write(`${JSON.stringify(obj)}
+`);
+    } catch {
+    }
+  }
+  notify(method, params) {
+    this.send({ jsonrpc: "2.0", method, params });
+  }
+  request(method, params, timeoutMs) {
+    const id = this.nextId++;
+    return new Promise((resolve5, reject) => {
+      const timer = setTimeout(() => {
+        this.pending.delete(id);
+        reject(new Error(`${method} timed out after ${timeoutMs}ms`));
+      }, timeoutMs);
+      timer.unref?.();
+      this.pending.set(id, { resolve: resolve5, reject, timer });
+      this.send({ jsonrpc: "2.0", id, method, params });
+    });
+  }
+  /* ---------------------------------------------------------------- *
+   * MCP surface
+   * ---------------------------------------------------------------- */
+  /**
+   * List the server's tools (spawning/initializing lazily). Enforces
+   * {@link MAX_MCP_TOOLS_PER_SERVER} and {@link MAX_MCP_TOOL_NAME_CHARS}:
+   * over-cap tools are DROPPED with the count reported (never silent).
+   * Throws (with the honest reason) when the server cannot serve.
+   */
+  async listTools() {
+    await this.ensureStarted();
+    const result = await this.request("tools/list", {}, this.initTimeoutMs);
+    const rawTools = Array.isArray(result?.tools) ? result.tools : [];
+    const tools = [];
+    let dropped = 0;
+    for (const raw of rawTools) {
+      if (typeof raw !== "object" || raw === null) {
+        dropped += 1;
+        continue;
+      }
+      const t = raw;
+      const name = typeof t.name === "string" ? t.name : "";
+      if (name.length === 0 || name.length > MAX_MCP_TOOL_NAME_CHARS) {
+        dropped += 1;
+        continue;
+      }
+      if (tools.length >= MAX_MCP_TOOLS_PER_SERVER) {
+        dropped += 1;
+        continue;
+      }
+      const info = { name };
+      if (typeof t.description === "string") info.description = t.description;
+      if (typeof t.inputSchema === "object" && t.inputSchema !== null) {
+        try {
+          info.inputSchemaJson = JSON.stringify(t.inputSchema);
+        } catch {
+        }
+      }
+      tools.push(info);
+    }
+    return { tools, droppedTools: dropped };
+  }
+  /**
+   * Call one tool (spawning/initializing lazily). `argsJson` MUST already have
+   * passed `assertMcpCallWellFormed` (the caller's gate). The outcome is
+   * honest and never throws:
+   *   - 'ok' + the result's `content` array serialized to JSON, byte-capped at
+   *     {@link MAX_MCP_RESULT_JSON_BYTES} (over-cap → 'error' with the sizes —
+   *     NEVER a silent truncation);
+   *   - 'error' + reason on tool error (`isError`), timeout, crash/EOF, or an
+   *     unusable server.
+   */
+  async callTool(tool, argsJson, timeoutMs) {
+    try {
+      await this.ensureStarted();
+    } catch (err) {
+      return { status: "error", reason: String(err?.message ?? err) };
+    }
+    let result;
+    try {
+      result = await this.request(
+        "tools/call",
+        { name: tool, arguments: JSON.parse(argsJson) },
+        timeoutMs ?? this.callTimeoutMs
+      );
+    } catch (err) {
+      return { status: "error", reason: String(err?.message ?? err) };
+    }
+    const r = typeof result === "object" && result !== null ? result : {};
+    const content = Array.isArray(r.content) ? r.content : [];
+    let resultJson;
+    try {
+      resultJson = JSON.stringify(content);
+    } catch (err) {
+      return {
+        status: "error",
+        reason: `tool result is not JSON-serializable: ${String(err?.message ?? err)}`
+      };
+    }
+    const bytes = utf8Bytes(resultJson);
+    if (bytes > MAX_MCP_RESULT_JSON_BYTES) {
+      return {
+        status: "error",
+        reason: `tool result exceeds the ${MAX_MCP_RESULT_JSON_BYTES}-byte cap (${bytes} bytes) \u2014 refusing to truncate silently`
+      };
+    }
+    if (r.isError === true) {
+      const firstText = content.map((c) => typeof c === "object" && c !== null ? c.text : void 0).find((t) => typeof t === "string");
+      return {
+        status: "error",
+        resultJson,
+        reason: `tool reported an error${firstText ? `: ${firstText.slice(0, 200)}` : ""}`
+      };
+    }
+    return { status: "ok", resultJson };
+  }
+};
+
 // ../spikes/p0-supervisor/trust-gate.ts
 function trustFromCapabilities(caps) {
   if (!caps.fsIsolated) return "untrusted";
   return caps.hardEgress ? "trusted" : "sandboxed-soft-egress";
+}
+
+// ../spikes/p0-supervisor/record-human.ts
+import { existsSync as existsSync4, readFileSync as readFileSync5 } from "node:fs";
+var RecordHumanRefusal = class extends Error {
+  kind;
+  constructor(kind, message) {
+    super(message);
+    this.name = "RecordHumanRefusal";
+    this.kind = kind;
+  }
+};
+var TAIL_UNREADABLE_MESSAGE = "trace tail unreadable \u2014 refusing to append (possible tamper or truncation)";
+function assertRecordHumanWellFormed(type, payload) {
+  if (!RECORD_HUMAN_EVENT_TYPES.includes(type)) {
+    throw new RecordHumanRefusal(
+      "invalid-type",
+      `run/recordHuman type must be one of [${RECORD_HUMAN_EVENT_TYPES.join(", ")}], got '${String(type)}'`
+    );
+  }
+  if (payload === void 0) return 0;
+  if (payload === null || typeof payload !== "object" || Array.isArray(payload)) {
+    throw new RecordHumanRefusal(
+      "payload-not-serializable",
+      "run/recordHuman payload must be a plain JSON object when present"
+    );
+  }
+  let serialized;
+  try {
+    serialized = JSON.stringify(payload);
+  } catch (err) {
+    throw new RecordHumanRefusal(
+      "payload-not-serializable",
+      `run/recordHuman payload is not JSON-serializable: ${String(err?.message ?? err)}`
+    );
+  }
+  if (typeof serialized !== "string") {
+    throw new RecordHumanRefusal(
+      "payload-not-serializable",
+      "run/recordHuman payload is not JSON-serializable"
+    );
+  }
+  const bytes = Buffer.byteLength(serialized, "utf8");
+  if (bytes > MAX_RECORD_HUMAN_PAYLOAD_BYTES) {
+    throw new RecordHumanRefusal(
+      "payload-over-cap",
+      `run/recordHuman payload is ${bytes} bytes \u2014 over the ${MAX_RECORD_HUMAN_PAYLOAD_BYTES}-byte cap; refusing (payloads are small summaries, never content)`
+    );
+  }
+  return bytes;
+}
+function rehydrateAppendHumanEvent(tracePath, req) {
+  assertRecordHumanWellFormed(req.type, req.payload);
+  if (!existsSync4(tracePath)) {
+    throw new RecordHumanRefusal(
+      "no-trace-file",
+      `no trace file exists for this run (${tracePath}) \u2014 refusing to append`
+    );
+  }
+  let raw;
+  try {
+    raw = readFileSync5(tracePath, "utf8");
+  } catch (err) {
+    throw new RecordHumanRefusal(
+      "fs-error",
+      `failed to read the run trace: ${String(err?.message ?? err)}`
+    );
+  }
+  const lines = raw.split("\n").filter((l) => l.trim() !== "");
+  if (lines.length === 0) {
+    throw new RecordHumanRefusal("tail-unreadable", TAIL_UNREADABLE_MESSAGE);
+  }
+  let tail;
+  try {
+    tail = JSON.parse(lines[lines.length - 1]);
+  } catch {
+    throw new RecordHumanRefusal("tail-unreadable", TAIL_UNREADABLE_MESSAGE);
+  }
+  const tailEvt = tail;
+  if (tailEvt === null || typeof tailEvt !== "object" || typeof tailEvt.hash !== "string" || tailEvt.hash.length === 0 || typeof tailEvt.seq !== "number") {
+    throw new RecordHumanRefusal("tail-unreadable", TAIL_UNREADABLE_MESSAGE);
+  }
+  let appended;
+  try {
+    const writer = createTraceWriter(tracePath);
+    appended = writer.append({
+      v: TRACE_EVENT_VERSION,
+      runId: req.runId,
+      seq: 0,
+      // writer-authoritative; overwritten with tail.seq + 1
+      ts: 0,
+      // writer-authoritative; overwritten with Date.now()
+      type: req.type,
+      payload: req.payload ?? {},
+      source: "human"
+      // FORCED here — never caller-supplied
+    });
+  } catch (err) {
+    if (err instanceof RecordHumanRefusal) throw err;
+    throw new RecordHumanRefusal(
+      "tail-unreadable",
+      `${TAIL_UNREADABLE_MESSAGE}: ${String(err?.message ?? err)}`
+    );
+  }
+  if (appended.prevHash !== tailEvt.hash || appended.seq !== tailEvt.seq + 1) {
+    throw new RecordHumanRefusal(
+      "fs-error",
+      "append continuity check failed \u2014 the trace changed during the append; the chain position is not trustworthy"
+    );
+  }
+  return appended;
 }
 
 // ../spikes/p0-model-gateway/gateway.ts
@@ -4334,6 +6332,7 @@ var ModelGateway = class {
       yield { type: "error", message };
       return;
     }
+    const resolvedModel = req.model ?? backend.defaultModel;
     let outcome = "error";
     let errorMessage = "chat turn produced no terminal event";
     let inputTokens;
@@ -4358,7 +6357,7 @@ var ModelGateway = class {
     } finally {
       this.emitTrace({
         backendId,
-        ...req.model ? { model: req.model } : {},
+        ...resolvedModel ? { model: resolvedModel } : {},
         messageCount: req.messages.length,
         outcome,
         durationMs: Date.now() - startedAt,
@@ -4379,7 +6378,7 @@ var ModelGateway = class {
 };
 
 // ../spikes/p0-model-gateway/codex-backend.ts
-import { spawn as spawn2 } from "node:child_process";
+import { spawn as spawn3 } from "node:child_process";
 import { isAbsolute as isAbsolute2 } from "node:path";
 
 // ../spikes/p0-model-gateway/prompt-assembly.ts
@@ -4496,7 +6495,7 @@ var CodexChatBackend = class {
       ...opts.env,
       CI: "1"
     };
-    const child = spawn2(this.codexPath, args, {
+    const child = spawn3(this.codexPath, args, {
       cwd: req.cwd,
       env,
       stdio: ["pipe", "pipe", "pipe"]
@@ -4642,15 +6641,218 @@ var CodexChatBackend = class {
   }
 };
 
+// ../spikes/p0-model-gateway/ollama-backend.ts
+var DEFAULT_OLLAMA_HOST = "http://127.0.0.1:11434";
+var DEFAULT_OLLAMA_CHAT_MODEL = "qwen2.5-coder:7b";
+var OLLAMA_MODEL_LIST_CAP = 16;
+var ERROR_BODY_CAP = 300;
+var OLLAMA_NUM_PREDICT_MIN = 1;
+var OLLAMA_NUM_PREDICT_CAP = 8192;
+function clampNumPredict(maxOutputTokens) {
+  if (typeof maxOutputTokens !== "number" || !Number.isFinite(maxOutputTokens)) return void 0;
+  const n = Math.floor(maxOutputTokens);
+  return Math.min(OLLAMA_NUM_PREDICT_CAP, Math.max(OLLAMA_NUM_PREDICT_MIN, n));
+}
+function isLoopbackHost(host) {
+  let url;
+  try {
+    url = new URL(host);
+  } catch {
+    return false;
+  }
+  if (url.protocol !== "http:" && url.protocol !== "https:") return false;
+  const h = url.hostname.toLowerCase();
+  return h === "localhost" || h === "[::1]" || h === "::1" || /^127\.\d{1,3}\.\d{1,3}\.\d{1,3}$/.test(h);
+}
+async function probeOllamaModels(host = DEFAULT_OLLAMA_HOST, cap = OLLAMA_MODEL_LIST_CAP) {
+  if (!isLoopbackHost(host)) {
+    return { ok: false, detail: `non-loopback ollama host "${host}" refused (local backend is loopback-only in v1)` };
+  }
+  let res;
+  try {
+    res = await fetch(`${host}/api/tags`);
+  } catch (err) {
+    return { ok: false, detail: `ollama daemon unreachable at ${host}: ${String(err?.message ?? err)}` };
+  }
+  if (!res.ok) {
+    return { ok: false, detail: `ollama /api/tags HTTP ${res.status}` };
+  }
+  try {
+    const data = await res.json();
+    const names = (Array.isArray(data.models) ? data.models : []).map((m) => typeof m?.name === "string" ? m.name : void 0).filter((n) => typeof n === "string" && n.length > 0).slice(0, cap);
+    return { ok: true, models: names };
+  } catch (err) {
+    return { ok: false, detail: `ollama /api/tags returned an unparseable body: ${String(err?.message ?? err)}` };
+  }
+}
+var OllamaChatBackend = class {
+  id = "ollama";
+  /** The model used when a turn has no override — surfaced so the gateway's trace breadcrumb names it. */
+  defaultModel;
+  host;
+  timeoutMs;
+  /** Set at construction when `host` failed the loopback guard; fails every turn honestly. */
+  hostError;
+  constructor(opts = {}) {
+    this.host = opts.host ?? DEFAULT_OLLAMA_HOST;
+    this.defaultModel = opts.model ?? DEFAULT_OLLAMA_CHAT_MODEL;
+    this.timeoutMs = opts.timeoutMs ?? 12e4;
+    this.hostError = isLoopbackHost(this.host) ? void 0 : `refusing non-loopback ollama host "${this.host}": the local chat backend is loopback-only in v1 (a remote daemon would silently turn the sovereign-local leg into network egress).`;
+  }
+  async *chatTurn(req, opts) {
+    if (this.hostError) {
+      yield { type: "error", message: this.hostError };
+      return;
+    }
+    const model = req.model ?? this.defaultModel;
+    const numPredict = clampNumPredict(req.maxOutputTokens);
+    const controller = new AbortController();
+    let timedOut = false;
+    const timer = setTimeout(() => {
+      timedOut = true;
+      controller.abort();
+    }, this.timeoutMs);
+    const onCallerAbort = () => controller.abort();
+    if (opts?.signal) {
+      if (opts.signal.aborted) controller.abort();
+      else opts.signal.addEventListener("abort", onCallerAbort, { once: true });
+    }
+    const abortMessage = () => timedOut ? `ollama chat turn timed out after ${this.timeoutMs}ms` : "ollama chat turn aborted";
+    try {
+      let res;
+      try {
+        res = await fetch(`${this.host}/api/chat`, {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({
+            model,
+            // Content-only projection: role/content exactly (no extra fields leak).
+            messages: req.messages.map((m) => ({ role: m.role, content: m.content })),
+            stream: true,
+            ...numPredict !== void 0 ? { options: { num_predict: numPredict } } : {}
+          }),
+          signal: controller.signal
+        });
+      } catch (err) {
+        if (controller.signal.aborted) {
+          yield { type: "error", message: abortMessage() };
+          return;
+        }
+        yield {
+          type: "error",
+          message: `ollama daemon unreachable at ${this.host}: ${String(err?.message ?? err)}`
+        };
+        return;
+      }
+      if (!res.ok) {
+        let tail = "";
+        try {
+          tail = (await res.text()).slice(0, ERROR_BODY_CAP);
+        } catch {
+        }
+        yield { type: "error", message: `ollama /api/chat HTTP ${res.status}${tail ? `: ${tail}` : ""}` };
+        return;
+      }
+      if (!res.body) {
+        yield { type: "error", message: "ollama /api/chat returned no response body to stream" };
+        return;
+      }
+      const reader = res.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = "";
+      let fullText = "";
+      let usage;
+      let sawDone = false;
+      const handleLine = (line) => {
+        let chunk;
+        try {
+          chunk = JSON.parse(line);
+        } catch {
+          return {
+            type: "error",
+            message: `ollama /api/chat emitted a malformed NDJSON line (${line.slice(0, 80)}\u2026) \u2014 failing the turn rather than skipping unverified output`
+          };
+        }
+        if (chunk.error !== void 0) {
+          return { type: "error", message: `ollama /api/chat reported an error: ${String(chunk.error).slice(0, ERROR_BODY_CAP)}` };
+        }
+        const content = chunk.message?.content;
+        if (typeof content === "string" && content.length > 0) {
+          fullText += content;
+          if (chunk.done !== true) return { type: "delta", text: content };
+        }
+        if (chunk.done === true) {
+          sawDone = true;
+          const input = typeof chunk.prompt_eval_count === "number" ? chunk.prompt_eval_count : void 0;
+          const output = typeof chunk.eval_count === "number" ? chunk.eval_count : void 0;
+          if (input !== void 0 || output !== void 0) {
+            usage = {
+              ...input !== void 0 ? { inputTokens: input } : {},
+              ...output !== void 0 ? { outputTokens: output } : {}
+            };
+          }
+        }
+        return void 0;
+      };
+      while (true) {
+        let step;
+        try {
+          step = await reader.read();
+        } catch (err) {
+          yield {
+            type: "error",
+            message: controller.signal.aborted ? abortMessage() : `ollama /api/chat stream failed mid-turn: ${String(err?.message ?? err)}`
+          };
+          return;
+        }
+        if (step.done) break;
+        buffer += decoder.decode(step.value, { stream: true });
+        let nl;
+        while ((nl = buffer.indexOf("\n")) >= 0) {
+          const line = buffer.slice(0, nl).trim();
+          buffer = buffer.slice(nl + 1);
+          if (!line) continue;
+          const event = handleLine(line);
+          if (event) {
+            yield event;
+            if (event.type === "error") return;
+          }
+          if (sawDone) break;
+        }
+        if (sawDone) break;
+      }
+      const trailing = (buffer + decoder.decode()).trim();
+      if (!sawDone && trailing) {
+        const event = handleLine(trailing);
+        if (event) {
+          yield event;
+          if (event.type === "error") return;
+        }
+      }
+      if (!sawDone) {
+        yield {
+          type: "error",
+          message: "ollama /api/chat stream ended without a terminal done chunk \u2014 the turn is incomplete"
+        };
+        return;
+      }
+      yield { type: "done", text: fullText, ...usage ? { usage } : {} };
+    } finally {
+      clearTimeout(timer);
+      opts?.signal?.removeEventListener("abort", onCallerAbort);
+    }
+  }
+};
+
 // ../spikes/p0-model-gateway/governed-agentic-run.ts
 import { execFile as execFile2 } from "node:child_process";
 import { promisify as promisify2 } from "node:util";
-import { join as join10 } from "node:path";
-import { existsSync as existsSync5, mkdirSync as mkdirSync6, writeFileSync as writeFileSync3 } from "node:fs";
+import { join as join13 } from "node:path";
+import { existsSync as existsSync6, mkdirSync as mkdirSync6, writeFileSync as writeFileSync3 } from "node:fs";
 import { createPublicKey as createPublicKey3 } from "node:crypto";
 
 // ../spikes/p0-supervisor/bundle.ts
-import { cpSync as cpSync2, mkdirSync as mkdirSync5, readFileSync as readFileSync4, writeFileSync as writeFileSync2 } from "node:fs";
+import { cpSync as cpSync2, mkdirSync as mkdirSync5, readFileSync as readFileSync6, writeFileSync as writeFileSync2 } from "node:fs";
 import * as path5 from "node:path";
 import {
   createHash as createHash6,
@@ -4659,12 +6861,13 @@ import {
 } from "node:crypto";
 
 // ../spikes/p0-verifier/verifier.ts
-import { cpSync, existsSync as existsSync4, readdirSync, rmSync as rmSync2, statSync as statSync2 } from "node:fs";
+import { cpSync, existsSync as existsSync5, readdirSync as readdirSync2, rmSync as rmSync3, statSync as statSync2 } from "node:fs";
 import * as path4 from "node:path";
 
 // ../spikes/p0-sandbox/docker-runtime.ts
-import { spawn as spawn3, spawnSync } from "node:child_process";
+import { spawn as spawn4, spawnSync } from "node:child_process";
 import { randomUUID as randomUUID4 } from "node:crypto";
+init_egress_proxy();
 var WORKDIR_MOUNT = "/workspace";
 var HOME_MOUNT = "/home/agent";
 var DEFAULT_IMAGE = process.env.GLYPHSTUDIO_SANDBOX_IMAGE ?? "node:22-alpine";
@@ -4724,7 +6927,7 @@ function resourceFlags(limits) {
 }
 function runDocker(args, timeoutMs) {
   return new Promise((resolve5) => {
-    const child = spawn3("docker", args, { stdio: ["ignore", "pipe", "pipe"] });
+    const child = spawn4("docker", args, { stdio: ["ignore", "pipe", "pipe"] });
     let stdout = "";
     let stderr = "";
     let timedOut = false;
@@ -4766,9 +6969,9 @@ function denyNetworkConfig() {
 }
 var SOFT_EGRESS_POSTURE_MESSAGE = "egress posture: SOFT application-layer allowlist (proxy-honoring only; NOT a hard boundary; bypassable by proxy-stripping clients)";
 var softEgressWarned = false;
-function softEgressNotAcknowledgedError() {
+function softEgressNotAcknowledgedError(reason) {
   return new Error(
-    "DockerSandboxRuntime: network:{ allow } on the Docker-local runtime is an APPLICATION-LAYER (proxy-only) egress allowlist, NOT a hard boundary \u2014 a process that strips the HTTP(S) proxy env vars or opens a raw socket can bypass it. It therefore FAILS CLOSED (no egress) unless explicitly acknowledged. Pass network:{ allow, acknowledgeSoftEgress: true } to opt into the soft allowlist with eyes open, or use network:'deny' for a hard boundary (--network none) / the remote plane for a hard egress allowlist."
+    `DockerSandboxRuntime: ${reason} On the Docker-local runtime a network:{ allow } spec is an APPLICATION-LAYER (proxy-only) egress allowlist, NOT a hard boundary \u2014 a process that strips the HTTP(S) proxy env vars or opens a raw socket can bypass it. Pass network:{ allow, egressMode: 'soft-proxy-allow' } to opt into the soft allowlist with eyes open, or use network:'deny' for a hard boundary (--network none); a hard egress allowlist (egressMode:'hard-allowlist') is the remote plane's job, not this runtime's.`
   );
 }
 function signalSoftEgressPosture(onDecision) {
@@ -4846,9 +7049,22 @@ var DockerSandboxRuntime = class {
       hardEgress: spec.network === "deny"
     };
   }
+  /**
+   * The egress modes the Docker-local runtime can STRUCTURALLY honor:
+   *   - 'hard-deny'        — `--network none`: no interface/route/DNS (hard).
+   *   - 'soft-proxy-allow' — the application-layer (proxy-only) allowlist.
+   * It deliberately does NOT list 'hard-allowlist': a hard network-namespace
+   * default-DROP allowlist is the Firecracker remote-plane's job, so a spec
+   * requesting it is rejected by {@link negotiateEgress} rather than silently
+   * downgraded to the soft proxy posture.
+   */
+  supportedEgressModes() {
+    return ["hard-deny", "soft-proxy-allow"];
+  }
   async createSandbox(spec) {
-    if (spec.network !== "deny" && spec.network.acknowledgeSoftEgress !== true) {
-      throw softEgressNotAcknowledgedError();
+    const negotiated = negotiateEgress(this, spec);
+    if (!negotiated.ok) {
+      throw softEgressNotAcknowledgedError(negotiated.reason);
     }
     const containerName = containerNameFor(spec.runId);
     let net;
@@ -4926,11 +7142,11 @@ function checkName(command) {
 }
 var MIRROR_EXCLUDE_TOPLEVEL = /* @__PURE__ */ new Set([".git"]);
 function mirrorDir(src, dest, exclude) {
-  const srcEntries = new Set(readdirSync(src).filter((e) => !exclude.has(e)));
-  for (const entry of readdirSync(dest)) {
+  const srcEntries = new Set(readdirSync2(src).filter((e) => !exclude.has(e)));
+  for (const entry of readdirSync2(dest)) {
     if (exclude.has(entry)) continue;
     if (!srcEntries.has(entry)) {
-      rmSync2(path4.join(dest, entry), { recursive: true, force: true });
+      rmSync3(path4.join(dest, entry), { recursive: true, force: true });
     }
   }
   for (const entry of srcEntries) {
@@ -4938,14 +7154,14 @@ function mirrorDir(src, dest, exclude) {
     const destPath = path4.join(dest, entry);
     const st = statSync2(srcPath);
     if (st.isDirectory()) {
-      if (existsSync4(destPath) && !statSync2(destPath).isDirectory()) {
-        rmSync2(destPath, { force: true });
+      if (existsSync5(destPath) && !statSync2(destPath).isDirectory()) {
+        rmSync3(destPath, { force: true });
       }
       cpSync(srcPath, destPath, { recursive: true, force: true });
       mirrorDir(srcPath, destPath, /* @__PURE__ */ new Set());
     } else {
-      if (existsSync4(destPath) && statSync2(destPath).isDirectory()) {
-        rmSync2(destPath, { recursive: true, force: true });
+      if (existsSync5(destPath) && statSync2(destPath).isDirectory()) {
+        rmSync3(destPath, { recursive: true, force: true });
       }
       cpSync(srcPath, destPath, { force: true });
     }
@@ -4981,7 +7197,7 @@ async function runVerification(input) {
     createWorktree(repoPath, runId, verifierWorktree);
     worktreeCreated = true;
     if (sourceWorktree) {
-      if (!existsSync4(sourceWorktree)) {
+      if (!existsSync5(sourceWorktree)) {
         throw new Error(`verifier: sourceWorktree does not exist: ${sourceWorktree}`);
       }
       overlaySourceWorktree(sourceWorktree, verifierWorktree);
@@ -5035,7 +7251,7 @@ async function runVerification(input) {
 }
 
 // ../spikes/p0-model-gateway/agentic-backend.ts
-import { spawn as spawn4 } from "node:child_process";
+import { spawn as spawn5 } from "node:child_process";
 import { execFile } from "node:child_process";
 import { isAbsolute as isAbsolute3 } from "node:path";
 import { promisify } from "node:util";
@@ -5180,7 +7396,7 @@ async function* runAgenticBuild(req, opts = {}) {
   const timeoutMs = opts.timeoutMs ?? DEFAULT_AGENTIC_TIMEOUT_MS;
   const args = buildAgenticArgs(req);
   const env = { ...req.env, CI: "1" };
-  const child = spawn4(codexPath, args, {
+  const child = spawn5(codexPath, args, {
     cwd: req.cwd,
     env,
     stdio: ["pipe", "pipe", "pipe"]
@@ -5387,7 +7603,7 @@ function resolveVerifierKeypair(verifierKeyPath2) {
   }
   let privateKey;
   try {
-    privateKey = createPrivateKey(readFileSync4(verifierKeyPath2, "utf8"));
+    privateKey = createPrivateKey(readFileSync6(verifierKeyPath2, "utf8"));
   } catch (err) {
     throw new Error(
       `bundle: failed to load verifier private key from ${verifierKeyPath2}: ${err instanceof Error ? err.message : String(err)}`
@@ -5460,6 +7676,355 @@ function synthesizeErrorVerdict(tracePath, privateKey) {
   return { ...core, signature };
 }
 
+// ../spikes/p0-sandbox/runtime-select.ts
+import { accessSync as accessSync2, statSync as statSync3, constants as fsConstants2 } from "node:fs";
+import { join as pathJoin2, delimiter as pathDelimiter2 } from "node:path";
+
+// ../spikes/p0-sandbox/firecracker-runtime.ts
+import { lookup } from "node:dns/promises";
+init_firecracker_egress_rules();
+
+// ../spikes/p0-sandbox/firecracker-rootfs.ts
+var GUEST_WORKSPACE = "/workspace";
+var GUEST_HOME = "/home/agent";
+function isAbsolutePath(p) {
+  return typeof p === "string" && p.startsWith("/") && p.trim().length > 0;
+}
+function buildMountPlan(input) {
+  const { worktreeDir, homeDir } = input;
+  if (!isAbsolutePath(worktreeDir)) {
+    throw new Error(
+      "buildMountPlan: worktreeDir is missing or not an absolute host path; refusing to build a mount plan with no workspace."
+    );
+  }
+  if (!isAbsolutePath(homeDir)) {
+    throw new Error(
+      "buildMountPlan: homeDir is missing or not an absolute host path; refusing to build a mount plan with no synthetic HOME."
+    );
+  }
+  if (worktreeDir === homeDir) {
+    throw new Error(
+      "buildMountPlan: worktreeDir and homeDir are the same host path; the worktree and synthetic HOME must be SEPARATE shares so neither can be reached through the other's guest path."
+    );
+  }
+  const mounts = [
+    { hostPath: worktreeDir, guestPath: GUEST_WORKSPACE, readonly: false, tag: "workspace" },
+    { hostPath: homeDir, guestPath: GUEST_HOME, readonly: false, tag: "home" }
+  ];
+  return { mounts, secretsBaked: false };
+}
+
+// ../spikes/p0-sandbox/firecracker-runtime.ts
+init_firecracker_vsock();
+var defaultResolveHosts = async (hosts) => {
+  const resolved = /* @__PURE__ */ new Map();
+  await Promise.all(
+    hosts.map(async (host) => {
+      try {
+        const records = await lookup(host, { all: true, verbatim: true });
+        const ips = records.map((r) => r.address);
+        if (ips.length > 0) resolved.set(host, ips);
+      } catch {
+      }
+    })
+  );
+  return resolved;
+};
+var DEFAULT_MAX_CONCURRENT_VMS = 8;
+var DEFAULT_MAX_TOTAL_GUEST_MEM_MIB = 16384;
+function allowedHostnames(spec) {
+  if (spec.network === "deny") return [];
+  return spec.network.allow.map((entry) => hostOf(entry));
+}
+function hostOf(entry) {
+  const trimmed = entry.trim();
+  if (trimmed.startsWith("[")) {
+    const close = trimmed.indexOf("]");
+    if (close !== -1) return trimmed.slice(0, close + 1);
+    return trimmed;
+  }
+  const idx = trimmed.lastIndexOf(":");
+  if (idx === -1) return trimmed;
+  const portStr = trimmed.slice(idx + 1);
+  const head = trimmed.slice(0, idx);
+  if (/^\d+$/.test(portStr) && !head.includes(":")) return head;
+  return trimmed;
+}
+var PLACEHOLDER_GUEST_IP = "169.254.0.2";
+function placeholderNsName(runId) {
+  return `glyph-fc-${runId.replace(/[^A-Za-z0-9_-]/g, "-")}`;
+}
+var FirecrackerSandboxRuntime = class {
+  /** Informational only; per the contract, callers must not parse this. */
+  name = "firecracker";
+  launcher;
+  resolveHosts;
+  maxConcurrentVms;
+  maxTotalGuestMemMib;
+  /** Live-guest accounting (the plane capacity cap). */
+  liveVms = 0;
+  committedGuestMemMib = 0;
+  constructor(options = {}) {
+    this.launcher = options.launcher ?? realVsockLauncher;
+    this.resolveHosts = options.resolveHosts ?? defaultResolveHosts;
+    this.maxConcurrentVms = Math.max(1, options.maxConcurrentVms ?? DEFAULT_MAX_CONCURRENT_VMS);
+    this.maxTotalGuestMemMib = Math.max(
+      1,
+      options.maxTotalGuestMemMib ?? DEFAULT_MAX_TOTAL_GUEST_MEM_MIB
+    );
+  }
+  /**
+   * The egress modes this runtime can STRUCTURALLY honor: a no-egress namespace
+   * ('hard-deny') and a default-DROP + allowlist ('hard-allowlist'). It does NOT
+   * list 'soft-proxy-allow' — that soft, application-layer posture is the
+   * Docker-local runtime's, and a spec requesting it is rejected by
+   * {@link negotiateEgress} rather than silently hardened or downgraded.
+   */
+  supportedEgressModes() {
+    return ["hard-deny", "hard-allowlist"];
+  }
+  /**
+   * HONEST capability report for the trust gate. This runtime ALWAYS earns
+   * fs-isolation (the guest sees only the two-mount rootfs — worktree + synthetic
+   * HOME — and its env is exactly spec.env + HOME, never the host's), and it earns
+   * HARD egress for both hard postures it supports: a 'deny' namespace and a
+   * 'hard-allowlist' default-DROP allowlist. (A 'soft-proxy-allow' allow spec never
+   * reaches a sandbox here — it is rejected by negotiation — so it is not a posture
+   * this runtime reports hardEgress for.)
+   */
+  capabilities(spec) {
+    const hardEgress = spec.network === "deny" || spec.network.egressMode === "hard-allowlist";
+    return { fsIsolated: true, hardEgress };
+  }
+  async createSandbox(spec) {
+    const negotiated = negotiateEgress(this, spec);
+    if (!negotiated.ok) {
+      throw new Error(
+        `FirecrackerSandboxRuntime: ${negotiated.reason} This runtime provides only HARD egress postures: network:'deny' (no egress) or network:{ allow, egressMode: 'hard-allowlist' } (a network-namespace default-DROP allowlist). The soft, application-layer allowlist ('soft-proxy-allow') is the Docker-local runtime's posture, not this one's.`
+      );
+    }
+    const resources = guestResources(spec);
+    if (this.liveVms + 1 > this.maxConcurrentVms) {
+      throw new Error(
+        `FirecrackerSandboxRuntime: plane at capacity \u2014 ${this.liveVms} live VMs of a ${this.maxConcurrentVms}-VM cap. Refusing to provision; retry after a running sandbox tears down.`
+      );
+    }
+    if (this.committedGuestMemMib + resources.memMib > this.maxTotalGuestMemMib) {
+      throw new Error(
+        `FirecrackerSandboxRuntime: plane at memory capacity \u2014 ${this.committedGuestMemMib} MiB committed of a ${this.maxTotalGuestMemMib} MiB cap; this guest needs ${resources.memMib} MiB. Refusing to provision; retry after a running sandbox tears down.`
+      );
+    }
+    this.liveVms += 1;
+    this.committedGuestMemMib += resources.memMib;
+    let reservationHeld = true;
+    const releaseReservation = () => {
+      if (!reservationHeld) return;
+      reservationHeld = false;
+      this.liveVms -= 1;
+      this.committedGuestMemMib -= resources.memMib;
+    };
+    const mountPlan = buildMountPlan({ worktreeDir: spec.workdir, homeDir: spec.home });
+    let transport;
+    try {
+      const resolved = spec.network === "deny" ? /* @__PURE__ */ new Map() : await this.resolveHosts(allowedHostnames(spec));
+      const ruleset = compileEgressRuleset(
+        { network: spec.network, resolved },
+        { guestIp: PLACEHOLDER_GUEST_IP, nsName: placeholderNsName(spec.runId) }
+      );
+      transport = await this.launcher({ spec, mountPlan, ruleset });
+    } catch (err) {
+      releaseReservation();
+      throw err;
+    }
+    let torndown = false;
+    const sandbox = {
+      spec,
+      async exec(req) {
+        if (torndown) {
+          return { exitCode: 1, stdout: "", stderr: "sandbox has been torn down" };
+        }
+        return transport.exec({
+          command: req.command,
+          cwd: req.cwd ?? GUEST_WORKSPACE,
+          env: { ...spec.env, HOME: GUEST_HOME },
+          timeoutMs: req.timeoutMs
+        });
+      },
+      async teardown() {
+        if (torndown) return;
+        torndown = true;
+        try {
+          await transport.close();
+        } finally {
+          releaseReservation();
+        }
+      }
+    };
+    return sandbox;
+  }
+};
+
+// ../spikes/p0-sandbox/local-runtime.ts
+import { spawn as spawn7 } from "node:child_process";
+var SIGNAL_EXIT_CODE = 1;
+var TIMEOUT_EXIT_CODE2 = 124;
+function runChild(command, cwd, env, timeoutMs) {
+  return new Promise((resolve5) => {
+    const [executable, ...args] = command;
+    const child = spawn7(executable, args, {
+      cwd,
+      env,
+      // ONLY the injected env; process.env is intentionally NOT inherited.
+      stdio: ["ignore", "pipe", "pipe"]
+    });
+    let stdout = "";
+    let stderr = "";
+    let timedOut = false;
+    let settled = false;
+    let timer;
+    if (typeof timeoutMs === "number" && timeoutMs > 0) {
+      timer = setTimeout(() => {
+        timedOut = true;
+        child.kill("SIGKILL");
+      }, timeoutMs);
+    }
+    child.stdout?.on("data", (chunk) => {
+      stdout += chunk.toString("utf8");
+    });
+    child.stderr?.on("data", (chunk) => {
+      stderr += chunk.toString("utf8");
+    });
+    const finish = (result) => {
+      if (settled) return;
+      settled = true;
+      if (timer) clearTimeout(timer);
+      resolve5(result);
+    };
+    child.on("error", (err) => {
+      finish({
+        exitCode: SIGNAL_EXIT_CODE,
+        stdout,
+        stderr: stderr + String(err.message ?? err)
+      });
+    });
+    child.on("close", (code, signal) => {
+      let exitCode;
+      if (timedOut) {
+        exitCode = TIMEOUT_EXIT_CODE2;
+      } else if (code === null) {
+        exitCode = SIGNAL_EXIT_CODE;
+      } else {
+        exitCode = code;
+      }
+      void signal;
+      finish({
+        exitCode,
+        stdout,
+        stderr,
+        ...timedOut ? { timedOut: true } : {}
+      });
+    });
+  });
+}
+var LocalExecRuntime = class {
+  /**
+   * Informational identifier only. Per the SandboxRuntime contract this MUST
+   * NOT be parsed by callers to special-case behavior.
+   */
+  name = "local-exec";
+  async createSandbox(spec) {
+    const sandbox = {
+      spec,
+      async exec(req) {
+        const cwd = req.cwd ?? spec.workdir;
+        const env = { ...spec.env, HOME: spec.home };
+        const timeoutMs = req.timeoutMs ?? spec.resourceLimits?.timeoutMs;
+        return runChild(req.command, cwd, env, timeoutMs);
+      },
+      async teardown() {
+      }
+    };
+    return sandbox;
+  }
+};
+
+// ../spikes/p0-sandbox/runtime-select.ts
+var FIRECRACKER_BINARIES = ["firecracker", "jailer"];
+var KVM_DEVICE = "/dev/kvm";
+function defaultKvmAccessible() {
+  try {
+    accessSync2(KVM_DEVICE, fsConstants2.R_OK);
+    return true;
+  } catch {
+    return false;
+  }
+}
+function defaultHasBinary(name) {
+  const rawPath = process.env.PATH ?? process.env.Path ?? "";
+  if (rawPath.length === 0) return false;
+  const dirs = rawPath.split(pathDelimiter2).filter((d) => d.length > 0);
+  for (const dir of dirs) {
+    const full = pathJoin2(dir, name);
+    try {
+      const st = statSync3(full);
+      if (!st.isFile()) continue;
+      accessSync2(full, fsConstants2.X_OK);
+      return true;
+    } catch {
+    }
+  }
+  return false;
+}
+var REAL_AVAILABILITY_DEPS = {
+  platform: process.platform,
+  kvmAccessible: defaultKvmAccessible,
+  hasBinary: defaultHasBinary
+};
+function firecrackerAvailable(deps = {}) {
+  const { platform, kvmAccessible, hasBinary } = { ...REAL_AVAILABILITY_DEPS, ...deps };
+  if (platform !== "linux") return false;
+  if (!kvmAccessible()) return false;
+  return FIRECRACKER_BINARIES.every((bin) => hasBinary(bin));
+}
+function selectSandboxRuntime(opts = {}) {
+  const prefer = opts.prefer;
+  const fcAvailable = opts.firecrackerAvailable ?? false;
+  const dockerOk = opts.dockerAvailable ?? false;
+  if (prefer === "firecracker" && fcAvailable) {
+    return { backend: "firecracker", runtime: new FirecrackerSandboxRuntime() };
+  }
+  if (dockerOk) {
+    return { backend: "docker", runtime: new DockerSandboxRuntime() };
+  }
+  return { backend: "local", runtime: new LocalExecRuntime() };
+}
+function parseSandboxRuntimePreference(raw) {
+  return raw === "auto" || raw === "docker" || raw === "firecracker" || raw === "off" ? raw : void 0;
+}
+function resolveIsolatedSandboxRuntime(opts = {}) {
+  const prefer = opts.prefer ?? "auto";
+  if (prefer === "off") {
+    return {
+      available: false,
+      reason: "runtime preference 'off' \u2014 sandboxed verification disabled by configuration"
+    };
+  }
+  const fcOk = prefer === "firecracker" && (opts.firecrackerAvailable ?? (() => firecrackerAvailable()))();
+  const dockerOk = (opts.dockerAvailable ?? dockerAvailable)();
+  const selected = selectSandboxRuntime({
+    ...prefer === "firecracker" ? { prefer: "firecracker" } : {},
+    firecrackerAvailable: fcOk,
+    dockerAvailable: dockerOk
+  });
+  if (selected.backend === "local") {
+    return {
+      available: false,
+      reason: prefer === "firecracker" ? "firecracker unavailable on this host (requires linux + /dev/kvm + firecracker/jailer on PATH) and docker daemon not running" : "docker daemon not running"
+    };
+  }
+  return { available: true, backend: selected.backend, runtime: selected.runtime };
+}
+
 // ../spikes/p0-model-gateway/governed-agentic-run.ts
 var execFileAsync2 = promisify2(execFile2);
 var AGENTIC_RUN_POSTURE = "governed-unsandboxed";
@@ -5516,9 +8081,9 @@ async function runVerifyCheck(command, cwd, env, timeoutMs, signal) {
   }
 }
 function writeEphemeralVerifyPolicy(verifyCommand, runDir) {
-  const dir = join10(runDir, "verifier-policy");
+  const dir = join13(runDir, "verifier-policy");
   mkdirSync6(dir, { recursive: true });
-  const policyPath = join10(dir, "verify-policy.json");
+  const policyPath = join13(dir, "verify-policy.json");
   writeFileSync3(
     policyPath,
     JSON.stringify(
@@ -5536,6 +8101,10 @@ function writeEphemeralVerifyPolicy(verifyCommand, runDir) {
     "utf8"
   );
   return policyPath;
+}
+function formatPlanClaim(plan) {
+  const steps = plan.steps.map((s, i) => `${i + 1}. ${s.title}`).join("  ");
+  return `${plan.goal} \u2014 steps: ${steps}`;
 }
 function buildAgenticBundleReadme(info) {
   const independent = info.verifierIsolation === "independent-sandboxed";
@@ -5577,12 +8146,12 @@ async function runGovernedAgenticBuild(opts) {
     runId = opts.existingRun.runId;
     tracePath = opts.existingRun.tracePath;
     sink = opts.sink ?? opts.existingRun.sink;
-    runDir = join10(tracePath, "..", "..");
+    runDir = join13(tracePath, "..", "..");
   } else {
     const created = createRun(opts.runsBaseDir);
     runId = created.runId;
     runDir = created.dir;
-    tracePath = join10(runSubdirPath(runDir, "trace"), "trace.jsonl");
+    tracePath = join13(runSubdirPath(runDir, "trace"), "trace.jsonl");
     sink = opts.sink ?? createTraceWriter(tracePath);
   }
   let lastTraceHash;
@@ -5646,7 +8215,7 @@ async function runGovernedAgenticBuild(opts) {
     agentBackend: AGENTIC_AGENT_BACKEND
   };
   append("run_created", runCreated, "supervisor");
-  let agentic;
+  let agentic2;
   let buildError;
   try {
     transition("worktree_ready", "run directory + governed proxy ready");
@@ -5681,7 +8250,7 @@ async function runGovernedAgenticBuild(opts) {
       } else if (ev.type === "error") {
         buildError = ev.message;
       } else if (ev.type === "result") {
-        agentic = ev.result;
+        agentic2 = ev.result;
         const call = {
           model: AGENTIC_AGENT_BACKEND,
           ...ev.result.usage?.inputTokens !== void 0 ? { inputTokens: ev.result.usage.inputTokens } : {},
@@ -5694,8 +8263,8 @@ async function runGovernedAgenticBuild(opts) {
   } finally {
     await proxy.close();
   }
-  const codexOk = agentic !== void 0 && agentic.exitCode === 0 && !buildError;
-  transition(codexOk ? "completed" : "failed", codexOk ? "agentic build completed" : `agentic build failed: ${buildError ?? `codex exit ${agentic?.exitCode ?? "unknown"}`}`);
+  const codexOk = agentic2 !== void 0 && agentic2.exitCode === 0 && !buildError;
+  transition(codexOk ? "completed" : "failed", codexOk ? "agentic build completed" : `agentic build failed: ${buildError ?? `codex exit ${agentic2?.exitCode ?? "unknown"}`}`);
   let verdict;
   let verifyRan;
   let verifierIsolation;
@@ -5704,6 +8273,7 @@ async function runGovernedAgenticBuild(opts) {
   const autoEnabled = autoOpt !== false;
   const autoCfg = typeof autoOpt === "object" ? autoOpt : void 0;
   const resolvedVerifyCommand = opts.verifyCommand && opts.verifyCommand.length > 0 ? opts.verifyCommand : void 0;
+  let isolationUnavailableReason;
   let independentResult;
   if (opts.independentVerifier) {
     independentResult = await runIndependentVerification({
@@ -5718,9 +8288,28 @@ async function runGovernedAgenticBuild(opts) {
       ...opts.independentVerifier.runsBaseDir !== void 0 ? { runsBaseDir: opts.independentVerifier.runsBaseDir } : {},
       ...opts.onOperatorLog ? { onOperatorLog: opts.onOperatorLog } : {}
     });
-  } else if (autoEnabled && resolvedVerifyCommand) {
-    const dockerUp = (autoCfg?.runtimeAvailable ?? dockerAvailable)();
-    if (dockerUp) {
+  } else if (!autoEnabled) {
+    isolationUnavailableReason = "auto independent verifier disabled (autoIndependentVerifier:false)";
+  } else if (!resolvedVerifyCommand) {
+    isolationUnavailableReason = "no verify command resolved \u2014 nothing for the independent verifier to run";
+  } else {
+    let runtimeUp;
+    let selectedRuntime = autoCfg?.runtime;
+    if (autoCfg?.runtimeAvailable) {
+      runtimeUp = autoCfg.runtimeAvailable();
+      if (!runtimeUp) {
+        isolationUnavailableReason = "Docker unavailable (injected runtime probe reported down)";
+      }
+    } else {
+      const resolution = resolveIsolatedSandboxRuntime({ prefer: opts.verifierRuntime ?? "auto" });
+      runtimeUp = resolution.available;
+      if (resolution.available) {
+        selectedRuntime = selectedRuntime ?? resolution.runtime;
+      } else {
+        isolationUnavailableReason = resolution.reason;
+      }
+    }
+    if (runtimeUp) {
       const policyPath = writeEphemeralVerifyPolicy(resolvedVerifyCommand, runDir);
       independentResult = await runIndependentVerification({
         repoPath: opts.cwd,
@@ -5728,14 +8317,14 @@ async function runGovernedAgenticBuild(opts) {
         policyPath,
         tracePath,
         privateKey: verifierKey,
-        ...autoCfg?.runtime ? { runtime: autoCfg.runtime } : {},
+        ...selectedRuntime ? { runtime: selectedRuntime } : {},
         ...autoCfg?.runsBaseDir !== void 0 ? { runsBaseDir: autoCfg.runsBaseDir } : {},
         ...opts.onOperatorLog ? { onOperatorLog: opts.onOperatorLog } : {}
       });
     } else {
       (opts.onOperatorLog ?? (() => {
       }))(
-        "Docker unavailable \u2014 using the inline-unsandboxed check (degraded; not independently verified)"
+        `${isolationUnavailableReason ?? "no isolating runtime available"} \u2014 using the inline-unsandboxed check (degraded; not independently verified)`
       );
     }
   }
@@ -5751,12 +8340,16 @@ async function runGovernedAgenticBuild(opts) {
       {
         overallVerdict: verdict.overallVerdict,
         traceRootHash: verdict.traceRootHash,
-        checks: verdict.checks
+        checks: verdict.checks,
+        verifierIsolation,
+        verifyCommandSource,
+        ...verdict.signature ? { keyId: verdict.signature.keyId } : {}
       },
       "verifier"
     );
   } else {
     if (independentResult && !independentResult.ran) {
+      isolationUnavailableReason ??= "independent verifier could not run (error) \u2014 fell back to the inline-unsandboxed check";
       (opts.onOperatorLog ?? (() => {
       }))(
         "independent verifier could not run \u2014 falling back to the inline-unsandboxed check"
@@ -5781,7 +8374,7 @@ async function runGovernedAgenticBuild(opts) {
       );
       checks.push(check);
     } else {
-      const changed = agentic?.changedFiles.length ?? 0;
+      const changed = agentic2?.changedFiles.length ?? 0;
       checks.push({
         name: `${NOT_VERIFIED_CHECK_NAME} (${changed} file(s) changed)`,
         command: [],
@@ -5802,19 +8395,35 @@ async function runGovernedAgenticBuild(opts) {
     verdict = { ...core, signature };
     verifierIsolation = AGENTIC_VERIFIER_ISOLATION;
     verifyCommandSource = verifyRan ? opts.verifyCommandSource ?? "override" : "none";
-    append("verifier_verdict", { overallVerdict, traceRootHash, checks }, "verifier");
+    append(
+      "verifier_verdict",
+      {
+        overallVerdict,
+        traceRootHash,
+        checks,
+        verifierIsolation,
+        verifyCommandSource,
+        keyId: signature.keyId
+      },
+      "verifier"
+    );
   }
   emit({ type: "verdict", verdict });
   emit({ type: "run_closed", runId, ok: verdict.overallVerdict === "pass" });
   try {
-    if (existsSync5(tracePath)) {
+    if (existsSync6(tracePath)) {
       const verifierPublicKey = createPublicKey3(verifierKey);
       const actorClaim = {
         actor: AGENTIC_AGENT_BACKEND,
         intent: opts.prompt.slice(0, 200),
-        summary: agentic?.summary ?? "",
-        claimedChangedFiles: (agentic?.changedFiles ?? []).map((f) => f.path),
-        commandsRun: (agentic?.commands ?? []).map((c) => c.cmd)
+        // The APPROVED plan this build executed against (#8 plan mode — ADDITIVE;
+        // absent when no plan was approved). A claims-panel STRING (the panel's
+        // fieldBlock('Plan', c.plan) renders text): goal + numbered step titles,
+        // compact. Advisory provenance only — NEVER an assurance input.
+        ...opts.approvedPlan ? { plan: formatPlanClaim(opts.approvedPlan) } : {},
+        summary: agentic2?.summary ?? "",
+        claimedChangedFiles: (agentic2?.changedFiles ?? []).map((f) => f.path),
+        commandsRun: (agentic2?.commands ?? []).map((c) => c.cmd)
       };
       const readme = buildAgenticBundleReadme({
         runId,
@@ -5824,7 +8433,7 @@ async function runGovernedAgenticBuild(opts) {
         keyId: verdict.signature?.keyId ?? "(unsigned)",
         verifierIsolation,
         verifyRan,
-        hasDiff: typeof agentic?.diff === "string" && agentic.diff.trim().length > 0
+        hasDiff: typeof agentic2?.diff === "string" && agentic2.diff.trim().length > 0
       });
       writeVerifiedBundle({
         outDir: runDir,
@@ -5833,7 +8442,7 @@ async function runGovernedAgenticBuild(opts) {
         publicKey: verifierPublicKey,
         actorClaim,
         readme,
-        ...agentic?.diff && agentic.diff.trim().length > 0 ? { diff: agentic.diff } : {}
+        ...agentic2?.diff && agentic2.diff.trim().length > 0 ? { diff: agentic2.diff } : {}
       });
     }
   } catch (err) {
@@ -5848,7 +8457,7 @@ async function runGovernedAgenticBuild(opts) {
     tracePath,
     posture: AGENTIC_RUN_POSTURE,
     credentialPosture,
-    ...agentic ? { agentic } : {},
+    ...agentic2 ? { agentic: agentic2 } : {},
     verdict,
     verifyRan,
     // HONEST ISOLATION: 'independent-sandboxed' iff the separate-trust-domain product
@@ -5857,21 +8466,32 @@ async function runGovernedAgenticBuild(opts) {
     // The verify command's provenance: for the independent path, the REVIEWED policy
     // ('override' when targets ran, 'none' when Policy.verify was empty); for the inline
     // fallback, the stated source when a real check ran, or 'none' when no check ran.
-    verifyCommandSource
+    verifyCommandSource,
+    // STRUCTURED honest-degrade reason (Track A / Slice 1): WHY independent
+    // verification did not engage. Present ⇒ isolation is inline/degraded; an
+    // independent-sandboxed result NEVER carries one (belt-and-braces guard here).
+    ...verifierIsolation === "inline-unsandboxed" && isolationUnavailableReason ? { isolationUnavailableReason } : {}
   };
 }
 
+// ../spikes/p0-model-gateway/governed-review-run.ts
+import { execFile as execFile3 } from "node:child_process";
+import { promisify as promisify3 } from "node:util";
+import { join as join15 } from "node:path";
+import { existsSync as existsSync8, mkdirSync as mkdirSync7, rmSync as rmSync4 } from "node:fs";
+import { createHash as createHash7, createPublicKey as createPublicKey4 } from "node:crypto";
+
 // ../spikes/p0-model-gateway/verify-command.ts
-import { existsSync as existsSync6, readFileSync as readFileSync5, readdirSync as readdirSync2 } from "node:fs";
-import { join as join11 } from "node:path";
+import { existsSync as existsSync7, readFileSync as readFileSync7, readdirSync as readdirSync3 } from "node:fs";
+import { join as join14 } from "node:path";
 import { execFileSync as execFileSync2 } from "node:child_process";
 var VERIFY_OVERRIDE_PATH = ".glyphstudio/verify.json";
 var defaultVerifyResolverDeps = {
-  fileExists: (p) => existsSync6(p),
-  readFile: (p) => readFileSync5(p, "utf8"),
+  fileExists: (p) => existsSync7(p),
+  readFile: (p) => readFileSync7(p, "utf8"),
   listDir: (dir) => {
     try {
-      return readdirSync2(dir);
+      return readdirSync3(dir);
     } catch {
       return [];
     }
@@ -5899,7 +8519,7 @@ function asStringArray(v) {
   return void 0;
 }
 function readOverride(cwd, deps) {
-  const path6 = join11(cwd, VERIFY_OVERRIDE_PATH);
+  const path6 = join14(cwd, VERIFY_OVERRIDE_PATH);
   if (!deps.fileExists(path6)) return void 0;
   let raw;
   try {
@@ -5956,7 +8576,7 @@ function resolveVerifyCommand(cwd, deps = defaultVerifyResolverDeps) {
     return { command: override, label: override.join(" "), source: "override" };
   }
   const entries = deps.listDir(cwd);
-  const has = (name) => deps.fileExists(join11(cwd, name));
+  const has = (name) => deps.fileExists(join14(cwd, name));
   if (has("Package.swift")) {
     return { command: ["swift", "test"], label: "swift test", source: "swiftpm" };
   }
@@ -5984,7 +8604,7 @@ function resolveVerifyCommand(cwd, deps = defaultVerifyResolverDeps) {
   }
   if (has("package.json")) {
     try {
-      const pkg = JSON.parse(deps.readFile(join11(cwd, "package.json")));
+      const pkg = JSON.parse(deps.readFile(join14(cwd, "package.json")));
       if (pkg.scripts && typeof pkg.scripts.test === "string" && pkg.scripts.test.trim()) {
         return { command: ["npm", "test"], label: "npm test", source: "npm" };
       }
@@ -6000,8 +8620,1023 @@ function resolveVerifyCommand(cwd, deps = defaultVerifyResolverDeps) {
   };
 }
 
+// ../spikes/p0-model-gateway/review-findings.ts
+var MAX_REVIEW_FINDINGS = 25;
+var MAX_FINDING_TITLE_CHARS = 120;
+var MAX_FINDING_DETAIL_CHARS = 600;
+var MAX_FINDING_FILE_CHARS = 260;
+function buildFindingsPrompt(redactedDiff, opts) {
+  const scopeLine = opts.scope === "working-tree" ? "The unified diff below is the WORKING TREE vs HEAD (staged + unstaged changes)." : `The unified diff below is a BRANCH review: merge-base(${opts.baseRef ?? "the default branch"})..HEAD.`;
+  const truncatedLine = opts.truncated ? "NOTE: the diff was TRUNCATED to a byte cap \u2014 review only what is shown; do not guess about elided content." : "";
+  return [
+    "You are a precise code reviewer. Review the proposed change below and report concrete findings.",
+    "",
+    scopeLine,
+    ...truncatedLine ? [truncatedLine] : [],
+    "",
+    "OUTPUT CONTRACT \u2014 follow it exactly:",
+    "- Reply with EXACTLY ONE fenced code block, fenced as ```json, and nothing else of significance.",
+    "- The block must contain a single JSON ARRAY of finding objects.",
+    "- Each finding object has exactly these fields:",
+    '    "file"      (string, REQUIRED) \u2014 the workspace-relative path exactly as it appears in the diff (no leading ./, never absolute).',
+    '    "startLine" (number, optional) \u2014 the 1-based line in the NEW file where the finding starts.',
+    '    "severity"  (string, REQUIRED) \u2014 one of "info" | "warn" | "high".',
+    '    "title"     (string, REQUIRED) \u2014 a short summary.',
+    '    "detail"    (string, REQUIRED) \u2014 the explanation, grounded in the diff.',
+    "",
+    "SEVERITY DEFINITIONS:",
+    '- "info": a minor observation worth knowing (style-adjacent, naming, small clarity issue).',
+    '- "warn": a likely bug, risk, or correctness concern that deserves a fix or a second look.',
+    '- "high": a serious defect or security problem with concrete supporting evidence in the diff.',
+    "",
+    "HARD CAPS (enforced by the parser \u2014 output beyond them is discarded):",
+    `- At most ${MAX_REVIEW_FINDINGS} findings.`,
+    `- "title" at most ${MAX_FINDING_TITLE_CHARS} characters.`,
+    `- "detail" at most ${MAX_FINDING_DETAIL_CHARS} characters.`,
+    "",
+    "GROUNDING RULES:",
+    "- Report ONLY what the diff itself evidences. Report nothing speculative.",
+    "- Do not report findings about code you cannot see.",
+    "- An EMPTY ARRAY [] is a valid (and good) answer when the change is clean.",
+    "",
+    "THE DIFF UNDER REVIEW:",
+    "```diff",
+    redactedDiff,
+    "```"
+  ].join("\n");
+}
+function clampText(s, max) {
+  return s.length <= max ? s : `${s.slice(0, max - 1)}\u2026`;
+}
+function looksAbsolute(p) {
+  return p.startsWith("/") || /^[A-Za-z]:[\\/]/.test(p) || p.startsWith("\\\\");
+}
+function hasTraversal(p) {
+  return p.split(/[\\/]/).some((seg) => seg === "..");
+}
+function validateFinding(candidate) {
+  if (typeof candidate !== "object" || candidate === null || Array.isArray(candidate)) {
+    return void 0;
+  }
+  const c = candidate;
+  if (typeof c.file !== "string") return void 0;
+  let file = c.file.trim();
+  while (file.startsWith("./")) file = file.slice(2);
+  if (file.length === 0 || file.length > MAX_FINDING_FILE_CHARS || looksAbsolute(file) || hasTraversal(file)) {
+    return void 0;
+  }
+  const severity = c.severity;
+  if (severity !== "info" && severity !== "warn" && severity !== "high") {
+    return void 0;
+  }
+  if (typeof c.title !== "string") return void 0;
+  const title = clampText(c.title.trim(), MAX_FINDING_TITLE_CHARS);
+  if (title.length === 0) return void 0;
+  if (typeof c.detail !== "string") return void 0;
+  const detail = clampText(c.detail.trim(), MAX_FINDING_DETAIL_CHARS);
+  let startLine;
+  if (typeof c.startLine === "number" && Number.isFinite(c.startLine) && c.startLine >= 1) {
+    startLine = Math.floor(c.startLine);
+  }
+  return {
+    file,
+    ...startLine !== void 0 ? { startLine } : {},
+    severity,
+    title,
+    detail
+  };
+}
+function parseFindingsResponse(text) {
+  if (typeof text !== "string" || text.trim().length === 0) {
+    return { parseStatus: "parse-failed", reason: "empty model response" };
+  }
+  const fenceRe = /```(?:json)?[ \t]*\r?\n([\s\S]*?)```/g;
+  const blocks = [];
+  let m;
+  while ((m = fenceRe.exec(text)) !== null) blocks.push(m[1]);
+  if (blocks.length === 0) {
+    return { parseStatus: "parse-failed", reason: "no fenced JSON block found in the model response" };
+  }
+  if (blocks.length > 1) {
+    return {
+      parseStatus: "parse-failed",
+      reason: `expected exactly one fenced JSON block, found ${blocks.length}`
+    };
+  }
+  let parsed;
+  try {
+    parsed = JSON.parse(blocks[0]);
+  } catch (err) {
+    return {
+      parseStatus: "parse-failed",
+      reason: `fenced block is not valid JSON: ${err instanceof Error ? err.message.slice(0, 120) : "parse error"}`
+    };
+  }
+  let candidates;
+  if (Array.isArray(parsed)) {
+    candidates = parsed;
+  } else if (typeof parsed === "object" && parsed !== null && Array.isArray(parsed.findings)) {
+    candidates = parsed.findings;
+  } else {
+    return {
+      parseStatus: "parse-failed",
+      reason: 'fenced JSON is neither an array of findings nor { "findings": [...] }'
+    };
+  }
+  if (candidates.length === 0) {
+    return { parseStatus: "ok", findings: [] };
+  }
+  const bounded = candidates.slice(0, MAX_REVIEW_FINDINGS);
+  const findings = [];
+  for (const candidate of bounded) {
+    const valid = validateFinding(candidate);
+    if (valid) findings.push(valid);
+  }
+  if (findings.length === 0) {
+    return {
+      parseStatus: "parse-failed",
+      reason: `all ${bounded.length} finding(s) failed schema validation`
+    };
+  }
+  return { parseStatus: "ok", findings };
+}
+function redactObviousSecretsInDiff(diff) {
+  if (typeof diff !== "string" || diff.length === 0) return "";
+  const lines = diff.split("\n");
+  const out = [];
+  for (const line of lines) {
+    if (line.startsWith("+") && !line.startsWith("+++")) {
+      const body = line.slice(1);
+      let redacted = body;
+      redacted = redacted.replace(
+        /^(\s*authorization\s*[:=]\s*(?:bearer|basic|token)\s+).+$/i,
+        (_m, pre) => `${pre}***REDACTED***`
+      );
+      if (redacted === body) {
+        redacted = redacted.replace(
+          /^(\s*['"]?[A-Za-z0-9_.-]*?)(pass(?:word|wd)?|secret|token|api[_-]?key|access[_-]?key|client[_-]?secret|private[_-]?key|auth(?:orization)?)([A-Za-z0-9_.-]*['"]?\s*[:=]\s*)(.+)$/i,
+          (_m, pre, mid, post) => `${pre}${mid}${post}***REDACTED***`
+        );
+      }
+      if (redacted === body) {
+        redacted = redacted.replace(
+          /\b([A-Za-z0-9_-]{32,}|AKIA[0-9A-Z]{12,}|sk-[A-Za-z0-9]{16,}|gh[pousr]_[A-Za-z0-9]{20,})\b/g,
+          "***REDACTED***"
+        );
+      }
+      out.push("+" + redacted);
+    } else {
+      out.push(line);
+    }
+  }
+  return out.join("\n");
+}
+
+// ../spikes/p0-model-gateway/governed-review-run.ts
+var execFileAsync3 = promisify3(execFile3);
+var REVIEW_RUN_POSTURE = "governed-unsandboxed";
+var REVIEW_ACTOR = "codex";
+var INJECTED_FINDINGS_BACKEND = "injected-findings-backend";
+var REVIEW_DIFF_BYTE_CAP = 256 * 1024;
+async function git2(cwd, args) {
+  const { stdout } = await execFileAsync3("git", ["-C", cwd, ...args], {
+    maxBuffer: 64 * 1024 * 1024
+  });
+  return stdout;
+}
+async function detectDefaultBaseRef(cwd) {
+  try {
+    const ref = (await git2(cwd, ["symbolic-ref", "--quiet", "--short", "refs/remotes/origin/HEAD"])).trim();
+    if (ref.length > 0) return ref;
+  } catch {
+  }
+  for (const candidate of ["main", "master"]) {
+    try {
+      await git2(cwd, ["rev-parse", "--verify", "--quiet", `refs/heads/${candidate}`]);
+      return candidate;
+    } catch {
+    }
+  }
+  throw new Error(
+    "change review: no baseRef was provided and no default branch could be detected (no origin/HEAD, no local 'main'/'master'). Pass an explicit baseRef."
+  );
+}
+function capUtf8Bytes(s, cap) {
+  const buf = Buffer.from(s, "utf8");
+  if (buf.byteLength <= cap) return { text: s, truncated: false };
+  let end = Math.max(0, cap);
+  while (end > 0 && (buf[end - 1] & 192) === 128) end -= 1;
+  if (end > 0 && (buf[end - 1] & 192) === 192) end -= 1;
+  return { text: buf.subarray(0, end).toString("utf8"), truncated: true };
+}
+async function captureReviewDiff(cwd, scope, baseRef, byteCap) {
+  let raw;
+  let resolvedBase;
+  if (scope === "working-tree") {
+    raw = await git2(cwd, ["diff", "HEAD"]);
+  } else {
+    resolvedBase = baseRef ?? await detectDefaultBaseRef(cwd);
+    const mergeBase = (await git2(cwd, ["merge-base", resolvedBase, "HEAD"])).trim();
+    raw = await git2(cwd, ["diff", mergeBase, "HEAD"]);
+  }
+  const redacted = redactObviousSecretsInDiff(raw);
+  const { text, truncated } = capUtf8Bytes(redacted, byteCap);
+  const exactBytes = Buffer.from(text, "utf8");
+  return {
+    diff: text,
+    sha256: createHash7("sha256").update(exactBytes).digest("hex"),
+    bytes: exactBytes.byteLength,
+    truncated,
+    ...resolvedBase !== void 0 ? { baseRef: resolvedBase } : {}
+  };
+}
+async function snapshotHeadTree(cwd, runDir) {
+  const dir = join15(runDir, "review-head-snapshot");
+  mkdirSync7(dir, { recursive: true });
+  const tarPath = join15(runDir, "review-head-snapshot.tar");
+  await execFileAsync3("git", ["-C", cwd, "archive", "--format=tar", "-o", tarPath, "HEAD"]);
+  await execFileAsync3("tar", ["-xf", tarPath, "-C", dir]);
+  rmSync4(tarPath, { force: true });
+  return dir;
+}
+function shortReason(err) {
+  const msg = err instanceof Error ? err.message : String(err);
+  return msg.replace(/\s+/g, " ").trim().slice(0, 300);
+}
+async function codexFindingsTurn(prompt, cwd, codexPath, env, timeoutMs, signal, onOperatorLog) {
+  const backend = new CodexChatBackend({
+    codexPath,
+    ...timeoutMs !== void 0 ? { timeoutMs } : {},
+    ...onOperatorLog ? { onOperatorLog } : {}
+  });
+  for await (const ev of backend.chatTurn(
+    { messages: [{ role: "user", content: prompt }], cwd },
+    { env, ...signal ? { signal } : {} }
+  )) {
+    if (ev.type === "done") return { text: ev.text, ...ev.usage ? { usage: ev.usage } : {} };
+    if (ev.type === "error") throw new Error(ev.message);
+  }
+  throw new Error("codex findings turn ended without a terminal event");
+}
+function buildReviewBundleReadme(info) {
+  const independent = info.verifierIsolation === "independent-sandboxed";
+  const isolationNote = independent ? "(independent sandboxed product verifier \u2014 may reach assurance:full)." : "(inline check \u2014 a real but NOT independent signal; it can NEVER reach assurance:full).";
+  return [
+    "# GlyphStudio verified-evidence bundle (governed CHANGE REVIEW)",
+    "",
+    "- review context: this run REVIEWED a proposed state \u2014 it did not build/edit anything.",
+    `- run id: ${info.runId}`,
+    `- scope: ${info.scope}${info.baseRef ? ` (base ref: ${info.baseRef})` : ""}`,
+    `- reviewed diff sha256: ${info.diffSha256} (truncated: ${info.truncated ? "yes" : "no"})`,
+    `- advisory findings: parseStatus=${info.parseStatus}, ${info.findingsCount} finding(s) \u2014 OPINIONS only; the trace \`review_findings\` event is committed to by the signed root and NEVER carries or influences assurance.`,
+    `- overall verdict: ${info.overallVerdict}`,
+    `- verifier isolation: ${info.verifierIsolation} ${isolationNote}`,
+    `- real build/test check ran: ${info.verifyRan ? "yes" : "no"}`,
+    `- trace root hash: ${info.traceRootHash}`,
+    `- signing key id: ${info.keyId}`,
+    "",
+    "## Files",
+    "- `trace.jsonl` \u2014 the run's append-only, hash-chained trace (review_requested \u2192 review_findings \u2192 verifier_verdict).",
+    "- `verdict.json` \u2014 the SIGNED VerifierVerdict (authoritative outcome).",
+    "- `verifier-public-key.pem` \u2014 the verifier's SPKI public key (resolve out-of-band).",
+    "- `actor-claims.json` \u2014 the advisory actor's claim metadata (NOT authoritative).",
+    "- `diff.patch` \u2014 the EXACT (redacted, possibly truncated) diff bytes the review ran over (sha256 above).",
+    "- `README.md` \u2014 this file.",
+    ""
+  ].join("\n");
+}
+async function runGovernedChangeReview(opts) {
+  const now = opts.now ?? Date.now;
+  const emit = opts.emit ?? (() => {
+  });
+  const endpoints = opts.modelEndpoints ?? DEFAULT_MODEL_ENDPOINTS;
+  const verifierKey = opts.verifierPrivateKey ?? generateVerifierKeypair().privateKey;
+  const log = opts.onOperatorLog ?? (() => {
+  });
+  let runId;
+  let runDir;
+  let tracePath;
+  let sink;
+  if (opts.existingRun) {
+    runId = opts.existingRun.runId;
+    tracePath = opts.existingRun.tracePath;
+    sink = opts.sink ?? opts.existingRun.sink;
+    runDir = join15(tracePath, "..", "..");
+  } else {
+    const created = createRun(opts.runsBaseDir);
+    runId = created.runId;
+    runDir = created.dir;
+    tracePath = join15(runSubdirPath(runDir, "trace"), "trace.jsonl");
+    sink = opts.sink ?? createTraceWriter(tracePath);
+  }
+  let lastTraceHash;
+  if (opts.existingRun) {
+    try {
+      const prior = readTrace(tracePath);
+      if (prior.length > 0) lastTraceHash = prior[prior.length - 1].hash;
+    } catch {
+    }
+  }
+  const append = (type, payload, source) => {
+    const written = sink.append({
+      v: TRACE_EVENT_VERSION,
+      runId,
+      seq: 0,
+      // the writer is authoritative for seq
+      ts: now(),
+      type,
+      payload,
+      ...source ? { source } : {}
+    });
+    if (written && typeof written.hash === "string") {
+      lastTraceHash = written.hash;
+    }
+  };
+  let state = "created";
+  const transition = (to, reason) => {
+    const from = state;
+    state = to;
+    emit({ type: "state", from, to, reason });
+    const payload = {
+      from,
+      to,
+      reason
+    };
+    append("run_state_changed", payload, "policy");
+  };
+  const captured = await captureReviewDiff(
+    opts.cwd,
+    opts.scope,
+    opts.scope === "branch" ? opts.baseRef : void 0,
+    opts.diffByteCap ?? REVIEW_DIFF_BYTE_CAP
+  );
+  const allow = [
+    ...endpoints.map((e) => `${e.host}:${e.port ?? 443}`),
+    ...agentSupportAllowEntries("codex")
+  ];
+  const proxy = await startGovernedTerminalProxy({
+    allow,
+    sink,
+    runId,
+    modelEndpoints: endpoints,
+    bindHost: opts.bindHost ?? "127.0.0.1",
+    observeAll: true,
+    ...opts.denyDirectIp !== void 0 ? { denyDirectIp: opts.denyDirectIp } : {}
+  });
+  const { env: governedEnv, posture: credentialPosture } = buildGovernedEnvResult({
+    proxyUrl: proxy.url
+  });
+  emit({ type: "run_created", runId, runDir, proxyUrl: proxy.url, posture: REVIEW_RUN_POSTURE });
+  const intent = `change review (${opts.scope}${captured.baseRef ? ` vs ${captured.baseRef}` : ""})`;
+  const runCreated = {
+    runId,
+    runDir,
+    intent,
+    workflowType: "review",
+    agentBackend: opts.generateFindings ? INJECTED_FINDINGS_BACKEND : "codex-cli"
+  };
+  append("run_created", runCreated, "supervisor");
+  const reviewRequested = {
+    scope: opts.scope,
+    ...captured.baseRef !== void 0 ? { baseRef: captured.baseRef } : {},
+    diffSha256: captured.sha256,
+    diffBytes: captured.bytes,
+    truncated: captured.truncated
+  };
+  append("review_requested", reviewRequested, "supervisor");
+  let findingsPayload;
+  try {
+    transition("worktree_ready", "review diff captured + governed proxy ready");
+    transition("sandbox_ready", "governed env built (egress brokered, ambient secrets stripped)");
+    transition("executing", "advisory findings turn started");
+    if (captured.bytes === 0) {
+      findingsPayload = {
+        actor: REVIEW_ACTOR,
+        advisory: true,
+        parseStatus: "unavailable",
+        reason: "empty diff \u2014 nothing to review; the advisory model was not consulted",
+        findings: []
+      };
+    } else {
+      const prompt = buildFindingsPrompt(captured.diff, {
+        scope: opts.scope,
+        ...captured.baseRef !== void 0 ? { baseRef: captured.baseRef } : {},
+        truncated: captured.truncated
+      });
+      try {
+        let responseText;
+        let usage;
+        if (opts.generateFindings) {
+          responseText = await opts.generateFindings(prompt);
+        } else if (opts.codexPath) {
+          const turn = await codexFindingsTurn(
+            prompt,
+            opts.cwd,
+            opts.codexPath,
+            governedEnv,
+            opts.timeoutMs,
+            opts.signal,
+            opts.onOperatorLog
+          );
+          responseText = turn.text;
+          usage = turn.usage;
+        } else {
+          throw new Error(
+            "no findings backend available: neither generateFindings nor codexPath was provided"
+          );
+        }
+        const call = {
+          model: opts.generateFindings ? INJECTED_FINDINGS_BACKEND : "codex-cli",
+          ...usage?.inputTokens !== void 0 ? { inputTokens: usage.inputTokens } : {},
+          ...usage?.outputTokens !== void 0 ? { outputTokens: usage.outputTokens } : {},
+          provenanceLabel: "tool-output"
+        };
+        append("model_call", call);
+        const parsed = parseFindingsResponse(responseText);
+        findingsPayload = parsed.parseStatus === "ok" ? {
+          actor: REVIEW_ACTOR,
+          advisory: true,
+          parseStatus: "ok",
+          findings: parsed.findings
+        } : {
+          actor: REVIEW_ACTOR,
+          advisory: true,
+          parseStatus: "parse-failed",
+          reason: parsed.reason,
+          findings: []
+        };
+      } catch (err) {
+        const reason = shortReason(err);
+        log(`review findings turn unavailable: ${reason}`);
+        findingsPayload = {
+          actor: REVIEW_ACTOR,
+          advisory: true,
+          parseStatus: "unavailable",
+          reason,
+          findings: []
+        };
+      }
+    }
+  } finally {
+    await proxy.close();
+  }
+  append("review_findings", findingsPayload, "supervisor");
+  emit({ type: "findings", payload: findingsPayload });
+  transition(
+    "completed",
+    `advisory findings turn finished (parseStatus: ${findingsPayload.parseStatus})`
+  );
+  let resolvedVerifyCommand;
+  let resolvedSource;
+  if (opts.verifyCommand && opts.verifyCommand.length > 0) {
+    resolvedVerifyCommand = opts.verifyCommand;
+    resolvedSource = opts.verifyCommandSource ?? "override";
+  } else {
+    const resolved = resolveVerifyCommand(
+      opts.cwd,
+      opts.verifyResolverDeps ?? defaultVerifyResolverDeps
+    );
+    resolvedVerifyCommand = resolved.command && resolved.command.length > 0 ? resolved.command : void 0;
+    resolvedSource = resolved.source;
+    if (!resolvedVerifyCommand && resolved.note) log(`verify-command resolution: ${resolved.note}`);
+  }
+  let verifySourceTree = opts.cwd;
+  if (opts.scope === "branch") {
+    try {
+      verifySourceTree = await snapshotHeadTree(opts.cwd, runDir);
+    } catch (err) {
+      log(`branch HEAD snapshot failed: ${shortReason(err)}`);
+      verifySourceTree = "";
+    }
+  }
+  const autoOpt = opts.autoIndependentVerifier;
+  const autoEnabled = autoOpt !== false;
+  const autoCfg = typeof autoOpt === "object" ? autoOpt : void 0;
+  let isolationUnavailableReason;
+  let independentResult;
+  if (!autoEnabled) {
+    isolationUnavailableReason = "auto independent verifier disabled (autoIndependentVerifier:false)";
+  } else if (!resolvedVerifyCommand) {
+    isolationUnavailableReason = "no verify command resolved \u2014 nothing for the independent verifier to run";
+  } else if (opts.scope === "branch" && verifySourceTree === "") {
+    isolationUnavailableReason = "branch HEAD snapshot could not be created \u2014 independent verification skipped";
+  } else {
+    let runtimeUp;
+    let selectedRuntime = autoCfg?.runtime;
+    if (autoCfg?.runtimeAvailable) {
+      runtimeUp = autoCfg.runtimeAvailable();
+      if (!runtimeUp) {
+        isolationUnavailableReason = "Docker unavailable (injected runtime probe reported down)";
+      }
+    } else {
+      const resolution = resolveIsolatedSandboxRuntime({ prefer: opts.verifierRuntime ?? "auto" });
+      runtimeUp = resolution.available;
+      if (resolution.available) {
+        selectedRuntime = selectedRuntime ?? resolution.runtime;
+      } else {
+        isolationUnavailableReason = resolution.reason;
+      }
+    }
+    if (runtimeUp) {
+      const policyPath = writeEphemeralVerifyPolicy(resolvedVerifyCommand, runDir);
+      independentResult = await runIndependentVerification({
+        repoPath: opts.cwd,
+        sourceWorktree: verifySourceTree,
+        policyPath,
+        tracePath,
+        privateKey: verifierKey,
+        ...selectedRuntime ? { runtime: selectedRuntime } : {},
+        ...autoCfg?.runsBaseDir !== void 0 ? { runsBaseDir: autoCfg.runsBaseDir } : {},
+        ...opts.onOperatorLog ? { onOperatorLog: opts.onOperatorLog } : {}
+      });
+    } else {
+      log(
+        `${isolationUnavailableReason ?? "no isolating runtime available"} \u2014 using the inline-unsandboxed check (degraded; not independently verified)`
+      );
+    }
+  }
+  let verdict;
+  let verifyRan;
+  let verifierIsolation;
+  let verifyCommandSource;
+  if (independentResult && independentResult.ran) {
+    verdict = independentResult.verdict;
+    verifyRan = independentResult.verdict.checks.some(
+      (c) => c.status === "pass" || c.status === "fail"
+    );
+    verifierIsolation = "independent-sandboxed";
+    verifyCommandSource = verifyRan ? resolvedSource : "none";
+    append(
+      "verifier_verdict",
+      {
+        overallVerdict: verdict.overallVerdict,
+        traceRootHash: verdict.traceRootHash,
+        checks: verdict.checks,
+        verifierIsolation,
+        verifyCommandSource,
+        ...verdict.signature ? { keyId: verdict.signature.keyId } : {}
+      },
+      "verifier"
+    );
+  } else {
+    if (independentResult && !independentResult.ran) {
+      isolationUnavailableReason ??= "independent verifier could not run (error) \u2014 fell back to the inline-unsandboxed check";
+      log("independent verifier could not run \u2014 falling back to the inline-unsandboxed check");
+    }
+    const checks = [];
+    verifyRan = !!resolvedVerifyCommand;
+    if (resolvedVerifyCommand) {
+      const inlineCwd = opts.scope === "branch" && verifySourceTree !== "" ? verifySourceTree : opts.cwd;
+      const check = await runVerifyCheck(
+        resolvedVerifyCommand,
+        inlineCwd,
+        governedEnv,
+        opts.timeoutMs ?? VERIFY_DEFAULT_TIMEOUT_MS,
+        opts.signal
+      );
+      checks.push(check);
+    } else {
+      checks.push({
+        name: `${NOT_VERIFIED_CHECK_NAME} (change review)`,
+        command: [],
+        status: "skipped"
+      });
+    }
+    const anyFail = checks.some((c) => c.status === "fail");
+    const anyError = checks.some((c) => c.status === "error");
+    const overallVerdict = anyError ? "error" : anyFail ? "fail" : verifyRan ? "pass" : "fail";
+    let traceRootHash = lastTraceHash ?? GENESIS_HASH;
+    try {
+      const events = readTrace(tracePath);
+      if (events.length > 0) traceRootHash = computeTraceRoot(events);
+    } catch {
+    }
+    const core = { checks, overallVerdict, traceRootHash };
+    const signature = signVerdict(core, verifierKey);
+    verdict = { ...core, signature };
+    verifierIsolation = "inline-unsandboxed";
+    verifyCommandSource = verifyRan ? resolvedSource : "none";
+    append(
+      "verifier_verdict",
+      {
+        overallVerdict,
+        traceRootHash,
+        checks,
+        verifierIsolation,
+        verifyCommandSource,
+        keyId: signature.keyId
+      },
+      "verifier"
+    );
+  }
+  emit({ type: "verdict", verdict });
+  try {
+    if (existsSync8(tracePath)) {
+      const verifierPublicKey = createPublicKey4(verifierKey);
+      const actorClaim = {
+        actor: REVIEW_ACTOR,
+        intent,
+        scope: opts.scope,
+        ...captured.baseRef !== void 0 ? { baseRef: captured.baseRef } : {},
+        diffSha256: captured.sha256,
+        truncated: captured.truncated,
+        parseStatus: findingsPayload.parseStatus,
+        findingsCount: findingsPayload.findings.length
+      };
+      const readme = buildReviewBundleReadme({
+        runId,
+        scope: opts.scope,
+        ...captured.baseRef !== void 0 ? { baseRef: captured.baseRef } : {},
+        diffSha256: captured.sha256,
+        truncated: captured.truncated,
+        parseStatus: findingsPayload.parseStatus,
+        findingsCount: findingsPayload.findings.length,
+        overallVerdict: verdict.overallVerdict,
+        traceRootHash: verdict.traceRootHash,
+        keyId: verdict.signature?.keyId ?? "(unsigned)",
+        verifierIsolation,
+        verifyRan
+      });
+      writeVerifiedBundle({
+        outDir: runDir,
+        tracePath,
+        verdict,
+        publicKey: verifierPublicKey,
+        actorClaim,
+        readme,
+        ...captured.diff.trim().length > 0 ? { diff: captured.diff } : {}
+      });
+    }
+  } catch (err) {
+    log(`bundle persist skipped (best-effort): ${shortReason(err)}`);
+  }
+  const assurance = computeBuildAssurance({
+    verifierIsolation,
+    verifyRan,
+    overall: verdict.overallVerdict,
+    ...verdict.signature ? { signature: verdict.signature } : {}
+  });
+  const reviewVerdict = {
+    overall: verdict.overallVerdict,
+    assurance,
+    verifierIsolation,
+    verifyCommandSource,
+    verifyRan,
+    ...verifierIsolation === "inline-unsandboxed" && isolationUnavailableReason ? { isolationUnavailableReason } : {},
+    checks: verdict.checks.map((c) => ({ name: c.name, status: c.status })),
+    traceRootHash: verdict.traceRootHash,
+    ...verdict.signature ? { signature: verdict.signature } : {}
+  };
+  const review = {
+    runId,
+    scope: opts.scope,
+    ...captured.baseRef !== void 0 ? { baseRef: captured.baseRef } : {},
+    diffSha256: captured.sha256,
+    findings: {
+      parseStatus: findingsPayload.parseStatus,
+      ...findingsPayload.reason !== void 0 ? { reason: findingsPayload.reason } : {},
+      advisory: true,
+      items: findingsPayload.findings
+    },
+    verdict: reviewVerdict
+  };
+  const gate = assertChangeReviewWellFormed(review);
+  if (gate.ok === false) {
+    throw new Error(`runGovernedChangeReview produced a malformed ChangeReview: ${gate.problems.join(", ")}`);
+  }
+  emit({ type: "result", review });
+  emit({ type: "run_closed", runId, ok: verdict.overallVerdict === "pass" });
+  return {
+    review,
+    runId,
+    runDir,
+    tracePath,
+    posture: REVIEW_RUN_POSTURE,
+    credentialPosture,
+    verdict,
+    verifyRan,
+    verifierIsolation,
+    verifyCommandSource,
+    ...verifierIsolation === "inline-unsandboxed" && isolationUnavailableReason ? { isolationUnavailableReason } : {},
+    findings: findingsPayload,
+    truncated: captured.truncated,
+    diffBytes: captured.bytes
+  };
+}
+
+// ../spikes/p0-model-gateway/governed-plan-run.ts
+import { join as join16 } from "node:path";
+
+// ../spikes/p0-model-gateway/plan-generation.ts
+function buildPlanPrompt(userPrompt) {
+  return [
+    "You are a precise senior engineer PLANNING a code change. Produce a concrete,",
+    "minimal build plan for the task below. You have READ-ONLY access to the",
+    "repository in the working directory: read code to ground the plan, but you",
+    "cannot edit files or run state-changing commands \u2014 this turn plans, it does",
+    "not build.",
+    "",
+    "OUTPUT CONTRACT \u2014 follow it exactly:",
+    "- Reply with EXACTLY ONE fenced code block, fenced as ```json, and nothing else of significance.",
+    "- The block must contain a single JSON OBJECT with exactly these fields:",
+    '    "goal"  (string, REQUIRED) \u2014 what the plan sets out to achieve.',
+    '    "steps" (array, REQUIRED)  \u2014 the ordered plan steps (at least one).',
+    '    "risks" (array of strings, optional) \u2014 concrete risks, when any.',
+    "- Each step object has exactly these fields:",
+    '    "title"  (string, REQUIRED) \u2014 a short step summary.',
+    '    "detail" (string, REQUIRED) \u2014 what the step does and why, grounded in the code you read.',
+    '    "files"  (array of strings, optional) \u2014 workspace-relative paths the step expects to touch (no leading ./, never absolute, no .. segments).',
+    "",
+    "HARD CAPS (enforced by the parser \u2014 output beyond them is discarded):",
+    `- At most ${MAX_PLAN_STEPS} steps.`,
+    `- "goal" at most ${MAX_PLAN_GOAL_CHARS} characters.`,
+    `- "title" at most ${MAX_PLAN_STEP_TITLE_CHARS} characters.`,
+    `- "detail" at most ${MAX_PLAN_STEP_DETAIL_CHARS} characters.`,
+    `- At most ${MAX_PLAN_FILES_PER_STEP} files per step, each path at most ${MAX_PLAN_FILE_CHARS} characters.`,
+    `- At most ${MAX_PLAN_RISKS} risks, each at most ${MAX_PLAN_RISK_CHARS} characters.`,
+    "",
+    "HONESTY RULES:",
+    "- Plan only what the codebase actually needs; do not invent steps.",
+    '- "files" lists are relative paths you ACTUALLY expect to touch \u2014 name a file only when you expect the step to change or create it.',
+    "- Ground every step in code you actually read; do not speculate about code you have not seen.",
+    '- List a risk only when it is concrete; an absent "risks" field is a valid answer.',
+    "",
+    "THE TASK TO PLAN:",
+    userPrompt
+  ].join("\n");
+}
+function clampText2(s, max) {
+  return s.length <= max ? s : `${s.slice(0, max - 1)}\u2026`;
+}
+function looksAbsolute2(p) {
+  return p.startsWith("/") || /^[A-Za-z]:[\\/]/.test(p) || p.startsWith("\\\\");
+}
+function hasTraversal2(p) {
+  return p.split(/[\\/]/).some((seg) => seg === "..");
+}
+function validatePlanFile(candidate) {
+  if (typeof candidate !== "string") return void 0;
+  let file = candidate.trim();
+  while (file.startsWith("./")) file = file.slice(2);
+  if (file.length === 0 || file.length > MAX_PLAN_FILE_CHARS || looksAbsolute2(file) || hasTraversal2(file)) {
+    return void 0;
+  }
+  return file;
+}
+function validatePlanStep(candidate) {
+  if (typeof candidate !== "object" || candidate === null || Array.isArray(candidate)) {
+    return void 0;
+  }
+  const c = candidate;
+  if (typeof c.title !== "string") return void 0;
+  const title = clampText2(c.title.trim(), MAX_PLAN_STEP_TITLE_CHARS);
+  if (title.length === 0) return void 0;
+  if (typeof c.detail !== "string") return void 0;
+  const detail = clampText2(c.detail.trim(), MAX_PLAN_STEP_DETAIL_CHARS);
+  if (detail.length === 0) return void 0;
+  let files;
+  if (Array.isArray(c.files)) {
+    const bounded = c.files.slice(0, MAX_PLAN_FILES_PER_STEP);
+    const valid = [];
+    for (const f of bounded) {
+      const ok = validatePlanFile(f);
+      if (ok !== void 0) valid.push(ok);
+    }
+    if (valid.length > 0) files = valid;
+  }
+  return { title, detail, ...files !== void 0 ? { files } : {} };
+}
+function parsePlanResponse(raw) {
+  if (typeof raw !== "string" || raw.trim().length === 0) {
+    return { parseStatus: "parse-failed", reason: "empty model response" };
+  }
+  const fenceRe = /```(?:json)?[ \t]*\r?\n([\s\S]*?)```/g;
+  const blocks = [];
+  let m;
+  while ((m = fenceRe.exec(raw)) !== null) blocks.push(m[1]);
+  if (blocks.length === 0) {
+    return { parseStatus: "parse-failed", reason: "no fenced JSON block found in the model response" };
+  }
+  if (blocks.length > 1) {
+    return {
+      parseStatus: "parse-failed",
+      reason: `expected exactly one fenced JSON block, found ${blocks.length}`
+    };
+  }
+  let parsed;
+  try {
+    parsed = JSON.parse(blocks[0]);
+  } catch (err) {
+    return {
+      parseStatus: "parse-failed",
+      reason: `fenced block is not valid JSON: ${err instanceof Error ? err.message.slice(0, 120) : "parse error"}`
+    };
+  }
+  let candidate;
+  if (typeof parsed === "object" && parsed !== null && !Array.isArray(parsed)) {
+    const obj = parsed;
+    const inner = obj.plan;
+    if (typeof inner === "object" && inner !== null && !Array.isArray(inner) && obj.goal === void 0 && obj.steps === void 0) {
+      candidate = inner;
+    } else {
+      candidate = obj;
+    }
+  } else {
+    return {
+      parseStatus: "parse-failed",
+      reason: 'fenced JSON is neither a plan object nor { "plan": { ... } }'
+    };
+  }
+  if (typeof candidate.goal !== "string" || candidate.goal.trim().length === 0) {
+    return { parseStatus: "parse-failed", reason: "plan goal is missing or empty" };
+  }
+  const goal = clampText2(candidate.goal.trim(), MAX_PLAN_GOAL_CHARS);
+  if (!Array.isArray(candidate.steps) || candidate.steps.length === 0) {
+    return { parseStatus: "parse-failed", reason: "plan steps are missing or empty" };
+  }
+  const bounded = candidate.steps.slice(0, MAX_PLAN_STEPS);
+  const steps = [];
+  for (const step of bounded) {
+    const valid = validatePlanStep(step);
+    if (valid) steps.push(valid);
+  }
+  if (steps.length === 0) {
+    return {
+      parseStatus: "parse-failed",
+      reason: `all ${bounded.length} plan step(s) failed schema validation`
+    };
+  }
+  let risks;
+  if (Array.isArray(candidate.risks)) {
+    const boundedRisks = candidate.risks.slice(0, MAX_PLAN_RISKS);
+    const valid = [];
+    for (const r of boundedRisks) {
+      if (typeof r !== "string") continue;
+      const trimmed = r.trim();
+      if (trimmed.length === 0) continue;
+      valid.push(clampText2(trimmed, MAX_PLAN_RISK_CHARS));
+    }
+    if (valid.length > 0) risks = valid;
+  }
+  const plan = { goal, steps, ...risks !== void 0 ? { risks } : {} };
+  try {
+    assertBuildPlanWellFormed(plan);
+  } catch (err) {
+    return {
+      parseStatus: "parse-failed",
+      reason: `internal: clamped plan failed the contract gate: ${err instanceof Error ? err.message.slice(0, 200) : "unknown"}`
+    };
+  }
+  return { parseStatus: "ok", plan };
+}
+
+// ../spikes/p0-model-gateway/governed-plan-run.ts
+var PLAN_RUN_POSTURE = "governed-unsandboxed";
+var PLAN_ACTOR = "codex";
+var INJECTED_PLAN_BACKEND = "injected-plan-backend";
+async function runGovernedPlanTurn(opts) {
+  const now = opts.now ?? Date.now;
+  const emit = opts.emit ?? (() => {
+  });
+  const endpoints = opts.modelEndpoints ?? DEFAULT_MODEL_ENDPOINTS;
+  const log = opts.onOperatorLog ?? (() => {
+  });
+  let runId;
+  let runDir;
+  let tracePath;
+  let sink;
+  if (opts.existingRun) {
+    runId = opts.existingRun.runId;
+    tracePath = opts.existingRun.tracePath;
+    sink = opts.sink ?? opts.existingRun.sink;
+    runDir = join16(tracePath, "..", "..");
+  } else {
+    const created = createRun(opts.runsBaseDir);
+    runId = created.runId;
+    runDir = created.dir;
+    tracePath = join16(runSubdirPath(runDir, "trace"), "trace.jsonl");
+    sink = opts.sink ?? createTraceWriter(tracePath);
+  }
+  const append = (type, payload, source) => {
+    sink.append({
+      v: TRACE_EVENT_VERSION,
+      runId,
+      seq: 0,
+      // the writer is authoritative for seq
+      ts: now(),
+      type,
+      payload,
+      ...source ? { source } : {}
+    });
+  };
+  let state = "created";
+  const transition = (to, reason) => {
+    const from = state;
+    state = to;
+    emit({ type: "state", from, to, reason });
+    const payload = {
+      from,
+      to,
+      reason
+    };
+    append("run_state_changed", payload, "policy");
+  };
+  const allow = [
+    ...endpoints.map((e) => `${e.host}:${e.port ?? 443}`),
+    ...agentSupportAllowEntries("codex")
+  ];
+  const proxy = await startGovernedTerminalProxy({
+    allow,
+    sink,
+    runId,
+    modelEndpoints: endpoints,
+    bindHost: opts.bindHost ?? "127.0.0.1",
+    observeAll: true,
+    ...opts.denyDirectIp !== void 0 ? { denyDirectIp: opts.denyDirectIp } : {}
+  });
+  const { env: governedEnv, posture: credentialPosture } = buildGovernedEnvResult({
+    proxyUrl: proxy.url
+  });
+  emit({ type: "run_created", runId, runDir, proxyUrl: proxy.url, posture: PLAN_RUN_POSTURE });
+  const runCreated = {
+    runId,
+    runDir,
+    intent: opts.prompt.slice(0, 200),
+    workflowType: "plan",
+    agentBackend: opts.generatePlan ? INJECTED_PLAN_BACKEND : "codex-cli"
+  };
+  append("run_created", runCreated, "supervisor");
+  let proposed;
+  try {
+    transition("worktree_ready", "plan turn reads the existing workspace + governed proxy ready");
+    transition("sandbox_ready", "governed env built (egress brokered, ambient secrets stripped)");
+    transition("executing", "advisory plan turn started");
+    const prompt = buildPlanPrompt(opts.prompt);
+    try {
+      let responseText;
+      let usage;
+      if (opts.generatePlan) {
+        responseText = await opts.generatePlan(prompt);
+      } else if (opts.codexPath) {
+        const turn = await codexFindingsTurn(
+          prompt,
+          opts.cwd,
+          opts.codexPath,
+          governedEnv,
+          opts.timeoutMs,
+          opts.signal,
+          opts.onOperatorLog
+        );
+        responseText = turn.text;
+        usage = turn.usage;
+      } else {
+        throw new Error(
+          "no plan backend available: neither generatePlan nor codexPath was provided"
+        );
+      }
+      const call = {
+        model: opts.generatePlan ? INJECTED_PLAN_BACKEND : "codex-cli",
+        ...usage?.inputTokens !== void 0 ? { inputTokens: usage.inputTokens } : {},
+        ...usage?.outputTokens !== void 0 ? { outputTokens: usage.outputTokens } : {},
+        provenanceLabel: "tool-output"
+      };
+      append("model_call", call);
+      const parsed = parsePlanResponse(responseText);
+      proposed = parsed.parseStatus === "ok" ? { actor: PLAN_ACTOR, advisory: true, parseStatus: "ok", plan: parsed.plan } : { actor: PLAN_ACTOR, advisory: true, parseStatus: "parse-failed", reason: parsed.reason };
+    } catch (err) {
+      const reason = shortReason(err);
+      log(`plan turn unavailable: ${reason}`);
+      proposed = { actor: PLAN_ACTOR, advisory: true, parseStatus: "unavailable", reason };
+    }
+  } finally {
+    await proxy.close();
+  }
+  append("plan_proposed", proposed, "supervisor");
+  if (proposed.parseStatus === "ok" && proposed.plan) {
+    emit({ type: "plan", plan: proposed.plan });
+  }
+  const proposal = {
+    runId,
+    advisory: true,
+    parseStatus: proposed.parseStatus,
+    ...proposed.reason !== void 0 ? { reason: proposed.reason } : {},
+    ...proposed.plan !== void 0 ? { plan: proposed.plan } : {}
+  };
+  emit({ type: "result", proposal });
+  return {
+    proposal,
+    runId,
+    runDir,
+    tracePath,
+    parseStatus: proposed.parseStatus,
+    ...proposed.plan !== void 0 ? { plan: proposed.plan } : {},
+    posture: PLAN_RUN_POSTURE,
+    credentialPosture
+  };
+}
+
 // ../spikes/p0-supervisor/web-fetch.ts
-import { createHash as createHash7 } from "node:crypto";
+import { createHash as createHash8 } from "node:crypto";
 import { lookup as dnsLookup } from "node:dns/promises";
 import { request as httpRequest2 } from "node:http";
 import { request as httpsRequest } from "node:https";
@@ -6065,8 +9700,8 @@ function ipv4ToNumber(ip) {
 function inRange(n, base, bits) {
   const b = ipv4ToNumber(base);
   if (b === void 0) return false;
-  const mask = bits === 0 ? 0 : 4294967295 << 32 - bits >>> 0;
-  return (n & mask) === (b & mask);
+  const mask2 = bits === 0 ? 0 : 4294967295 << 32 - bits >>> 0;
+  return (n & mask2) === (b & mask2);
 }
 function uint32ToDottedQuad(n) {
   return `${n >>> 24 & 255}.${n >>> 16 & 255}.${n >>> 8 & 255}.${n & 255}`;
@@ -6129,11 +9764,11 @@ function isPublicAddress(address) {
   }
   return false;
 }
-async function resolvePublic(host, lookup) {
+async function resolvePublic(host, lookup2) {
   if (host === "localhost" || host.endsWith(".localhost")) return void 0;
   const literal = normalizeIpLiteral(host);
   if (isIP(literal)) return isPublicAddress(literal) ? literal : void 0;
-  const records = await lookup(host, { all: true, verbatim: true });
+  const records = await lookup2(host, { all: true, verbatim: true });
   const publicRecord = records.find((r) => isPublicAddress(r.address));
   return publicRecord?.address;
 }
@@ -6343,7 +9978,7 @@ function proxyRequest(proxy, target, resolvedAddress, o) {
 }
 async function governedWebFetch(opts) {
   const originalUrl = String(opts.url || "").trim();
-  const lookup = opts.lookup ?? dnsLookup;
+  const lookup2 = opts.lookup ?? dnsLookup;
   const maxFetchBytes = safeInt(opts.maxFetchKB, WEB_DEFAULT_MAX_FETCH_KB, 1, 16384) * 1024;
   const maxContextBytes = safeInt(opts.maxContextKB, WEB_DEFAULT_MAX_CONTEXT_KB, 1, 1024) * 1024;
   const timeoutMs = safeInt(opts.timeoutMs, WEB_DEFAULT_TIMEOUT_MS, 100, 6e4);
@@ -6361,7 +9996,7 @@ async function governedWebFetch(opts) {
     const { url, host, port } = prepared;
     let resolved;
     try {
-      resolved = await resolvePublic(host, lookup);
+      resolved = await resolvePublic(host, lookup2);
     } catch (err) {
       return fail(originalUrl, `fetch failed \u2014 ${String(err.message || "DNS failure")}`, host);
     }
@@ -6423,7 +10058,7 @@ async function governedWebFetch(opts) {
     const truncated = fullBytes > maxContextBytes;
     const text = truncated ? `${Buffer.from(fullText).subarray(0, maxContextBytes).toString("utf8")}
 ... [truncated]` : fullText;
-    const sha256 = createHash7("sha256").update(fullText, "utf8").digest("hex");
+    const sha256 = createHash8("sha256").update(fullText, "utf8").digest("hex");
     opts.onAttempt?.({ url: url.toString(), host, port, contentSha256: sha256 });
     return {
       ok: true,
@@ -6463,7 +10098,7 @@ function capabilitiesForProfile(runtimeProfile, network) {
 }
 function isHardNetworkSpec(network) {
   if (network === "deny") return true;
-  return network.acknowledgeSoftEgress !== true;
+  return network.egressMode === "hard-allowlist";
 }
 function settleCreateRunTrust(request) {
   let network;
@@ -6471,14 +10106,14 @@ function settleCreateRunTrust(request) {
   try {
     const loaded = loadPolicy(request.policyPath);
     if (loaded.policy) {
-      network = networkSpecFromPolicy(loaded.policy, { acknowledgeSoftEgress: true });
+      network = networkSpecFromPolicy(loaded.policy);
     } else {
       policyLoadError = loaded.errors.join("; ");
-      network = { allow: ["(unknown)"], acknowledgeSoftEgress: true };
+      network = { allow: ["(unknown)"], egressMode: "soft-proxy-allow" };
     }
   } catch (err) {
     policyLoadError = err instanceof Error ? err.message : String(err);
-    network = { allow: ["(unknown)"], acknowledgeSoftEgress: true };
+    network = { allow: ["(unknown)"], egressMode: "soft-proxy-allow" };
   }
   if (policyLoadError !== void 0) {
     return {
@@ -6509,7 +10144,7 @@ function selfHashCheck(selfPath, pinnedSha) {
   }
   let actual;
   try {
-    actual = createHash8("sha256").update(readFileSync6(selfPath)).digest("hex");
+    actual = createHash9("sha256").update(readFileSync8(selfPath)).digest("hex");
   } catch (err) {
     return {
       ok: false,
@@ -6524,14 +10159,125 @@ function selfHashCheck(selfPath, pinnedSha) {
   }
   return { ok: true };
 }
+function createGovernedChangeReviewRunner(config = {}) {
+  return async (opts) => {
+    const codexPath = config.codexPath ?? resolveOnPath("codex") ?? void 0;
+    const result = await runGovernedChangeReview({
+      cwd: opts.cwd,
+      scope: opts.scope,
+      ...opts.baseRef ? { baseRef: opts.baseRef } : {},
+      // ONE RUN, ONE TRACE: bind the runner to the handler's run so the
+      // review_requested → review_findings → verifier_verdict chain lands in the
+      // handler-owned trace under the ack runId.
+      existingRun: opts.existingRun,
+      // CANCELLATION: run/cancel's AbortController signal stops the findings
+      // turn / inline check promptly; the handler suppresses post-cancel emission.
+      signal: opts.signal,
+      ...config.generateFindings ? { generateFindings: config.generateFindings } : {},
+      ...codexPath ? { codexPath } : {},
+      ...config.verifierPrivateKey ? { verifierPrivateKey: config.verifierPrivateKey } : {},
+      // A config-injected check is an operator override ('override' is the
+      // runner's own default source for an explicit verifyCommand).
+      ...config.verifyCommand ? { verifyCommand: config.verifyCommand } : {},
+      ...config.denyDirectIp !== void 0 ? { denyDirectIp: config.denyDirectIp } : {},
+      ...config.autoIndependentVerifier !== void 0 ? { autoIndependentVerifier: config.autoIndependentVerifier } : {},
+      ...config.verifierRuntime !== void 0 ? { verifierRuntime: config.verifierRuntime } : {},
+      ...config.runsBaseDir ? { runsBaseDir: config.runsBaseDir } : {},
+      emit: (event) => {
+        switch (event.type) {
+          case "run_created":
+            opts.emit(`run_created:${event.posture}`);
+            return;
+          case "state":
+            opts.emit(event.to);
+            return;
+          case "findings":
+            opts.emit(`findings:${event.payload.parseStatus}`);
+            return;
+          case "run_closed":
+            opts.emit(event.ok ? "closed:ok" : "closed:failed");
+            return;
+          // 'verdict'/'result' are carried by the terminal result.review — not
+          // streamed separately (no second verdict surface on the wire).
+          default:
+            return;
+        }
+      },
+      ...opts.onOperatorLog ? { onOperatorLog: opts.onOperatorLog } : {}
+    });
+    return result.review;
+  };
+}
+function createGovernedBuildPlanRunner(config = {}) {
+  return async (opts) => {
+    const codexPath = config.codexPath ?? resolveOnPath("codex") ?? void 0;
+    const result = await runGovernedPlanTurn({
+      cwd: opts.cwd,
+      prompt: opts.prompt,
+      // ONE RUN, ONE TRACE: bind the runner to the handler's run so the
+      // plan_proposed record (and the model-turn breadcrumbs) chain into the
+      // handler-owned trace under the ack runId — the SAME chain the later
+      // plan_approved + build + verdict continue.
+      existingRun: opts.existingRun,
+      // CANCELLATION: run/cancel's AbortController signal stops the plan turn
+      // promptly; the handler suppresses post-cancel emission.
+      signal: opts.signal,
+      ...config.generatePlan ? { generatePlan: config.generatePlan } : {},
+      ...codexPath ? { codexPath } : {},
+      ...config.denyDirectIp !== void 0 ? { denyDirectIp: config.denyDirectIp } : {},
+      ...config.runsBaseDir ? { runsBaseDir: config.runsBaseDir } : {},
+      emit: (event) => {
+        switch (event.type) {
+          case "run_created":
+            opts.emit(`run_created:${event.posture}`);
+            return;
+          case "state":
+            opts.emit(event.to);
+            return;
+          case "result":
+            opts.emit(`plan:${event.proposal.parseStatus}`);
+            return;
+          // 'plan' is carried by the handler's gate-checked plan/event — not
+          // streamed separately (no second plan surface on the wire).
+          default:
+            return;
+        }
+      },
+      ...opts.onOperatorLog ? { onOperatorLog: opts.onOperatorLog } : {}
+    });
+    return result.proposal;
+  };
+}
 var DEFAULT_INDEX_RETRIEVE_K = 6;
+var MAX_SESSION_WORKSPACE_ROOTS = 16;
+var DEFAULT_MCP_APPROVAL_TIMEOUT_MS = 12e4;
+var DEFAULT_MCP_POLICY = {
+  version: 1,
+  defaults: { file_read: "ask", file_write: "ask", command: "ask", network: "deny", mcp: "ask" },
+  allow: { read_paths: [], write_paths: [], commands: [], network: [] },
+  deny: { read_paths: [], write_paths: [], commands: [] },
+  verify: Object.freeze([])
+};
+var MAX_INDEX_UPDATE_BATCH_PATHS = 4096;
+function sanitizeRelPathBatch(raw) {
+  if (!Array.isArray(raw)) return [];
+  const out = [];
+  for (const entry of raw) {
+    if (typeof entry !== "string") continue;
+    const trimmed = entry.trim();
+    if (trimmed.length === 0) continue;
+    out.push(trimmed);
+    if (out.length >= MAX_INDEX_UPDATE_BATCH_PATHS) break;
+  }
+  return out;
+}
 var DEFAULT_CHAT_BACKEND_ID = "codex";
 var CODEX_HASH_CAP_BYTES = 256 * 1024 * 1024;
 function captureCodexBinaryIdentity(codexPath) {
   const identity = { path: codexPath };
   let sizeBytes;
   try {
-    const st = statSync3(codexPath);
+    const st = statSync4(codexPath);
     sizeBytes = st.size;
     identity.sizeBytes = st.size;
     identity.mtimeMs = st.mtimeMs;
@@ -6539,7 +10285,7 @@ function captureCodexBinaryIdentity(codexPath) {
   }
   if (sizeBytes === void 0 || sizeBytes <= CODEX_HASH_CAP_BYTES) {
     try {
-      const hash = createHash8("sha256").update(readFileSync6(codexPath)).digest("hex");
+      const hash = createHash9("sha256").update(readFileSync8(codexPath)).digest("hex");
       identity.sha256 = hash;
     } catch {
     }
@@ -6652,12 +10398,12 @@ function mapGitStatusToReviewStatus(status) {
   return "modified";
 }
 function projectAgenticBuildReview(runId, prompt, result) {
-  const agentic = result.agentic;
-  const changedFiles = (agentic?.changedFiles ?? []).map((f) => ({
+  const agentic2 = result.agentic;
+  const changedFiles = (agentic2?.changedFiles ?? []).map((f) => ({
     path: f.path,
     status: mapGitStatusToReviewStatus(f.status)
   }));
-  const commands = (agentic?.commands ?? []).map((c) => ({
+  const commands = (agentic2?.commands ?? []).map((c) => ({
     cmd: c.cmd,
     ...c.exitCode !== void 0 ? { exitCode: c.exitCode } : {}
   }));
@@ -6665,6 +10411,7 @@ function projectAgenticBuildReview(runId, prompt, result) {
   const verdict = result.verdict;
   const verifierIsolation = readVerifierIsolation(result);
   const verifyCommandSource = readVerifyCommandSource(result);
+  const isolationUnavailableReason = verifierIsolation === "inline-unsandboxed" ? readIsolationUnavailableReason(result) : void 0;
   const assurance = computeBuildAssurance({
     verifierIsolation,
     verifyRan: result.verifyRan === true,
@@ -6677,9 +10424,9 @@ function projectAgenticBuildReview(runId, prompt, result) {
     intent: prompt,
     actor: "codex",
     posture: "governed-unsandboxed",
-    summary: agentic?.summary ?? "",
+    summary: agentic2?.summary ?? "",
     changedFiles,
-    diff: agentic?.diff ?? "",
+    diff: agentic2?.diff ?? "",
     commands,
     egress,
     verdict: {
@@ -6687,6 +10434,7 @@ function projectAgenticBuildReview(runId, prompt, result) {
       assurance,
       verifierIsolation,
       verifyCommandSource,
+      ...isolationUnavailableReason ? { isolationUnavailableReason } : {},
       checks: verdict.checks.map((c) => ({ name: c.name, status: c.status })),
       // TRACE-INTEGRITY (High B): carry the SIGNED trace root through the render
       // contract so the mobile/dashboard verdict binds the REAL signed root — not a
@@ -6712,6 +10460,10 @@ function readVerifierIsolation(result) {
   const maybe = result.verifierIsolation;
   return maybe === "independent-sandboxed" ? "independent-sandboxed" : "inline-unsandboxed";
 }
+function readIsolationUnavailableReason(result) {
+  const maybe = result.isolationUnavailableReason;
+  return typeof maybe === "string" && maybe.trim().length > 0 ? maybe : void 0;
+}
 function readVerifyCommandSource(result) {
   if (result.verifyRan === false) return "none";
   const maybe = result.verifyCommandSource;
@@ -6727,6 +10479,39 @@ function readVerifyCommandSource(result) {
       return "override";
   }
 }
+var MAX_STEERING_RULES = 64;
+var MAX_STEERING_FIELD_LENGTH = 512;
+var SHA256_HEX_RE = /^[0-9a-f]{64}$/;
+function validateSteeringPayload(raw) {
+  if (typeof raw !== "object" || raw === null || Array.isArray(raw)) return void 0;
+  const obj = raw;
+  const surface = obj.surface;
+  if (surface !== "chat" && surface !== "inline-edit" && surface !== "agentic") return void 0;
+  if (typeof obj.blockSha256 !== "string" || !SHA256_HEX_RE.test(obj.blockSha256)) {
+    return void 0;
+  }
+  if (!Array.isArray(obj.rules) || obj.rules.length === 0 || obj.rules.length > MAX_STEERING_RULES) {
+    return void 0;
+  }
+  const rules = [];
+  for (const entry of obj.rules) {
+    if (typeof entry !== "object" || entry === null || Array.isArray(entry)) return void 0;
+    const rule = entry;
+    const { name, scope, reason, sha256 } = rule;
+    if (typeof name !== "string" || name.length === 0 || name.length > MAX_STEERING_FIELD_LENGTH) {
+      return void 0;
+    }
+    if (typeof scope !== "string" || scope.length === 0 || scope.length > MAX_STEERING_FIELD_LENGTH) {
+      return void 0;
+    }
+    if (typeof reason !== "string" || reason.length === 0 || reason.length > MAX_STEERING_FIELD_LENGTH) {
+      return void 0;
+    }
+    if (typeof sha256 !== "string" || !SHA256_HEX_RE.test(sha256)) return void 0;
+    rules.push({ name, scope, reason, sha256 });
+  }
+  return { surface, rules, blockSha256: obj.blockSha256 };
+}
 var DEFAULT_SUPERVISOR_VERSION = "0.0.0-p0";
 var BridgeServer = class {
   supervisorVersion;
@@ -6738,26 +10523,36 @@ var BridgeServer = class {
   model;
   chat;
   agentic;
+  review;
+  plan;
   terminalModelEndpoints;
   index;
+  mcp;
   stdinBuffer = "";
   handshakeDone = false;
   hashChecked = false;
   /**
-   * The CANONICAL session workspace root `index/retrieve` is BOUND to (the index/
-   * disclosure boundary). Established at most once per connection and then PINNED:
-   *   - PREFERRED: from the trusted handshake channel (`HandshakeParams.workspaceRoot`),
-   *     canonicalized (realpath) at handshake. When set this way the FIRST and every
-   *     subsequent `index/retrieve` must resolve to this exact directory.
-   *   - FALLBACK: when the handshake omitted a root (older client / no workspace folder
-   *     open), it is pinned from the FIRST post-handshake `index/retrieve` (the
+   * The CANONICAL session workspace root SET `index/retrieve` is BOUND to (the index/
+   * disclosure boundary) — one entry per workspace root of a (possibly MULTI-ROOT)
+   * workspace. Established at the trusted handshake channel and then PINNED:
+   *   - PREFERRED: from the handshake (`HandshakeParams.workspaceRoots`, plus the
+   *     legacy single-root `HandshakeParams.workspaceRoot` — both bind into the set),
+   *     each entry canonicalized (realpath) at handshake; uncanonicalizable entries
+   *     are skipped (resolve-never-throw) and the set is capped at
+   *     {@link MAX_SESSION_WORKSPACE_ROOTS} (extras logged + ignored). Index RPCs then
+   *     accept any MEMBER root and refuse every other directory.
+   *   - FALLBACK: when the handshake bound NO root (older client / no workspace folder
+   *     open), the set is pinned from the FIRST post-handshake index call (the
    *     legitimate extension's warm-up, fired on session open before any adversary can
-   *     interpose). A later retrieve with a DIFFERENT canonical root is refused.
-   * Once set, a request whose canonical root differs is refused WITHOUT indexing or
-   * reading that root — so the local index can only ever index the first-party
-   * session's own workspace, never an arbitrary readable absolute directory.
+   *     interpose). A later call with a DIFFERENT canonical root is refused.
+   * Once non-empty, a request whose canonical root is NOT a member is refused WITHOUT
+   * indexing or reading that root — so the local index can only ever index the
+   * first-party session's own workspace root(s), never an arbitrary readable absolute
+   * directory. Insertion order is preserved (the first-bound root is the session's
+   * PRIMARY root, used where a single representative root is needed, e.g. mcp/call's
+   * lazy broker).
    */
-  sessionWorkspaceRoot;
+  sessionWorkspaceRoots = /* @__PURE__ */ new Set();
   /** Created runs, keyed by runId (retained for run/event emission). */
   runs = /* @__PURE__ */ new Map();
   /** The chat gateway, constructed lazily on the first chat/send. */
@@ -6793,6 +10588,18 @@ var BridgeServer = class {
   codexLaunch;
   /** Monotonic counter minting agentic-build run ids (per connection). */
   buildSeq = 0;
+  /** Monotonic counter minting change-review run ids (per connection). */
+  reviewSeq = 0;
+  /** Monotonic counter minting plan run ids (per connection). */
+  planSeq = 0;
+  /**
+   * PARKED governed plan runs awaiting approve/reject, keyed by runId (#8 — the
+   * plan-mode mirror of {@link pendingBuilds}). A `plan/start` parks its run here
+   * after `plan_proposed` is appended; a `build/start` carrying the SAME runId +
+   * `planApproval` consumes it (→ `plan_approved` → the build executes on the
+   * SAME trace), `plan/reject` closes it, and `run/cancel` discards it.
+   */
+  parkedPlans = /* @__PURE__ */ new Map();
   /**
    * PENDING governed builds awaiting a remote approval decision, keyed by approvalId
    * (remote-control). A non-approved `build/start` in pending mode parks the request
@@ -6815,6 +10622,28 @@ var BridgeServer = class {
   /** Trace file path per target runId (the run dir's trace.jsonl). */
   remoteTracePaths = /* @__PURE__ */ new Map();
   /**
+   * The CONNECTION-SCOPED MCP broker state (#9 — governed MCP brokering): the
+   * session workspace's loaded `.glyphstudio/mcp.json` entries plus ONE
+   * supervisor-owned {@link McpStdioClient} (server child process) per usable
+   * entry, keyed by server name. Established lazily by `mcp/list` (or a first
+   * `mcp/call`) against the SAME pinned session root the index RPCs bind to.
+   * The server children are connection-scoped: {@link shutdown} disposes every
+   * client (SIGTERM → SIGKILL), so MCP children die with the connection —
+   * mirroring the governed-chat-session / remoteTraceWriters lifecycle.
+   */
+  mcpBroker;
+  /**
+   * In-flight `mcp/call`s HELD on an ask/force_ask policy decision, awaiting the
+   * operator's `approval/respond` verdict (#9 Slice 2), keyed by approvalId.
+   * Each resolver settles the held call EXACTLY ONCE (allow / deny / honest
+   * timeout); {@link shutdown} denies any survivor so a closing connection
+   * never leaves a call parked forever. The MCP analogue of pendingBuilds —
+   * the SAME approval/respond RPC resolves both.
+   */
+  pendingMcpApprovals = /* @__PURE__ */ new Map();
+  /** Monotonic per-connection counter minting unique MCP approval ids. */
+  mcpApprovalSeq = 0;
+  /**
    * Per-workspace LOCAL code index (@Codebase). Keyed by absolute workspaceRoot, each
    * entry holds the brute-force vector store + the BM25 keyword index + the in-flight
    * build promise, so the HYBRID index is built ONCE per workspace and concurrent
@@ -6830,6 +10659,15 @@ var BridgeServer = class {
    * supervisor that never retrieves never constructs it.
    */
   defaultEmbedder;
+  /**
+   * Serialization tail for `index/update`: each incremental update CHAINS behind the
+   * previous one so two batches can never interleave their evict/re-embed mutations
+   * on the shared store (the extension coalesces batches, but the server must not
+   * rely on client behavior at a trust boundary). Never-rejecting links — a failed
+   * update logs + answers honestly and the tail stays usable. No timer, no handle:
+   * an idle tail is just a settled promise and can never hold the process open.
+   */
+  indexUpdateTail = Promise.resolve();
   constructor(opts) {
     this.supervisorVersion = opts.supervisorVersion ?? DEFAULT_SUPERVISOR_VERSION;
     this.runsBaseDir = opts.runsBaseDir;
@@ -6841,8 +10679,11 @@ var BridgeServer = class {
     this.model = opts.model;
     this.chat = opts.chat;
     this.agentic = opts.agentic;
+    this.review = opts.review;
+    this.plan = opts.plan;
     this.terminalModelEndpoints = opts.terminalModelEndpoints;
     this.index = opts.index;
+    this.mcp = opts.mcp;
   }
   /**
    * Resolve the model endpoints a governed terminal session classifies. Explicit
@@ -6905,6 +10746,23 @@ var BridgeServer = class {
       try {
         serverRun.terminalVerdict = await serverRun.terminalSession.stop();
       } catch {
+      }
+    }
+    for (const resolve5 of [...this.pendingMcpApprovals.values()]) {
+      try {
+        resolve5("deny", "connection shut down before an operator decision \u2014 denied");
+      } catch {
+      }
+    }
+    this.pendingMcpApprovals.clear();
+    const mcpBroker = this.mcpBroker;
+    this.mcpBroker = void 0;
+    if (mcpBroker) {
+      for (const client of mcpBroker.clients.values()) {
+        try {
+          await client.dispose();
+        } catch {
+        }
       }
     }
   }
@@ -6976,11 +10834,23 @@ var BridgeServer = class {
       case BridgeMethod.ChatSend:
         void this.handleChatSend(req);
         return;
+      case BridgeMethod.ChatBackends:
+        void this.handleChatBackends(req);
+        return;
       case BridgeMethod.WebFetch:
         void this.handleWebFetch(req);
         return;
       case BridgeMethod.AgenticBuildStart:
         void this.handleAgenticBuildStart(req);
+        return;
+      case BridgeMethod.ChangeReviewStart:
+        void this.handleChangeReviewStart(req);
+        return;
+      case BridgeMethod.BuildPlanStart:
+        void this.handleBuildPlanStart(req);
+        return;
+      case BridgeMethod.BuildPlanReject:
+        this.handleBuildPlanReject(req);
         return;
       case BridgeMethod.RunCancel:
         this.handleRunCancel(req);
@@ -6993,6 +10863,18 @@ var BridgeServer = class {
         return;
       case BridgeMethod.IndexBuild:
         void this.handleIndexBuild(req);
+        return;
+      case BridgeMethod.IndexUpdate:
+        void this.handleIndexUpdate(req);
+        return;
+      case BridgeMethod.McpList:
+        void this.handleMcpList(req);
+        return;
+      case BridgeMethod.McpCall:
+        void this.handleMcpCall(req);
+        return;
+      case BridgeMethod.RecordHuman:
+        this.handleRecordHuman(req);
         return;
       default:
         this.emit(
@@ -7023,17 +10905,38 @@ var BridgeServer = class {
       }
     }
     const params = req.params ?? {};
-    const handshakeRoot = typeof params.workspaceRoot === "string" ? params.workspaceRoot.trim() : "";
-    if (handshakeRoot.length > 0) {
-      const canonical = this.canonicalDir(handshakeRoot);
+    const requestedRoots = [];
+    if (typeof params.workspaceRoot === "string" && params.workspaceRoot.trim().length > 0) {
+      requestedRoots.push(params.workspaceRoot.trim());
+    }
+    if (Array.isArray(params.workspaceRoots)) {
+      for (const r of params.workspaceRoots) {
+        if (typeof r === "string" && r.trim().length > 0) requestedRoots.push(r.trim());
+      }
+    }
+    for (const requested of requestedRoots) {
+      if (this.sessionWorkspaceRoots.size >= MAX_SESSION_WORKSPACE_ROOTS) {
+        this.logLine(
+          `[bridge-server] handshake workspace-root cap reached (${MAX_SESSION_WORKSPACE_ROOTS}); ignoring extra root(s).`
+        );
+        break;
+      }
+      const canonical = this.canonicalDir(requested);
       if (canonical) {
-        this.sessionWorkspaceRoot = canonical;
-        this.logLine(`[bridge-server] session workspace root bound from handshake: ${canonical}`);
+        if (!this.sessionWorkspaceRoots.has(canonical)) {
+          this.sessionWorkspaceRoots.add(canonical);
+          this.logLine(`[bridge-server] session workspace root bound from handshake: ${canonical}`);
+        }
       } else {
         this.logLine(
-          `[bridge-server] handshake workspaceRoot is not a readable directory; deferring index/retrieve binding to first post-handshake retrieve.`
+          `[bridge-server] handshake workspaceRoot is not a readable directory; skipped.`
         );
       }
+    }
+    if (requestedRoots.length > 0 && this.sessionWorkspaceRoots.size === 0) {
+      this.logLine(
+        `[bridge-server] no handshake workspace root was bindable; deferring index/retrieve binding to first post-handshake retrieve.`
+      );
     }
     const result = {
       bridgeProtocolVersion: BRIDGE_PROTOCOL_VERSION,
@@ -7413,7 +11316,7 @@ var BridgeServer = class {
     const lifecycle = new RunLifecycle(created.state);
     this.remoteTracePaths.set(
       created.runId,
-      join12(runSubdirPath(created.dir, "trace"), "trace.jsonl")
+      join17(runSubdirPath(created.dir, "trace"), "trace.jsonl")
     );
     const namesApprovedRuntime = isApprovedIsolationRuntime(request.runtimeProfile);
     const runtimeIsolated = false;
@@ -7604,14 +11507,31 @@ var BridgeServer = class {
         runId = governed.runId;
         turnEnv = this.chat?.env ?? governed.env;
       }
+      if (params.steering !== void 0 && runId) {
+        const steering = validateSteeringPayload(params.steering);
+        if (!steering) {
+          this.logLine(
+            `[bridge-server] chat/send turn ${turnId}: malformed steering payload ignored (turn unaffected).`
+          );
+        } else {
+          this.appendSteeringToRun(runId, steering, `chat/send turn ${turnId}`);
+        }
+      }
       const serverRun = runId ? this.runs.get(runId) : void 0;
       const cwd = serverRun?.created.dir ?? process.cwd();
       const gateway = this.ensureChatGateway();
       this.chatActiveRunId = runId;
       try {
+        const model = typeof params.model === "string" && params.model.trim().length > 0 ? params.model.trim() : void 0;
+        const maxOutputTokens = typeof params.maxOutputTokens === "number" && Number.isFinite(params.maxOutputTokens) && params.maxOutputTokens > 0 ? Math.floor(params.maxOutputTokens) : void 0;
         for await (const event of gateway.chatTurn(
           backendId,
-          { messages: params.messages, cwd },
+          {
+            messages: params.messages,
+            cwd,
+            ...model ? { model } : {},
+            ...maxOutputTokens !== void 0 ? { maxOutputTokens } : {}
+          },
           turnEnv ? { env: turnEnv } : void 0
         )) {
           this.emitChatDelta({ turnId, ...event });
@@ -7629,6 +11549,59 @@ var BridgeServer = class {
         message: `chat/send stream failed: ${String(err?.message ?? err)}`
       });
     }
+  }
+  /**
+   * chat/backends — DISCOVER the chat backends a `chat/send` can route to (the
+   * model-picker surface). Handshake-gated like the other introspection RPCs
+   * (model/allowlist). Every status is PROBED AT REQUEST TIME — never cached,
+   * never assumed:
+   *   - codex ('frontier'): available iff its binary resolves — the SAME
+   *     `resolveOnPath('codex')` check the chat session's launch path performs
+   *     (a test stubs it via {@link ChatGatewayConfig.resolveCodexPath}). No
+   *     `models` list: codex picks its own model out-of-band.
+   *   - ollama ('local'): available iff the LOOPBACK daemon answers `/api/tags`;
+   *     `models` is the installed-model NAMES from that response, capped at
+   *     {@link OLLAMA_MODEL_LIST_CAP}.
+   * NO PHANTOM BACKENDS: a failed probe reports 'unavailable' with an honest
+   * non-secret detail — never an invented model name. The result carries
+   * ids/names only, NEVER a credential.
+   */
+  async handleChatBackends(req) {
+    if (!this.handshakeDone) {
+      this.emit(
+        this.errorResponse(
+          req.id,
+          BridgeErrorCode.InvalidRequest,
+          "chat/backends before a completed handshake"
+        )
+      );
+      return;
+    }
+    const resolveCodex = this.chat?.resolveCodexPath ?? (() => resolveOnPath("codex"));
+    let codexInfo;
+    try {
+      const codexPath = resolveCodex();
+      codexInfo = codexPath ? { id: "codex", status: "ok", kind: "frontier" } : {
+        id: "codex",
+        status: "unavailable",
+        kind: "frontier",
+        detail: "codex binary not found on PATH"
+      };
+    } catch (err) {
+      codexInfo = {
+        id: "codex",
+        status: "unavailable",
+        kind: "frontier",
+        detail: `codex probe failed: ${String(err?.message ?? err)}`
+      };
+    }
+    const probe = await probeOllamaModels(
+      this.chat?.ollamaHost ?? DEFAULT_OLLAMA_HOST,
+      OLLAMA_MODEL_LIST_CAP
+    );
+    const ollamaInfo = probe.ok ? { id: "ollama", status: "ok", kind: "local", models: probe.models } : { id: "ollama", status: "unavailable", kind: "local", detail: probe.detail };
+    const result = { backends: [codexInfo, ollamaInfo] };
+    this.emit(this.successResponse(req.id, result));
   }
   /**
    * web/fetch — supervisor-owned `@Web` fetch. This deliberately does NOT create a
@@ -7671,8 +11644,8 @@ var BridgeServer = class {
       });
       return;
     }
-    const run = this.runs.get(governed.runId);
-    const tracePath = run?.created?.dir ? join12(runSubdirPath(run.created.dir, "trace"), "trace.jsonl") : void 0;
+    const run2 = this.runs.get(governed.runId);
+    const tracePath = run2?.created?.dir ? join17(runSubdirPath(run2.created.dir, "trace"), "trace.jsonl") : void 0;
     const sink = tracePath ? createTraceWriter(tracePath) : void 0;
     const seen = /* @__PURE__ */ new Set();
     const recordAttempt = (attempt) => {
@@ -7781,16 +11754,118 @@ var BridgeServer = class {
       return;
     }
     const runId = params.runId && typeof params.runId === "string" ? params.runId : `build-${++this.buildSeq}`;
+    let steering;
+    if (params.steering !== void 0) {
+      steering = validateSteeringPayload(params.steering);
+      if (!steering) {
+        this.logLine(
+          `[bridge-server] build/start ${runId}: malformed steering payload ignored (build unaffected).`
+        );
+      }
+    }
     const ack = { runId };
     this.emit(this.successResponse(req.id, ack));
+    const parked = this.parkedPlans.get(runId);
+    if (params.planApproval !== void 0 && !parked) {
+      this.logLine(
+        `[bridge-server] build/start ${runId} REFUSED \u2014 planApproval without a parked plan run.`
+      );
+      this.emitAgenticBuildEvent({
+        runId,
+        type: "error",
+        message: `build/start carried a planApproval but '${runId}' is not a parked plan run (already resolved, cancelled, or never parked) \u2014 refused`
+      });
+      return;
+    }
+    if (parked) {
+      if (params.planApproval === void 0) {
+        this.logLine(
+          `[bridge-server] build/start ${runId} REFUSED \u2014 parked plan run without a planApproval; run stays parked.`
+        );
+        this.emitAgenticBuildEvent({
+          runId,
+          type: "error",
+          message: `'${runId}' is a parked plan run \u2014 build/start on it requires a planApproval (or plan/reject to close it); the run stays parked`
+        });
+        return;
+      }
+      if (params.approved !== true) {
+        this.logLine(
+          `[bridge-server] build/start ${runId} REFUSED \u2014 plan resume without the authority grant; run stays parked.`
+        );
+        this.emitAgenticBuildEvent({
+          runId,
+          type: "error",
+          message: `agentic build requires explicit authority approval (it may edit files and run commands in ${cwd}) \u2014 an approved plan never substitutes for the grant; the run stays parked`
+        });
+        return;
+      }
+      if (cwd !== parked.cwd) {
+        this.logLine(
+          `[bridge-server] build/start ${runId} REFUSED \u2014 cwd '${cwd}' \u2260 planned cwd '${parked.cwd}'; run stays parked.`
+        );
+        this.emitAgenticBuildEvent({
+          runId,
+          type: "error",
+          message: `plan resume refused: build cwd '${cwd}' does not match the planned repo '${parked.cwd}' \u2014 the run stays parked`
+        });
+        return;
+      }
+      try {
+        assertBuildPlanWellFormed(params.planApproval.plan);
+      } catch (gateErr) {
+        this.logLine(
+          `[bridge-server] build/start ${runId} REFUSED by the plan gate: ${String(gateErr?.message ?? gateErr)}; run stays parked.`
+        );
+        this.emitAgenticBuildEvent({
+          runId,
+          type: "error",
+          message: `plan approval refused \u2014 ${String(gateErr?.message ?? gateErr)}; the run stays parked`
+        });
+        return;
+      }
+      this.parkedPlans.delete(runId);
+      const planApprovalId = `plan-apr-${runId}`;
+      const approvedPlan = {
+        approvalId: planApprovalId,
+        plan: params.planApproval.plan,
+        edited: params.planApproval.edited === true
+        // planMarkdownSha256 deliberately unset in v1 (see the NOTE above).
+      };
+      parked.sink.append({
+        v: TRACE_EVENT_VERSION,
+        runId,
+        seq: 0,
+        ts: Date.now(),
+        type: "plan_approved",
+        payload: approvedPlan,
+        source: "supervisor"
+      });
+      this.emitAgenticBuildEvent({ runId, type: "state", state: `plan_approved:${planApprovalId}` });
+      this.logLine(
+        `[bridge-server] build/start ${runId} resuming parked plan run (plan_approved ${planApprovalId}, edited=${approvedPlan.edited}).`
+      );
+      await this.runApprovedBuild(
+        runId,
+        prompt,
+        cwd,
+        {
+          runDir: parked.runDir,
+          tracePath: parked.tracePath,
+          approvedPlan: params.planApproval.plan
+        },
+        steering
+      );
+      return;
+    }
     if (params.approved === true) {
-      await this.runApprovedBuild(runId, prompt, cwd);
+      await this.runApprovedBuild(runId, prompt, cwd, void 0, steering);
       return;
     }
     if (params.pendingApproval === true) {
       const approvalId = `apr-${runId}`;
       const pendingRun = createRun(this.agentic?.runsBaseDir ?? this.runsBaseDir);
-      const pendingTracePath = join12(runSubdirPath(pendingRun.dir, "trace"), "trace.jsonl");
+      const pendingTracePath = join17(runSubdirPath(pendingRun.dir, "trace"), "trace.jsonl");
       this.remoteTracePaths.set(runId, pendingTracePath);
       this.pendingBuilds.set(approvalId, {
         approvalId,
@@ -7798,7 +11873,8 @@ var BridgeServer = class {
         prompt,
         cwd,
         runDir: pendingRun.dir,
-        tracePath: pendingTracePath
+        tracePath: pendingTracePath,
+        ...steering ? { steering } : {}
       });
       this.logLine(
         `[bridge-server] build/start ${runId} PENDING approval ${approvalId} (cwd=${cwd}).`
@@ -7823,11 +11899,11 @@ var BridgeServer = class {
    * AbortController so `run/cancel` can SIGKILL the `codex exec` child. Everything
    * runs in an outer try/catch so a failure becomes a terminal `error` event.
    */
-  async runApprovedBuild(runId, prompt, cwd, existing) {
+  async runApprovedBuild(runId, prompt, cwd, existing, steering) {
     const abort = new AbortController();
     try {
       const buildRun = existing ? { runId, dir: existing.runDir, state: "created" } : createRun(this.agentic?.runsBaseDir ?? this.runsBaseDir);
-      const tracePath = existing ? existing.tracePath : join12(runSubdirPath(buildRun.dir, "trace"), "trace.jsonl");
+      const tracePath = existing ? existing.tracePath : join17(runSubdirPath(buildRun.dir, "trace"), "trace.jsonl");
       const sink = this.remoteTraceWriters.get(runId) ?? createTraceWriter(tracePath);
       this.remoteTraceWriters.set(runId, sink);
       this.remoteTracePaths.set(runId, tracePath);
@@ -7881,6 +11957,9 @@ var BridgeServer = class {
         source: "human"
       });
       this.emitAgenticBuildEvent({ runId, type: "state", state: "approved" });
+      if (steering) {
+        this.appendSteeringToRun(runId, steering, `build/start ${runId}`);
+      }
       const codexPath = this.agentic?.codexPath ?? resolveOnPath("codex") ?? "";
       let verifyCommand = this.agentic?.verifyCommand;
       let verifyCommandSource = verifyCommand ? "override" : "none";
@@ -7922,6 +12001,17 @@ var BridgeServer = class {
         ...this.agentic?.verifierPrivateKey ? { verifierPrivateKey: this.agentic.verifierPrivateKey } : {},
         ...verifyCommand ? { verifyCommand, verifyCommandSource } : {},
         ...this.agentic?.denyDirectIp !== void 0 ? { denyDirectIp: this.agentic.denyDirectIp } : {},
+        // Deterministic verifier-isolation posture for tests: forward the injectable
+        // Docker probe so inline-posture assertions don't flip on Docker-up hosts.
+        ...this.agentic?.autoIndependentVerifier !== void 0 ? { autoIndependentVerifier: this.agentic.autoIndependentVerifier } : {},
+        // Pluggable verifier-runtime preference (Track A / Slice 1): forward the
+        // operator's machine-scoped choice so the runner's runtime selection (and
+        // its honest degraded reason) reflects it. Absent ⇒ the runner's 'auto'.
+        ...this.agentic?.verifierRuntime !== void 0 ? { verifierRuntime: this.agentic.verifierRuntime } : {},
+        // The operator-APPROVED plan (#8 plan-mode resume): claims-only — the
+        // bundle's actor-claims render the formatPlanClaim summary; the chain
+        // already carries the structured plan via plan_approved.
+        ...existing?.approvedPlan ? { approvedPlan: existing.approvedPlan } : {},
         // Stream each governed-run event out as a build/event tagged with our runId.
         emit: (event) => this.streamGovernedAgenticEvent(runId, event),
         onOperatorLog: (line) => this.logLine(`[bridge-server] [build ${runId}] ${line}`)
@@ -7959,28 +12049,507 @@ var BridgeServer = class {
    * is a no-op once terminal.
    */
   markRunTerminal(runId, to) {
-    const run = this.runs.get(runId);
-    if (!run) return;
-    if (run.buildTerminal === true) return;
-    run.buildTerminal = true;
-    run.buildAbort = void 0;
+    const run2 = this.runs.get(runId);
+    if (!run2) return;
+    if (run2.buildTerminal === true) return;
+    run2.buildTerminal = true;
+    run2.buildAbort = void 0;
     try {
-      if (!run.lifecycle.isTerminal && run.lifecycle.canTransitionTo(to)) {
-        run.lifecycle.transition(to, `build ${to}`);
-      } else if (!run.lifecycle.isTerminal) {
-        if (run.lifecycle.canTransitionTo("executing")) {
-          run.lifecycle.transition("executing", "build executing (finalize)");
+      if (!run2.lifecycle.isTerminal && run2.lifecycle.canTransitionTo(to)) {
+        run2.lifecycle.transition(to, `build ${to}`);
+      } else if (!run2.lifecycle.isTerminal) {
+        if (run2.lifecycle.canTransitionTo("executing")) {
+          run2.lifecycle.transition("executing", "build executing (finalize)");
         }
-        if (run.lifecycle.canTransitionTo(to)) run.lifecycle.transition(to, `build ${to}`);
+        if (run2.lifecycle.canTransitionTo(to)) run2.lifecycle.transition(to, `build ${to}`);
       }
     } catch {
     }
   }
+  /* ============================================================== *
+   * CHANGE REVIEW RPC (#7 — "Review Changes (Verifier-Backed)")
+   * ============================================================== */
+  /**
+   * review/start — START a GOVERNED CHANGE REVIEW and STREAM it as `review/event`
+   * notifications. Mirrors `build/start`'s shape exactly (handshake gate →
+   * synchronous ack `{runId}` → streamed events → ONE terminal result/error), with
+   * ONE deliberate divergence:
+   *
+   * NO APPROVAL MODAL (frozen design decision). A review is READ-ONLY over the
+   * repo, explicitly user-invoked, and its only egress is the same governed
+   * gateway turn the commit-message feature already uses modal-free. Friction
+   * follows authority — a review grants none, so no authority gate interposes.
+   * The invocation is still recorded honestly in the run's hash-chained trace:
+   * the runner's `review_requested` event (scope + baseRef + diffSha256) is the
+   * auditable record, appended through the SAME trace writer this handler mints.
+   *
+   * THE RUNNER IS INJECTED (`ChangeReviewConfig.runner`, mirroring
+   * `AgenticBuildConfig.runner`): Track A's real governed review runner binds in
+   * the integration slice. Until a runner is configured, this handler answers
+   * with an honest JSON-RPC error ("review runner not wired") BEFORE acking — it
+   * never fabricates a review and never dies silently.
+   *
+   * HONESTY GATE: the runner's returned {@link ChangeReview} is run through the
+   * contract gate {@link assertChangeReviewWellFormed} before it is streamed — an
+   * over-claiming or malformed review becomes a terminal `error` event (with the
+   * gate's problem tags), never a rendered result.
+   *
+   * CANCELLATION: the run registers in the SAME generic run registry `run/cancel`
+   * uses (an AbortController threaded into the runner). The run is marked
+   * `reviewRun:true`, so a cancel's terminal aborted/error markers are emitted as
+   * honest `review/event`s (the stream this run's client listens on) — same
+   * marker vocabulary as a cancelled build, different (correct) stream.
+   */
+  async handleChangeReviewStart(req) {
+    if (!this.handshakeDone) {
+      this.emit(
+        this.errorResponse(
+          req.id,
+          BridgeErrorCode.InvalidRequest,
+          "review/start before a completed handshake"
+        )
+      );
+      return;
+    }
+    const params = req.params ?? {};
+    const cwd = typeof params.cwd === "string" ? params.cwd.trim() : "";
+    if (cwd.length === 0) {
+      this.emit(
+        this.errorResponse(
+          req.id,
+          BridgeErrorCode.InvalidRequest,
+          "review/start requires a non-empty absolute cwd (the git repo to review)"
+        )
+      );
+      return;
+    }
+    const scope = params.scope;
+    if (!CHANGE_REVIEW_SCOPES.includes(scope)) {
+      this.emit(
+        this.errorResponse(
+          req.id,
+          BridgeErrorCode.InvalidRequest,
+          `review/start requires scope \u2208 {${CHANGE_REVIEW_SCOPES.join(", ")}} (got ${JSON.stringify(params.scope ?? null)})`
+        )
+      );
+      return;
+    }
+    const baseRef = typeof params.baseRef === "string" && params.baseRef.trim().length > 0 ? params.baseRef.trim() : void 0;
+    const runner = this.review?.runner;
+    if (!runner) {
+      this.emit(
+        this.errorResponse(
+          req.id,
+          BridgeErrorCode.InvalidRequest,
+          "review runner not wired \u2014 this supervisor build has no change-review runner configured (the governed review runner binds in the integration slice)"
+        )
+      );
+      return;
+    }
+    const runId = `review-${++this.reviewSeq}`;
+    const ack = { runId };
+    this.emit(this.successResponse(req.id, ack));
+    const abort = new AbortController();
+    try {
+      const created = createRun(this.review?.runsBaseDir ?? this.runsBaseDir);
+      const reviewRun = { runId, dir: created.dir, state: created.state };
+      const tracePath = join17(runSubdirPath(reviewRun.dir, "trace"), "trace.jsonl");
+      const sink = createTraceWriter(tracePath);
+      const reviewLifecycle = new RunLifecycle(reviewRun.state);
+      const reviewServerRun = {
+        created: reviewRun,
+        lifecycle: reviewLifecycle,
+        trust: "governed-unsandboxed",
+        request: {
+          actorType: "codex-cli",
+          autonomyTier: "allowlist",
+          policyPath: "",
+          policyHash: "",
+          workspaceRoot: cwd,
+          runtimeProfile: "local-exec",
+          extensionPosture: "sovereign",
+          worktreeBase: cwd
+        },
+        runtimeIsolated: false,
+        started: true,
+        buildAbort: abort,
+        // Mark the run as a REVIEW so run/cancel's terminal markers ride the
+        // review/event stream (the stream this run's client listens on).
+        reviewRun: true
+      };
+      this.runs.set(runId, reviewServerRun);
+      this.emitChangeReviewEvent({ runId, type: "state", state: "review_started" });
+      this.logLine(`[bridge-server] review/start ${runId} (scope=${scope}, cwd=${cwd}).`);
+      const review = await runner({
+        cwd,
+        scope,
+        ...baseRef ? { baseRef } : {},
+        existingRun: { runId, tracePath, sink },
+        signal: abort.signal,
+        emit: (state) => this.emitChangeReviewEvent({ runId, type: "state", state }),
+        onOperatorLog: (line) => this.logLine(`[bridge-server] [review ${runId}] ${line}`)
+      });
+      if (this.runs.get(runId)?.buildTerminal === true) {
+        this.logLine(`[bridge-server] review/start ${runId} was cancelled mid-flight; suppressing result.`);
+        return;
+      }
+      const gate = assertChangeReviewWellFormed(review);
+      if (gate.ok === false) {
+        this.markRunTerminal(runId, "failed");
+        this.logLine(
+          `[bridge-server] review/start ${runId} REFUSED by the honesty gate: ${gate.problems.join(", ")}.`
+        );
+        this.emitChangeReviewEvent({
+          runId,
+          type: "error",
+          message: `review result failed the contract honesty gate: ${gate.problems.join(", ")}`
+        });
+        return;
+      }
+      if (review.runId !== runId) {
+        this.markRunTerminal(runId, "failed");
+        this.emitChangeReviewEvent({
+          runId,
+          type: "error",
+          message: `review runner returned a review bound to a different run id ('${review.runId}' \u2260 '${runId}') \u2014 refused (one runId end-to-end)`
+        });
+        return;
+      }
+      this.markRunTerminal(runId, "completed");
+      this.emitChangeReviewEvent({ runId, type: "result", review });
+      this.logLine(
+        `[bridge-server] review/start ${runId} \u2192 verdict ${review.verdict.overall} (${review.findings.items.length} advisory finding(s), parseStatus=${review.findings.parseStatus}).`
+      );
+    } catch (err) {
+      if (this.runs.get(runId)?.buildTerminal === true) {
+        this.logLine(`[bridge-server] review/start ${runId} threw after cancel; suppressing error.`);
+        return;
+      }
+      this.markRunTerminal(runId, "failed");
+      this.logLine(
+        `[bridge-server] review/start ${runId} failed: ${String(err?.message ?? err)}`
+      );
+      this.emitChangeReviewEvent({
+        runId,
+        type: "error",
+        message: `change review failed: ${String(err?.message ?? err)}`
+      });
+    }
+  }
+  /** Emit one review/event notification (no id) carrying a {@link ChangeReviewStreamEvent}. */
+  emitChangeReviewEvent(event) {
+    const note = {
+      glyphstudio: BRIDGE_JSONRPC,
+      method: BridgeNotification.ChangeReviewEvent,
+      params: event
+    };
+    this.emit(note);
+  }
+  /* ============================================================== *
+   * BUILD PLAN RPC (#8 — "Plan & Build (Governed)")
+   * ============================================================== */
+  /**
+   * plan/start — START a GOVERNED PLAN RUN and STREAM it as `plan/event`
+   * notifications, then PARK the run awaiting the user's approve/reject. Mirrors
+   * `review/start`'s shape exactly (handshake gate → synchronous ack `{runId}` →
+   * streamed events → ONE terminal result/error), with the park replacing the
+   * review's terminal close.
+   *
+   * NO APPROVAL MODAL (frozen director decision — the same rule documented on
+   * `review/start`). Plan generation is READ-ONLY over the repo: ONE governed
+   * model turn that edits nothing and runs nothing. Friction follows authority,
+   * and planning grants none, so no authority gate interposes BEFORE planning.
+   * The authority gate is NOT skipped — it fires at `build/start`, exactly as it
+   * does for a plan-less build (a plan is advisory provenance, never authority
+   * and never assurance). The invocation is recorded honestly in the run's
+   * hash-chained trace: this handler appends the `plan_proposed` event itself.
+   *
+   * THE RUNNER IS INJECTED (`BuildPlanConfig.runner`, mirroring
+   * `ChangeReviewConfig.runner`): Track A's real governed plan runner binds in
+   * the integration slice. Until a runner is configured, this handler answers
+   * with an honest JSON-RPC error ("plan runner not wired") BEFORE acking — it
+   * never fabricates a plan and never dies silently.
+   *
+   * HONESTY GATE: the runner's returned {@link BuildPlanProposal} is validated
+   * before it streams — runId binding (one id end-to-end), the `advisory: true`
+   * literal, a known parseStatus, and (for parseStatus 'ok') a plan that passes
+   * {@link assertBuildPlanWellFormed}. A malformed/over-cap proposal becomes a
+   * terminal `error` event (with the gate's problem tags) and the run is NOT
+   * parked — never a rendered, approvable result.
+   *
+   * PARK + RESUME (the PendingBuild idiom): on success the handler appends
+   * `plan_proposed` to the run's hash-chained trace, registers a {@link ParkedPlan}
+   * (holding the run dir, trace path, and the LIVE trace writer — also registered
+   * in `remoteTraceWriters`, the same keep-the-writer registry `runApprovedBuild`
+   * reuses), and emits the terminal `result`. The run stays REGISTERED and
+   * NON-TERMINAL: it resolves via `build/start` (same runId + planApproval →
+   * `plan_approved` → the EXISTING approved-build execution on the SAME trace),
+   * `plan/reject` (→ `plan_rejected`, honest close), or `run/cancel`.
+   *
+   * CANCELLATION: the run registers in the SAME generic run registry `run/cancel`
+   * uses and is marked `planRun: true`, so a cancel's terminal aborted/error
+   * markers are emitted as honest `plan/event`s (the stream this run's client
+   * listens on) — the exact stream-mismatch bug #7 fixed post-hoc in 770ebf1,
+   * handled up front here.
+   */
+  async handleBuildPlanStart(req) {
+    if (!this.handshakeDone) {
+      this.emit(
+        this.errorResponse(
+          req.id,
+          BridgeErrorCode.InvalidRequest,
+          "plan/start before a completed handshake"
+        )
+      );
+      return;
+    }
+    const params = req.params ?? {};
+    const cwd = typeof params.cwd === "string" ? params.cwd.trim() : "";
+    if (cwd.length === 0) {
+      this.emit(
+        this.errorResponse(
+          req.id,
+          BridgeErrorCode.InvalidRequest,
+          "plan/start requires a non-empty absolute cwd (the git repo to plan against)"
+        )
+      );
+      return;
+    }
+    const prompt = typeof params.prompt === "string" ? params.prompt.trim() : "";
+    if (prompt.length === 0) {
+      this.emit(
+        this.errorResponse(
+          req.id,
+          BridgeErrorCode.InvalidRequest,
+          "plan/start requires a non-empty prompt (the task to plan)"
+        )
+      );
+      return;
+    }
+    const runner = this.plan?.runner;
+    if (!runner) {
+      this.emit(
+        this.errorResponse(
+          req.id,
+          BridgeErrorCode.InvalidRequest,
+          "plan runner not wired \u2014 this supervisor build has no build-plan runner configured (the governed plan runner binds in the integration slice)"
+        )
+      );
+      return;
+    }
+    const runId = `plan-${++this.planSeq}`;
+    const ack = { runId };
+    this.emit(this.successResponse(req.id, ack));
+    const abort = new AbortController();
+    try {
+      const created = createRun(this.plan?.runsBaseDir ?? this.runsBaseDir);
+      const planRun = { runId, dir: created.dir, state: created.state };
+      const tracePath = join17(runSubdirPath(planRun.dir, "trace"), "trace.jsonl");
+      const sink = createTraceWriter(tracePath);
+      this.remoteTraceWriters.set(runId, sink);
+      this.remoteTracePaths.set(runId, tracePath);
+      const planLifecycle = new RunLifecycle(planRun.state);
+      const planServerRun = {
+        created: planRun,
+        lifecycle: planLifecycle,
+        trust: "governed-unsandboxed",
+        request: {
+          actorType: "codex-cli",
+          autonomyTier: "allowlist",
+          policyPath: "",
+          policyHash: "",
+          workspaceRoot: cwd,
+          runtimeProfile: "local-exec",
+          extensionPosture: "sovereign",
+          worktreeBase: cwd
+        },
+        runtimeIsolated: false,
+        started: true,
+        buildAbort: abort,
+        // Mark the run as a PLAN so run/cancel's terminal markers ride the
+        // plan/event stream (the stream this run's client listens on).
+        planRun: true
+      };
+      this.runs.set(runId, planServerRun);
+      this.emitBuildPlanEvent({ runId, type: "state", state: "plan_started" });
+      this.logLine(`[bridge-server] plan/start ${runId} (cwd=${cwd}).`);
+      const proposal = await runner({
+        cwd,
+        prompt,
+        existingRun: { runId, tracePath, sink },
+        signal: abort.signal,
+        emit: (state) => this.emitBuildPlanEvent({ runId, type: "state", state }),
+        onOperatorLog: (line) => this.logLine(`[bridge-server] [plan ${runId}] ${line}`)
+      });
+      if (this.runs.get(runId)?.buildTerminal === true) {
+        this.logLine(`[bridge-server] plan/start ${runId} was cancelled mid-flight; suppressing result.`);
+        return;
+      }
+      const refuse = (message) => {
+        this.markRunTerminal(runId, "failed");
+        this.logLine(`[bridge-server] plan/start ${runId} REFUSED: ${message}`);
+        this.emitBuildPlanEvent({ runId, type: "error", message });
+      };
+      if (proposal.runId !== runId) {
+        refuse(
+          `plan runner returned a proposal bound to a different run id ('${proposal.runId}' \u2260 '${runId}') \u2014 refused (one runId end-to-end)`
+        );
+        return;
+      }
+      if (proposal.advisory !== true) {
+        refuse("plan proposal failed the contract gate: advisory must be the literal true");
+        return;
+      }
+      if (!PLAN_PARSE_STATUSES.includes(proposal.parseStatus)) {
+        refuse(
+          `plan proposal failed the contract gate: unknown parseStatus ${JSON.stringify(proposal.parseStatus ?? null)}`
+        );
+        return;
+      }
+      if (proposal.parseStatus === "ok") {
+        try {
+          assertBuildPlanWellFormed(proposal.plan);
+        } catch (gateErr) {
+          refuse(
+            `plan proposal failed the contract gate: ${String(gateErr?.message ?? gateErr)}`
+          );
+          return;
+        }
+      } else if (proposal.plan !== void 0) {
+        refuse(
+          `plan proposal failed the contract gate: parseStatus '${proposal.parseStatus}' must not carry a plan`
+        );
+        return;
+      }
+      const runnerRecordedProposal = readTrace(tracePath).some(
+        (t) => t.type === "plan_proposed"
+      );
+      if (!runnerRecordedProposal) {
+        const proposed = {
+          actor: "codex",
+          advisory: true,
+          parseStatus: proposal.parseStatus,
+          ...proposal.reason ? { reason: proposal.reason } : {},
+          ...proposal.plan ? { plan: proposal.plan } : {}
+        };
+        sink.append({
+          v: TRACE_EVENT_VERSION,
+          runId,
+          seq: 0,
+          ts: Date.now(),
+          type: "plan_proposed",
+          payload: proposed,
+          source: "supervisor"
+        });
+      }
+      if (proposal.plan) {
+        this.emitBuildPlanEvent({ runId, type: "plan", plan: proposal.plan });
+      }
+      this.parkedPlans.set(runId, {
+        runId,
+        proposal,
+        cwd,
+        prompt,
+        runDir: planRun.dir,
+        tracePath,
+        sink
+      });
+      this.emitBuildPlanEvent({ runId, type: "result", proposal });
+      this.logLine(
+        `[bridge-server] plan/start ${runId} \u2192 PARKED (parseStatus=${proposal.parseStatus}, ${proposal.plan ? `${proposal.plan.steps.length} step(s)` : "no plan"}).`
+      );
+    } catch (err) {
+      if (this.runs.get(runId)?.buildTerminal === true) {
+        this.logLine(`[bridge-server] plan/start ${runId} threw after cancel; suppressing error.`);
+        return;
+      }
+      this.markRunTerminal(runId, "failed");
+      this.logLine(
+        `[bridge-server] plan/start ${runId} failed: ${String(err?.message ?? err)}`
+      );
+      this.emitBuildPlanEvent({
+        runId,
+        type: "error",
+        message: `plan run failed: ${String(err?.message ?? err)}`
+      });
+    }
+  }
+  /**
+   * plan/reject — REJECT a PARKED plan run (#8). Appends the `plan_rejected`
+   * trace event (with the optional non-secret reason) to the SAME hash-chained
+   * trace that holds `plan_proposed`, closes the run honestly (a terminal
+   * plan/event marker — the rejection is visible on the stream, never silent),
+   * and acks `{ runId, rejected: true }`. An unknown/unparked runId is a
+   * SPECIFIC JSON-RPC error: rejecting a run that is not parked is a caller bug
+   * worth surfacing, not an idempotent no-op.
+   */
+  handleBuildPlanReject(req) {
+    if (!this.handshakeDone) {
+      this.emit(
+        this.errorResponse(
+          req.id,
+          BridgeErrorCode.InvalidRequest,
+          "plan/reject before a completed handshake"
+        )
+      );
+      return;
+    }
+    const params = req.params ?? {};
+    const runId = typeof params.runId === "string" ? params.runId.trim() : "";
+    if (runId.length === 0) {
+      this.emit(
+        this.errorResponse(req.id, BridgeErrorCode.InvalidRequest, "plan/reject requires a non-empty runId")
+      );
+      return;
+    }
+    const parked = this.parkedPlans.get(runId);
+    if (!parked) {
+      this.emit(
+        this.errorResponse(
+          req.id,
+          BridgeErrorCode.InvalidRequest,
+          `plan/reject: '${runId}' is not a parked plan run (already resolved, cancelled, or never parked)`
+        )
+      );
+      return;
+    }
+    this.parkedPlans.delete(runId);
+    const reason = typeof params.reason === "string" && params.reason.trim().length > 0 ? params.reason.trim() : void 0;
+    const rejected = {
+      approvalId: `plan-apr-${runId}`,
+      ...reason ? { reason } : {}
+    };
+    parked.sink.append({
+      v: TRACE_EVENT_VERSION,
+      runId,
+      seq: 0,
+      ts: Date.now(),
+      type: "plan_rejected",
+      payload: rejected,
+      source: "supervisor"
+    });
+    this.markRunTerminal(runId, "completed");
+    this.emitBuildPlanEvent({ runId, type: "state", state: "rejected" });
+    this.logLine(`[bridge-server] plan/reject ${runId} \u2192 plan_rejected recorded; run closed.`);
+    const ack = { runId, rejected: true };
+    this.emit(this.successResponse(req.id, ack));
+  }
+  /** Emit one plan/event notification (no id) carrying a {@link BuildPlanStreamEvent}. */
+  emitBuildPlanEvent(event) {
+    const note = {
+      glyphstudio: BRIDGE_JSONRPC,
+      method: BridgeNotification.BuildPlanEvent,
+      params: event
+    };
+    this.emit(note);
+  }
   /**
    * run/cancel — ABORT an in-flight run (remote-control). The supervisor signals the
    * run's AbortController (SIGKILLing the agentic build's `codex exec` child via
-   * runAgenticBuild's abort listener), transitions the lifecycle to the terminal
-   * `aborted` state, and emits the terminal `build/event {state:'aborted'}`. Idempotent:
+   * runAgenticBuild's abort listener; stopping a change review's findings turn /
+   * inline check), transitions the lifecycle to the terminal `aborted` state, and
+   * emits the terminal aborted/error markers on the run's OWN stream — `build/event`
+   * for a build, `review/event` for a change review (`reviewRun:true`). Idempotent:
    * an unknown or already-terminal run is acknowledged with `cancelled:false` rather
    * than erroring. The result is the ACK only; the run's terminal events stream.
    */
@@ -7999,19 +12568,30 @@ var BridgeServer = class {
       );
       return;
     }
-    const run = this.runs.get(runId);
-    if (!run || run.buildTerminal === true || run.buildAbort === void 0) {
+    const run2 = this.runs.get(runId);
+    if (!run2 || run2.buildTerminal === true || run2.buildAbort === void 0) {
       this.emit(this.successResponse(req.id, { runId, cancelled: false }));
       return;
     }
-    const controller = run.buildAbort;
+    const controller = run2.buildAbort;
+    const isReview = run2.reviewRun === true;
+    const isPlan = run2.planRun === true;
     this.markRunTerminal(runId, "aborted");
     try {
       controller.abort();
     } catch {
     }
-    this.emitAgenticBuildEvent({ runId, type: "state", state: "aborted" });
-    this.emitAgenticBuildEvent({ runId, type: "error", message: "run cancelled by operator" });
+    if (isPlan) {
+      this.parkedPlans.delete(runId);
+      this.emitBuildPlanEvent({ runId, type: "state", state: "aborted" });
+      this.emitBuildPlanEvent({ runId, type: "error", message: "run cancelled by operator" });
+    } else if (isReview) {
+      this.emitChangeReviewEvent({ runId, type: "state", state: "aborted" });
+      this.emitChangeReviewEvent({ runId, type: "error", message: "run cancelled by operator" });
+    } else {
+      this.emitAgenticBuildEvent({ runId, type: "state", state: "aborted" });
+      this.emitAgenticBuildEvent({ runId, type: "error", message: "run cancelled by operator" });
+    }
     this.logLine(`[bridge-server] run/cancel ${runId} \u2192 aborted.`);
     this.emit(this.successResponse(req.id, { runId, cancelled: true }));
   }
@@ -8055,7 +12635,7 @@ var BridgeServer = class {
   canonicalDir(requested) {
     try {
       const real = realpathSync(resolve4(requested));
-      if (!statSync3(real).isDirectory()) return void 0;
+      if (!statSync4(real).isDirectory()) return void 0;
       return real;
     } catch {
       return void 0;
@@ -8082,18 +12662,29 @@ var BridgeServer = class {
     if (!canonicalRoot) {
       return { ok: false, reason: `${surface} workspaceRoot does not exist or is not a directory` };
     }
-    if (this.sessionWorkspaceRoot === void 0) {
-      this.sessionWorkspaceRoot = canonicalRoot;
+    if (this.sessionWorkspaceRoots.size === 0) {
+      this.sessionWorkspaceRoots.add(canonicalRoot);
       this.logLine(`[bridge-server] session workspace root pinned from first ${surface}: ${canonicalRoot}`);
       return { ok: true, root: canonicalRoot };
     }
-    if (canonicalRoot !== this.sessionWorkspaceRoot) {
+    if (!this.sessionWorkspaceRoots.has(canonicalRoot)) {
       this.logLine(
         `[bridge-server] ${surface} refused: requested root resolves outside the session workspace (bound to a different directory).`
       );
       return { ok: false, reason: `${surface} workspaceRoot is not the session workspace root` };
     }
     return { ok: true, root: canonicalRoot };
+  }
+  /**
+   * The session's PRIMARY workspace root: the FIRST root bound into
+   * {@link sessionWorkspaceRoots} (Set preserves insertion order), or undefined when
+   * none is bound yet. Single-root sessions behave exactly as before (the one bound
+   * root IS the primary); used where one representative root is needed (mcp/call's
+   * lazy broker establishment).
+   */
+  primarySessionRoot() {
+    for (const root of this.sessionWorkspaceRoots) return root;
+    return void 0;
   }
   /**
    * Resolve the residency policy for an index build on `workspaceRoot`. Default is the
@@ -8172,6 +12763,11 @@ var BridgeServer = class {
    *      A request that does not exist / is not a directory, or whose canonical root
    *      differs from the bound root → `{ ok:false, hits:[] }` WITHOUT indexing,
    *      reading, or embedding that root.
+   *      MULTI-ROOT (additive `workspaceRoots`): every entry must canonicalize AND be
+   *      a member of the session's bound root SET (handshake-bound) — any failure
+   *      refuses the WHOLE call (fail-closed). Per-root retrieval is merged by
+   *      RANK-INTERLEAVE (round-robin in params order, capped at k) and each hit
+   *      carries the additive `workspaceRoot` it came from.
    *
    * BEST-EFFORT / NON-FATAL: retrieval must NEVER crash chat. On ANY error — a refusal
    * above, the embedder daemon down, a build failure — the result is `{ ok:false,
@@ -8191,12 +12787,37 @@ var BridgeServer = class {
       }
       const params = req.params ?? {};
       const query = typeof params.query === "string" ? params.query : "";
-      const bound = this.bindSessionRoot(params.workspaceRoot, "index/retrieve");
-      if (!bound.ok) {
-        fail2(bound.reason);
-        return;
+      const multiRequested = Array.isArray(params.workspaceRoots) && params.workspaceRoots.length > 0;
+      const canonicalRoots = [];
+      if (multiRequested) {
+        for (const requested of params.workspaceRoots) {
+          const raw = typeof requested === "string" ? requested.trim() : "";
+          if (raw.length === 0) {
+            fail2("index/retrieve workspaceRoots entries must be non-empty strings");
+            return;
+          }
+          const canonical = this.canonicalDir(raw);
+          if (!canonical) {
+            fail2("index/retrieve workspaceRoots entry does not exist or is not a directory");
+            return;
+          }
+          if (!this.sessionWorkspaceRoots.has(canonical)) {
+            this.logLine(
+              `[bridge-server] index/retrieve refused: a requested root resolves outside the session workspace (not a bound session root).`
+            );
+            fail2("index/retrieve workspaceRoots entry is not a session workspace root");
+            return;
+          }
+          if (!canonicalRoots.includes(canonical)) canonicalRoots.push(canonical);
+        }
+      } else {
+        const bound = this.bindSessionRoot(params.workspaceRoot, "index/retrieve");
+        if (!bound.ok) {
+          fail2(bound.reason);
+          return;
+        }
+        canonicalRoots.push(bound.root);
       }
-      const canonicalRoot = bound.root;
       if (query.trim().length === 0) {
         this.emit(this.successResponse(req.id, { ok: true, hits: [] }));
         return;
@@ -8204,37 +12825,61 @@ var BridgeServer = class {
       const k = typeof params.k === "number" && Number.isFinite(params.k) && params.k > 0 ? Math.floor(params.k) : this.index?.defaultK ?? DEFAULT_INDEX_RETRIEVE_K;
       const embedder = this.resolveEmbedder();
       const storeKind = this.resolveStoreKind(params.vectorStore);
-      const entry = this.getOrBuildIndex(canonicalRoot, embedder, void 0, storeKind);
-      await entry.built;
-      const hits = await retrieve({
-        query,
-        embedder,
-        store: entry.store,
-        keywordIndex: entry.keywordIndex,
-        k
-      });
-      const result = {
-        ok: true,
-        hits: hits.map((h) => ({
-          path: h.chunk.path,
-          startLine: h.chunk.startLine,
-          endLine: h.chunk.endLine,
-          text: h.chunk.text,
-          score: h.score,
-          // Display cosine for the citation UI; fall back to score (vector-only path
-          // already has relevance == cosine, so the ?? only fires if it's unset).
-          relevance: h.relevance ?? h.score
-        }))
-      };
+      const perRootHits = await Promise.all(
+        canonicalRoots.map(async (root) => {
+          const entry = this.getOrBuildIndex(root, embedder, void 0, storeKind);
+          await entry.built;
+          const hits = await retrieve({
+            query,
+            embedder,
+            store: entry.store,
+            keywordIndex: entry.keywordIndex,
+            k
+          });
+          return hits.map((h) => ({
+            path: h.chunk.path,
+            startLine: h.chunk.startLine,
+            endLine: h.chunk.endLine,
+            text: h.chunk.text,
+            score: h.score,
+            // Display cosine for the citation UI; fall back to score (vector-only path
+            // already has relevance == cosine, so the ?? only fires if it's unset).
+            relevance: h.relevance ?? h.score,
+            // MULTI-ROOT ONLY: name the canonical root each hit came from so the
+            // consumer can resolve the workspace-relative path. Single-root responses
+            // stay byte-for-byte unchanged (no field).
+            ...multiRequested ? { workspaceRoot: root } : {}
+          }));
+        })
+      );
+      const merged = [];
+      const longest = Math.max(...perRootHits.map((l) => l.length));
+      outer: for (let rank = 0; rank < longest; rank++) {
+        for (const list of perRootHits) {
+          if (rank >= list.length) continue;
+          merged.push(list[rank]);
+          if (merged.length >= k) break outer;
+        }
+      }
+      const result = { ok: true, hits: merged };
       this.logLine(
-        `[bridge-server] index/retrieve ${canonicalRoot}: ${result.hits.length} hit(s) for query (len ${query.length}).`
+        `[bridge-server] index/retrieve ${canonicalRoots.join(", ")}: ${result.hits.length} hit(s) for query (len ${query.length}).`
       );
       this.emit(this.successResponse(req.id, result));
     } catch (err) {
       const message = String(err?.message ?? err);
-      const raw = typeof req.params?.workspaceRoot === "string" ? req.params.workspaceRoot.trim() : "";
-      const wsRoot = raw ? this.canonicalDir(raw) : void 0;
-      if (wsRoot) this.indexStores.delete(wsRoot);
+      const p = req.params;
+      const rawRoots = [];
+      if (typeof p?.workspaceRoot === "string") rawRoots.push(p.workspaceRoot.trim());
+      if (Array.isArray(p?.workspaceRoots)) {
+        for (const r of p.workspaceRoots) {
+          if (typeof r === "string") rawRoots.push(r.trim());
+        }
+      }
+      for (const raw of rawRoots) {
+        const wsRoot = raw ? this.canonicalDir(raw) : void 0;
+        if (wsRoot) this.indexStores.delete(wsRoot);
+      }
       this.logLine(`[bridge-server] index/retrieve failed (non-fatal): ${message}`);
       fail2(`index/retrieve failed: ${message}`);
     }
@@ -8320,6 +12965,95 @@ var BridgeServer = class {
     }
   }
   /**
+   * index/update — INCREMENTALLY apply one debounced save/watch batch (the index-
+   * freshness loop) to the session's ALREADY-BUILT local code index. Serialized
+   * behind {@link indexUpdateTail} so batches never interleave store mutations.
+   *
+   * SECURITY — the SAME index/disclosure boundary as `index/retrieve`/`index/build`:
+   *   1. COMPLETED-HANDSHAKE GATE. Pre-handshake → `{ ok:false }`, no read.
+   *   2. SESSION-ROOT BINDING (the shared {@link bindSessionRoot}); a cross-root /
+   *      missing / non-dir request is refused WITHOUT reading anything.
+   *   3. NO COLD BUILD: only an EXISTING per-workspace index is updated. No index
+   *      yet (or a residency-'disabled' build) → honest refusal, zero file reads —
+   *      this RPC can never be used to make the supervisor index a workspace the
+   *      user did not ask to index.
+   *   4. The batch paths are filtered SUPERVISOR-SIDE through the SAME discovery
+   *      gates a full build uses (updateIndex → discover.filterIndexablePaths):
+   *      hard secret denylist, root .gitignore/.glyphstudioignore, text-source
+   *      allowlist, size/binary caps, symlink/containment rules. A saved `.env`
+   *      can never enter the index through the freshness side door.
+   *
+   * BEST-EFFORT / NON-FATAL: never throws. On ANY error the result is
+   * `{ ok:false, error }` and the CACHED INDEX IS KEPT (unlike a failed full build
+   * there is no poisoned build promise — the store still holds the last good state
+   * and the next save batch simply retries). Nothing egresses code; the result
+   * carries only non-secret COUNTS, never a credential and never file text.
+   */
+  async handleIndexUpdate(req) {
+    const fail2 = (error) => {
+      const result = { ok: false, error };
+      this.emit(this.successResponse(req.id, result));
+    };
+    const run2 = this.indexUpdateTail.then(async () => {
+      try {
+        if (!this.handshakeDone) {
+          fail2("index/update before a completed handshake");
+          return;
+        }
+        const params = req.params ?? {};
+        const bound = this.bindSessionRoot(params.workspaceRoot, "index/update");
+        if (!bound.ok) {
+          fail2(bound.reason);
+          return;
+        }
+        const canonicalRoot = bound.root;
+        const changed = sanitizeRelPathBatch(params.changed);
+        const deleted = sanitizeRelPathBatch(params.deleted);
+        if (changed.length === 0 && deleted.length === 0) {
+          const result2 = {
+            ok: true,
+            stats: { files: 0, ignored: 0, embedded: 0, reused: 0, evictedPaths: 0, embedMs: 0, totalMs: 0 }
+          };
+          this.emit(this.successResponse(req.id, result2));
+          return;
+        }
+        const entry = this.indexStores.get(canonicalRoot);
+        if (!entry) {
+          fail2("index/update: no index has been built for this session yet");
+          return;
+        }
+        const builtStats = await entry.built;
+        if (builtStats.residency === "disabled") {
+          fail2("index/update: index residency is disabled for this workspace");
+          return;
+        }
+        const embedder = this.resolveEmbedder();
+        const stats = await updateIndex({
+          workspaceRoot: canonicalRoot,
+          embedder,
+          store: entry.store,
+          keywordIndex: entry.keywordIndex,
+          changedPaths: changed,
+          deletedPaths: deleted
+        });
+        this.logLine(
+          `[bridge-server] index/update ${canonicalRoot}: ${stats.files} file(s) re-indexed, ${stats.embedded} window(s) re-embedded, ${stats.reused} reused, ${stats.evictedPaths} path(s) evicted, ${stats.ignored} ignored (${stats.totalMs.toFixed(0)}ms).`
+        );
+        const result = { ok: true, stats };
+        this.emit(this.successResponse(req.id, result));
+      } catch (err) {
+        const message = String(err?.message ?? err);
+        this.logLine(`[bridge-server] index/update failed (non-fatal): ${message}`);
+        fail2(`index/update failed: ${message}`);
+      }
+    });
+    this.indexUpdateTail = run2.then(
+      () => void 0,
+      () => void 0
+    );
+    return run2;
+  }
+  /**
    * REMOTE-ACTION TRACE RECORDER (trace-integrity High A). Append ONE remote human
    * action (mobile approval, coding message, diff accept/reject) into the TARGET RUN's
    * REAL hash-chained trace — never a display-only breadcrumb, never a no-op. This is
@@ -8398,7 +13132,7 @@ var BridgeServer = class {
     let tracePath = this.remoteTracePaths.get(runId);
     if (!tracePath) {
       const created = createRun(this.agentic?.runsBaseDir ?? this.runsBaseDir);
-      tracePath = join12(runSubdirPath(created.dir, "trace"), "trace.jsonl");
+      tracePath = join17(runSubdirPath(created.dir, "trace"), "trace.jsonl");
       this.remoteTracePaths.set(runId, tracePath);
     }
     const writer = createTraceWriter(tracePath);
@@ -8416,10 +13150,220 @@ var BridgeServer = class {
     return readTrace(tracePath);
   }
   /**
-   * approval/respond — resolve a PENDING governed-build approval (remote-control). On
-   * `allow`, GRANT the held build's authority and start it down the SAME approved path
-   * (`runApprovedBuild`) — governed codex edits files + the signed verdict streams. On
-   * `deny`, DISCARD the pending build (terminal `build/event` error, codex NOT spawned).
+   * Append ONE VALIDATED `steering_rules_applied` event to a governed run's
+   * hash-chained trace (advise-vs-enforce slice) and mirror it to a live panel.
+   *
+   * BEST-EFFORT BY DESIGN: when no live chain head anchors the run (no terminal
+   * session and no registered writer — e.g. an inline-edit turn with no governed
+   * run), the append is SKIPPED with a logged line and nothing fails. Two live
+   * append paths, never a second writer on the same file (a fork of the chain
+   * head):
+   *   - a run with a live {@link TerminalSession} (the governed chat session)
+   *     appends through the session's OWN sink via `appendTraceEvent`, which
+   *     also mirrors to the run/event stream;
+   *   - a run with a registered `remoteTraceWriters` writer (the agentic-build /
+   *     parked-plan idiom) appends through that writer, mirrored here with the
+   *     same still-live gate `run/recordHuman` uses.
+   *
+   * TRUST POSTURE: the event is ADVISORY provenance of the steering layer — it
+   * records what steering was SENT to the model. It NEVER claims the model
+   * obeyed, it is NOT a policy decision, and the source is the supervisor
+   * default (omitted), not 'human' / 'policy'.
+   */
+  appendSteeringToRun(runId, steering, context) {
+    const run2 = this.runs.get(runId);
+    let appended;
+    try {
+      const sessionAppend = run2?.terminalSession?.appendTraceEvent;
+      if (sessionAppend) {
+        appended = sessionAppend("steering_rules_applied", steering);
+      } else {
+        const live = this.remoteTraceWriters.get(runId);
+        if (!live) {
+          this.logLine(
+            `[bridge-server] ${context}: steering provided but run '${runId}' has no live trace chain head \u2014 steering append skipped (best-effort by design).`
+          );
+          return void 0;
+        }
+        appended = live.append({
+          v: TRACE_EVENT_VERSION,
+          runId,
+          seq: 0,
+          // writer-authoritative
+          ts: Date.now(),
+          // writer-authoritative
+          type: "steering_rules_applied",
+          payload: steering
+        });
+        const stillLive = run2 !== void 0 && run2.buildTerminal !== true && !run2.lifecycle.isTerminal;
+        if (stillLive) {
+          this.emitRunEventEnvelope({
+            rev: RUN_EVENT_PROTOCOL_VERSION,
+            runId,
+            kind: "trace_event",
+            event: appended
+          });
+        }
+      }
+    } catch (err) {
+      this.logLine(
+        `[bridge-server] ${context}: steering append failed (turn/build unaffected): ${String(err?.message ?? err)}`
+      );
+      return void 0;
+    }
+    this.logLine(
+      `[bridge-server] ${context}: steering_rules_applied \u2192 run ${runId} trace seq ${appended.seq} (surface=${steering.surface}, rules=${steering.rules.length}; advisory).`
+    );
+    return appended;
+  }
+  /**
+   * run/recordHuman (#10 Slice 1) — append ONE HUMAN-ORIGIN event (diff
+   * decision / checkpoint marker) to a run's hash-chained trace and return the
+   * appended event's CHAIN POSITION ({ ok, seq, hash }) as evidence. This is
+   * the RPC whose absence made the old "human_accepted recorded" notification
+   * a hollow claim — the append is now real or HONESTLY refused.
+   *
+   * APPEND PATHS:
+   *   - LIVE: the run's one registered `remoteTraceWriters` writer holds the
+   *     chain head in memory — append through it (the recordRemoteAction /
+   *     parked-plan idiom; the chain head never forks).
+   *   - REHYDRATE: the run is closed (no live writer) — resolve its persisted
+   *     trace.jsonl (the memoized `remoteTracePaths` entry, else derived from
+   *     the run dir) and graft onto the validated chain tail via
+   *     {@link rehydrateAppendHumanEvent}.
+   *
+   * TRUST POSTURE: `source` is FORCED to 'human' server-side on BOTH paths; the
+   * payload is data-not-authority. REFUSALS are honest JSON-RPC errors with
+   * DISTINCT messages (unknown runId/no trace file; unreadable/tamper-suspect
+   * tail; over-cap payload; type outside the record-human set) — NEVER a
+   * silent success.
+   *
+   * NOTIFICATION CHOICE: the appended event is ALSO emitted as a `run/event`
+   * trace_event envelope IFF the run is still open (registered and
+   * non-terminal) so a live Trust Panel renders it in stream order. A CLOSED
+   * run gets NO notification — the append is durable in the trace file, and
+   * that durability (not a transient toast) is the point; replay/inspection
+   * surfaces read the file.
+   */
+  handleRecordHuman(req) {
+    if (!this.handshakeDone) {
+      this.emit(
+        this.errorResponse(
+          req.id,
+          BridgeErrorCode.InvalidRequest,
+          "run/recordHuman before a completed handshake"
+        )
+      );
+      return;
+    }
+    const params = req.params ?? {};
+    const runId = typeof params.runId === "string" ? params.runId.trim() : "";
+    if (runId.length === 0) {
+      this.emit(
+        this.errorResponse(
+          req.id,
+          BridgeErrorCode.InvalidRequest,
+          "run/recordHuman requires a non-empty runId"
+        )
+      );
+      return;
+    }
+    try {
+      assertRecordHumanWellFormed(params.type, params.payload);
+    } catch (err) {
+      this.emit(
+        this.errorResponse(
+          req.id,
+          BridgeErrorCode.InvalidRequest,
+          String(err?.message ?? err)
+        )
+      );
+      return;
+    }
+    const type = params.type;
+    let appended;
+    const live = this.remoteTraceWriters.get(runId);
+    if (live) {
+      try {
+        appended = live.append({
+          v: TRACE_EVENT_VERSION,
+          runId,
+          seq: 0,
+          // writer-authoritative
+          ts: Date.now(),
+          // writer-authoritative
+          type,
+          payload: params.payload ?? {},
+          source: "human"
+          // FORCED server-side — never caller-supplied
+        });
+      } catch (err) {
+        this.emit(
+          this.errorResponse(
+            req.id,
+            BridgeErrorCode.InvalidRequest,
+            `run/recordHuman failed to append to the live trace: ${String(err?.message ?? err)}`
+          )
+        );
+        return;
+      }
+    } else {
+      const run3 = this.runs.get(runId);
+      let tracePath = this.remoteTracePaths.get(runId) ?? (run3 ? join17(runSubdirPath(run3.created.dir, "trace"), "trace.jsonl") : void 0);
+      if (tracePath === void 0 && this.runsBaseDir !== void 0) {
+        if (/^[A-Za-z0-9-]+$/.test(runId)) {
+          const candidate = join17(this.runsBaseDir, runId, "trace", "trace.jsonl");
+          if (existsSync9(candidate)) tracePath = candidate;
+        }
+      }
+      if (tracePath === void 0) {
+        this.emit(
+          this.errorResponse(
+            req.id,
+            BridgeErrorCode.InvalidRequest,
+            `run/recordHuman: unknown runId '${runId}' and no trace file \u2014 nothing to append to`
+          )
+        );
+        return;
+      }
+      try {
+        appended = rehydrateAppendHumanEvent(tracePath, {
+          runId,
+          type,
+          payload: params.payload
+        });
+      } catch (err) {
+        const message = err instanceof RecordHumanRefusal ? `run/recordHuman refused: ${err.message}` : `run/recordHuman failed: ${String(err?.message ?? err)}`;
+        this.emit(this.errorResponse(req.id, BridgeErrorCode.InvalidRequest, message));
+        return;
+      }
+    }
+    const run2 = this.runs.get(runId);
+    const stillLive = run2 !== void 0 && run2.buildTerminal !== true && !run2.lifecycle.isTerminal;
+    if (stillLive) {
+      this.emitRunEventEnvelope({
+        rev: RUN_EVENT_PROTOCOL_VERSION,
+        runId,
+        kind: "trace_event",
+        event: appended
+      });
+    }
+    this.logLine(
+      `[bridge-server] run/recordHuman ${type} \u2192 run ${runId} trace seq ${appended.seq} (source=human${stillLive ? "; streamed" : "; run closed \u2014 durable append only"}).`
+    );
+    const result = { ok: true, seq: appended.seq, hash: appended.hash };
+    this.emit(this.successResponse(req.id, result));
+  }
+  /**
+   * approval/respond — resolve a PENDING approval. Two kinds share this ONE RPC:
+   *   - a PENDING governed-build approval (remote-control): on `allow`, GRANT the
+   *     held build's authority and start it down the SAME approved path
+   *     (`runApprovedBuild`) — governed codex edits files + the signed verdict
+   *     streams; on `deny`, DISCARD the pending build (terminal `build/event`
+   *     error, codex NOT spawned);
+   *   - a HELD `mcp/call` whose policy decision was ask/force_ask (#9 Slice 2):
+   *     the verdict settles the awaiting handler, which traces
+   *     approval_approved/approval_denied and executes or refuses honestly.
    * Idempotent: an unknown approvalId is acknowledged with `resolved:false`.
    */
   handleApprovalRespond(req) {
@@ -8439,6 +13383,17 @@ var BridgeServer = class {
           BridgeErrorCode.InvalidRequest,
           "approval/respond requires an approvalId and decision allow|deny"
         )
+      );
+      return;
+    }
+    const pendingMcp = this.pendingMcpApprovals.get(approvalId);
+    if (pendingMcp) {
+      this.logLine(
+        `[bridge-server] approval/respond ${approvalId} ${decision.toUpperCase()} \u2014 resolving held MCP call.`
+      );
+      pendingMcp(decision);
+      this.emit(
+        this.successResponse(req.id, { approvalId, decision, resolved: true })
       );
       return;
     }
@@ -8476,10 +13431,16 @@ var BridgeServer = class {
         resolved: true
       })
     );
-    void this.runApprovedBuild(pending.runId, pending.prompt, pending.cwd, {
-      runDir: pending.runDir,
-      tracePath: pending.tracePath
-    });
+    void this.runApprovedBuild(
+      pending.runId,
+      pending.prompt,
+      pending.cwd,
+      {
+        runDir: pending.runDir,
+        tracePath: pending.tracePath
+      },
+      pending.steering
+    );
   }
   /**
    * Map ONE {@link GovernedAgenticEvent} from the runner onto the build/event wire
@@ -8530,6 +13491,399 @@ var BridgeServer = class {
       params: event
     };
     this.emit(note);
+  }
+  /* ============================================================== *
+   * MCP BROKERING RPC (#9 — governed MCP tool brokering, Slice 1)
+   * ============================================================== */
+  /**
+   * Ensure the connection's MCP broker state exists for `root` (the pinned
+   * session workspace root): load `.glyphstudio/mcp.json` and RECONCILE the
+   * supervisor-owned server clients against it. Clients are LAZY (a client is
+   * constructed here but its child is only spawned on first list/call), reused
+   * across calls while their spec is unchanged, and REPLACED (old child
+   * disposed) when a config edit changes their command/args/env. Clients whose
+   * entry disappeared are disposed. Never throws — config problems surface as
+   * honest per-entry/file errors.
+   */
+  ensureMcpBroker(root) {
+    const loaded = loadMcpConfig(root);
+    const prevClients = this.mcpBroker?.root === root ? this.mcpBroker.clients : void 0;
+    if (this.mcpBroker && this.mcpBroker.root !== root) {
+      for (const client of this.mcpBroker.clients.values()) void client.dispose();
+    }
+    const clients = /* @__PURE__ */ new Map();
+    for (const entry of loaded.entries) {
+      if (!entry.ok) continue;
+      const spec = entry.spec;
+      const specIdentity = JSON.stringify({ command: spec.command, args: spec.args, env: spec.env });
+      const existing = prevClients?.get(entry.name);
+      if (existing && existing.specIdentity === specIdentity) {
+        clients.set(entry.name, existing);
+        prevClients?.delete(entry.name);
+        continue;
+      }
+      clients.set(
+        entry.name,
+        new McpStdioClient(spec, {
+          ...this.mcp?.callTimeoutMs !== void 0 ? { callTimeoutMs: this.mcp.callTimeoutMs } : {},
+          logLine: (line) => this.logLine(`[bridge-server] ${line}`)
+        })
+      );
+    }
+    if (prevClients) {
+      for (const stale of prevClients.values()) void stale.dispose();
+    }
+    this.mcpBroker = {
+      root,
+      entries: loaded.entries,
+      ...loaded.fileError !== void 0 ? { fileError: loaded.fileError } : {},
+      clients
+    };
+    if (loaded.fileError) {
+      this.logLine(`[bridge-server] mcp config error for ${root}: ${loaded.fileError}`);
+    }
+    return this.mcpBroker;
+  }
+  /**
+   * mcp/list — report the brokered MCP servers + tools for the session
+   * workspace's `.glyphstudio/mcp.json`, with an HONEST per-server status.
+   *
+   * NO POLICY GATE ON LISTING — deliberately. Listing is local config
+   * introspection plus tool DISCOVERY: it executes no tool, mutates nothing,
+   * and discloses only what the operator's own mcp.json configured (plus the
+   * third-party server's self-reported tool names/schemas). The governed
+   * boundary is per-CALL: every `tools/call` goes through decide() in
+   * {@link handleMcpCall}. Honesty note: discovery DOES spawn the configured
+   * server child (third-party code, under the sanitized PATH/HOME-only env) —
+   * that is the unavoidable cost of asking a stdio server what tools it has,
+   * and it is exactly what the operator opted into by writing the config entry.
+   *
+   * Session-bound like the index RPCs: the requested workspaceRoot must
+   * resolve to the connection's pinned session root (bindSessionRoot).
+   */
+  async handleMcpList(req) {
+    if (!this.handshakeDone) {
+      this.emit(
+        this.errorResponse(
+          req.id,
+          BridgeErrorCode.InvalidRequest,
+          "mcp/list before a completed handshake"
+        )
+      );
+      return;
+    }
+    const params = req.params ?? {};
+    const bound = this.bindSessionRoot(params.workspaceRoot, "mcp/list");
+    if (!bound.ok) {
+      this.emit(this.errorResponse(req.id, BridgeErrorCode.InvalidRequest, bound.reason));
+      return;
+    }
+    try {
+      const broker = this.ensureMcpBroker(bound.root);
+      const servers = [];
+      for (const entry of broker.entries) {
+        if (!entry.ok) {
+          servers.push({ name: entry.name, status: "disabled", reason: entry.reason, tools: [] });
+          continue;
+        }
+        const client = broker.clients.get(entry.name);
+        if (!client) {
+          servers.push({ name: entry.name, status: "disabled", reason: "no client (internal)", tools: [] });
+          continue;
+        }
+        try {
+          const listing = await client.listTools();
+          const notes = [];
+          if (entry.spec.ignoredKeys.length > 0) {
+            notes.push(`ignored unsupported config field(s): ${entry.spec.ignoredKeys.join(", ")}`);
+          }
+          if (listing.droppedTools > 0) {
+            notes.push(`${listing.droppedTools} tool(s) dropped at the cap gate`);
+          }
+          servers.push({
+            name: entry.name,
+            status: "ok",
+            ...notes.length > 0 ? { reason: notes.join("; ") } : {},
+            tools: listing.tools
+          });
+        } catch (err) {
+          servers.push({
+            name: entry.name,
+            status: client.status,
+            reason: client.statusReason ?? String(err?.message ?? err),
+            tools: []
+          });
+        }
+      }
+      const result = { servers };
+      this.emit(this.successResponse(req.id, result));
+    } catch (err) {
+      this.emit(
+        this.errorResponse(
+          req.id,
+          BridgeErrorCode.InvalidRequest,
+          `mcp/list failed: ${String(err?.message ?? err)}`
+        )
+      );
+    }
+  }
+  /**
+   * mcp/call — broker ONE MCP tool call (#9). The supervisor:
+   *   1. RE-VALIDATES the wire shape with the contract gate
+   *      {@link assertMcpCallWellFormed} (malformed → JSON-RPC error carrying
+   *      the gate's dotted problem tags — never repaired);
+   *   2. routes the call through decide() as tool kind 'mcp' with capability
+   *      `mcp/<server>/<tool>` BEFORE anything reaches the third-party server.
+   *      The request's provenance is 'user' (the first-party UI asks on the
+   *      operator's behalf — the agent-loop dispatch default); the RESULT data
+   *      is what carries the 'mcp' (UNTRUSTED) provenance label;
+   *   3. TRACES with EXISTING event types only — policy_decision before
+   *      execution, tool_start/tool_end around it — on the SAME hash-chained
+   *      trace the connection's governed chat session uses (lazily opened via
+   *      {@link ensureChatGovernedSession} exactly like chat/send; no session
+   *      → the call is REFUSED with an honest error, never brokered untraced).
+   *
+   * Decision mapping (Slice 2 — the interactive approval flow is live):
+   *   - allow      → execute via the server client; 'ok'/'error' honestly.
+   *   - deny       → status 'denied' (an honest RESULT, not a JSON-RPC error).
+   *   - ask / force_ask → the call is HELD ({@link awaitMcpApprovalVerdict}):
+   *     approval_requested is appended/mirrored (the EXISTING event type — the
+   *     extension renders the modal off the run/event mirror), and the handler
+   *     awaits the operator's `approval/respond` verdict. Allow →
+   *     approval_approved (source 'human') then execute EXACTLY like an
+   *     up-front allow; deny → approval_denied (source 'human') + an honest
+   *     'denied by operator' result; no verdict within
+   *     {@link DEFAULT_MCP_APPROVAL_TIMEOUT_MS} (or the injected
+   *     approvalTimeoutMs) → approval_denied + an honest timed-out 'denied'
+   *     result. ZERO new trace event types.
+   *   - any other decision verb → 'denied' (fail-closed, named honestly).
+   */
+  async handleMcpCall(req) {
+    if (!this.handshakeDone) {
+      this.emit(
+        this.errorResponse(
+          req.id,
+          BridgeErrorCode.InvalidRequest,
+          "mcp/call before a completed handshake"
+        )
+      );
+      return;
+    }
+    let call;
+    try {
+      assertMcpCallWellFormed(req.params);
+      call = req.params;
+    } catch (gateErr) {
+      this.emit(
+        this.errorResponse(
+          req.id,
+          BridgeErrorCode.InvalidRequest,
+          String(gateErr?.message ?? gateErr)
+        )
+      );
+      return;
+    }
+    const respond = (result) => {
+      this.emit(this.successResponse(req.id, result));
+    };
+    try {
+      let broker = this.mcpBroker;
+      if (!broker) {
+        const primaryRoot = this.primarySessionRoot();
+        if (!primaryRoot) {
+          respond({
+            status: "error",
+            reason: "no MCP configuration is loaded for this session \u2014 call mcp/list first"
+          });
+          return;
+        }
+        broker = this.ensureMcpBroker(primaryRoot);
+      }
+      const entry = broker.entries.find((e) => e.name === call.server);
+      if (!entry) {
+        respond({
+          status: "error",
+          reason: `unknown MCP server '${call.server}' (not in .glyphstudio/mcp.json)`
+        });
+        return;
+      }
+      if (!entry.ok) {
+        respond({ status: "error", reason: `server '${call.server}' is disabled: ${entry.reason}` });
+        return;
+      }
+      const client = broker.clients.get(call.server);
+      if (!client) {
+        respond({ status: "error", reason: `server '${call.server}' has no client (internal)` });
+        return;
+      }
+      const governed = await this.ensureChatGovernedSession();
+      if (!governed || !this.runs.has(governed.runId)) {
+        respond({
+          status: "error",
+          reason: "could not open a governed session (run + hash-chained trace) \u2014 refusing to broker an untraced MCP call"
+        });
+        return;
+      }
+      const runId = governed.runId;
+      const run2 = this.runs.get(runId);
+      const tracePath = run2?.created?.dir ? join17(runSubdirPath(run2.created.dir, "trace"), "trace.jsonl") : void 0;
+      if (!tracePath) {
+        respond({
+          status: "error",
+          reason: "governed session has no trace path \u2014 refusing to broker an untraced MCP call"
+        });
+        return;
+      }
+      const sink = createTraceWriter(tracePath);
+      const appendAndMirror = (type, payload, source) => {
+        const appended = sink.append({
+          v: TRACE_EVENT_VERSION,
+          runId,
+          seq: 0,
+          ts: Date.now(),
+          type,
+          payload,
+          ...source !== void 0 ? { source } : {}
+        });
+        this.emitRunEventEnvelope({
+          rev: RUN_EVENT_PROTOCOL_VERSION,
+          runId,
+          kind: "trace_event",
+          event: appended
+        });
+      };
+      const policy = this.mcp?.policy ?? DEFAULT_MCP_POLICY;
+      const request = {
+        runId,
+        tool: "mcp",
+        payload: { server: call.server, tool: call.tool, argsJson: call.argsJson },
+        provenanceLabel: "user",
+        requestedCapability: mcpCapability(call.server, call.tool)
+      };
+      const decision = decide(policy, request);
+      const policyDecision = {
+        tool: request.tool,
+        requestedCapability: request.requestedCapability,
+        decision,
+        provenanceLabel: request.provenanceLabel,
+        server: call.server,
+        mcpTool: call.tool
+      };
+      appendAndMirror("policy_decision", policyDecision);
+      if (decision !== "allow") {
+        const refuse = (reason) => {
+          const blockedEnd = {
+            tool: request.tool,
+            provenanceLabel: request.provenanceLabel,
+            blocked: true,
+            decision
+          };
+          appendAndMirror("tool_end", blockedEnd);
+          respond({ status: "denied", reason });
+        };
+        if (decision === "deny") {
+          refuse(`denied by policy (${request.requestedCapability})`);
+          return;
+        }
+        if (decision !== "ask" && decision !== "force_ask") {
+          refuse(`policy decision '${decision}' is not executable for an MCP call \u2014 denied`);
+          return;
+        }
+        const verdict = await this.awaitMcpApprovalVerdict(call, request, decision, appendAndMirror);
+        if (verdict.verdict !== "allow") {
+          refuse(verdict.reason);
+          return;
+        }
+      }
+      const toolStart = {
+        tool: request.tool,
+        requestedCapability: request.requestedCapability,
+        provenanceLabel: request.provenanceLabel
+      };
+      appendAndMirror("tool_start", toolStart);
+      const startedAt = Date.now();
+      const outcome = await client.callTool(call.tool, call.argsJson, this.mcp?.callTimeoutMs);
+      const toolEnd = {
+        tool: request.tool,
+        durationMs: Date.now() - startedAt,
+        provenanceLabel: "mcp",
+        status: outcome.status,
+        ...outcome.resultJson !== void 0 ? { resultBytes: Buffer.byteLength(outcome.resultJson, "utf8") } : {}
+      };
+      appendAndMirror("tool_end", toolEnd);
+      if (outcome.status === "ok") {
+        respond({
+          status: "ok",
+          ...outcome.resultJson !== void 0 ? { resultJson: outcome.resultJson } : {}
+        });
+      } else {
+        respond({
+          status: "error",
+          ...outcome.reason !== void 0 ? { reason: outcome.reason } : {}
+        });
+      }
+    } catch (err) {
+      this.logLine(`[bridge-server] mcp/call failed: ${String(err?.message ?? err)}`);
+      respond({
+        status: "error",
+        reason: `mcp/call failed: ${String(err?.message ?? err)}`
+      });
+    }
+  }
+  /**
+   * HOLD one ask/force_ask `mcp/call` for an interactive operator verdict (#9
+   * Slice 2). Appends `approval_requested` (the EXISTING event type, carrying
+   * approvalId + server/tool so the extension's modal can correlate — argsJson
+   * is NOT traced here; the extension already holds it and the redaction-at-write
+   * posture keeps free-form values out of the chain), parks a single-shot
+   * resolver in {@link pendingMcpApprovals} for `approval/respond`, and arms the
+   * honest timeout. Resolution appends `approval_approved` / `approval_denied`
+   * (source 'human' for a real operator verdict; source-less for the
+   * timeout/shutdown denial — no human acted). ZERO new trace event types.
+   * Resolve-never-reject.
+   */
+  awaitMcpApprovalVerdict(call, request, decision, appendAndMirror) {
+    const approvalId = `mcp-apr-${++this.mcpApprovalSeq}-${Date.now()}`;
+    const timeoutMs = this.mcp?.approvalTimeoutMs ?? DEFAULT_MCP_APPROVAL_TIMEOUT_MS;
+    const requested = {
+      approvalId,
+      tool: request.tool,
+      requestedCapability: request.requestedCapability,
+      decision,
+      provenanceLabel: request.provenanceLabel,
+      server: call.server,
+      mcpTool: call.tool
+    };
+    appendAndMirror("approval_requested", requested);
+    this.logLine(
+      `[bridge-server] mcp/call ${request.requestedCapability} HELD for approval ${approvalId} (policy decision: ${decision}, timeout ${timeoutMs}ms).`
+    );
+    return new Promise((resolve5) => {
+      const timer = setTimeout(() => {
+        this.pendingMcpApprovals.delete(approvalId);
+        const reason = `not approved \u2014 no operator decision within ${timeoutMs}ms (policy decision: ${decision}) \u2014 denied`;
+        const denied = { approvalId, reason };
+        appendAndMirror("approval_denied", denied);
+        resolve5({ verdict: "deny", reason });
+      }, timeoutMs);
+      this.pendingMcpApprovals.set(approvalId, (verdict, reasonOverride) => {
+        clearTimeout(timer);
+        this.pendingMcpApprovals.delete(approvalId);
+        if (verdict === "allow") {
+          const approved = {
+            approvalId,
+            note: `operator approved governed MCP call (${request.requestedCapability})`
+          };
+          appendAndMirror("approval_approved", approved, "human");
+          resolve5({ verdict: "allow" });
+          return;
+        }
+        const reason = reasonOverride ?? `denied by operator (${request.requestedCapability})`;
+        const denied = { approvalId, reason };
+        appendAndMirror("approval_denied", denied, reasonOverride === void 0 ? "human" : void 0);
+        resolve5({ verdict: "deny", reason });
+      });
+    });
   }
   /**
    * Lazily create (and reuse) the GOVERNED CHAT SESSION (Finding 1): a real
@@ -8649,7 +14003,10 @@ var BridgeServer = class {
         this.codexLaunch?.codexPath,
         (line) => this.logLine(`[bridge-server] [codex-stderr] ${line}`)
       );
-      this.chatGateway = new ModelGateway({ trace }).register(backend);
+      const ollama = new OllamaChatBackend(
+        this.chat?.ollamaHost ? { host: this.chat.ollamaHost } : {}
+      );
+      this.chatGateway = new ModelGateway({ trace }).register(ollama).register(backend);
     }
     return this.chatGateway;
   }
@@ -8740,11 +14097,38 @@ var verifierPrivateKey;
 if (verifierKeyPath) {
   verifierPrivateKey = resolveVerifierKeypair(verifierKeyPath).privateKey;
 }
+var verifierRuntimeRaw = process.env.GLYPHSTUDIO_VERIFIER_RUNTIME;
+var verifierRuntime = parseSandboxRuntimePreference(verifierRuntimeRaw);
+if (verifierRuntimeRaw && !verifierRuntime) {
+  process.stderr.write(
+    `[bridge-server-cli] ignoring unknown GLYPHSTUDIO_VERIFIER_RUNTIME=${JSON.stringify(verifierRuntimeRaw)} (expected auto|docker|firecracker|off); using the default 'auto'.
+`
+  );
+}
+var agentic = {
+  ...verifierPrivateKey ? { verifierPrivateKey } : {},
+  ...verifierRuntime ? { verifierRuntime } : {}
+};
 var server = serveStdio(process, {
   ...supervisorVersion ? { supervisorVersion } : {},
   ...runsBaseDir ? { runsBaseDir } : {},
-  ...verifierPrivateKey ? { agentic: { verifierPrivateKey } } : {}
+  ...Object.keys(agentic).length > 0 ? { agentic } : {},
+  // THE REAL CHANGE-REVIEW RUNNER (#7 integration slice): bind `review/start`
+  // to the governed review runner via the production adapter, configured from
+  // the SAME knobs as the build path (codex resolved on PATH inside the
+  // adapter; absent codex ⇒ honest findings-'unavailable', verifier still runs).
+  review: { runner: createGovernedChangeReviewRunner(agentic) },
+  // THE REAL BUILD-PLAN RUNNER (#8 integration slice): bind `plan/start` to the
+  // governed plan runner via the production adapter, configured from the SAME
+  // `agentic` object (no config drift; the plan turn has no verifier knobs to
+  // drift anyway — codex resolved on PATH inside the adapter; absent codex ⇒ an
+  // honest parseStatus:'unavailable' proposal, never a fabricated plan).
+  plan: { runner: createGovernedBuildPlanRunner(agentic) }
 });
+if (verifierRuntime) {
+  process.stderr.write(`[bridge-server-cli] verifier runtime preference: ${verifierRuntime}
+`);
+}
 process.stdin.resume();
 process.stdin.on("end", () => {
   process.exit(0);

@@ -362,6 +362,13 @@ export interface AgentRunVerdict {
 	readonly assurance: 'full' | 'degraded';
 	readonly verifierIsolation?: 'inline-unsandboxed' | 'independent-sandboxed';
 	readonly verifyCommandSource?: 'override' | 'swiftpm' | 'xcode' | 'npm' | 'node' | 'none';
+	/**
+	 * Slice 3 (ADDITIVE, optional): the STRUCTURED honest-degrade reason WHY independent
+	 * sandboxed verification did not engage. MIRRORS AgentRunVerdict.isolationUnavailableReason
+	 * (agentRunDetail.ts) — present ONLY on an inline/degraded verdict; display-only honesty,
+	 * never a trust input. Absent on independent and pre-Slice-1 verdicts.
+	 */
+	readonly isolationUnavailableReason?: string;
 	readonly checks: readonly AgentRunCheck[];
 	readonly traceRootHash?: string;
 	readonly signaturePresent: boolean;
@@ -443,6 +450,7 @@ function readVerdict(raw: unknown): AgentRunVerdict | null {
 		assurance?: unknown;
 		verifierIsolation?: unknown;
 		verifyCommandSource?: unknown;
+		isolationUnavailableReason?: unknown;
 		checks?: unknown;
 		traceRootHash?: unknown;
 		signaturePresent?: unknown;
@@ -474,6 +482,11 @@ function readVerdict(raw: unknown): AgentRunVerdict | null {
 		assurance,
 		...(isolation ? { verifierIsolation: isolation } : {}),
 		...(cmdSource ? { verifyCommandSource: cmdSource } : {}),
+		// Slice 3 (additive): tolerate + pass the structured degraded reason through
+		// verbatim (display-only); a missing/blank reason is OMITTED, never defaulted.
+		...(typeof v.isolationUnavailableReason === 'string' && v.isolationUnavailableReason.length > 0
+			? { isolationUnavailableReason: v.isolationUnavailableReason }
+			: {}),
 		checks,
 		...(typeof v.traceRootHash === 'string' && v.traceRootHash.length > 0 ? { traceRootHash: v.traceRootHash } : {}),
 		signaturePresent: v.signaturePresent === true

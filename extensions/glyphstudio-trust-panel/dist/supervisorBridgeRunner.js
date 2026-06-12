@@ -67,11 +67,15 @@ exports.startRunViaBridge = startRunViaBridge;
 exports.startGovernedTerminalSession = startGovernedTerminalSession;
 exports.openChatSession = openChatSession;
 exports.runAgenticBuild = runAgenticBuild;
+exports.runChangeReview = runChangeReview;
+exports.recordHumanViaBridge = recordHumanViaBridge;
+exports.runBuildPlan = runBuildPlan;
 const os = __importStar(require("node:os"));
 const fs = __importStar(require("node:fs"));
 const path = __importStar(require("node:path"));
 const bridge_1 = require("./bridge");
 const supervisorHash_1 = require("./supervisorHash");
+const chatRouter_1 = require("./chatRouter");
 const runEventProtocol_1 = require("./runEventProtocol");
 /*
  * M5 §14 — when a LIVE-STREAMING session's connect (spawn → hash-pin → handshake)
@@ -155,6 +159,11 @@ function buildBridgeEnv(opts) {
     // sanitizeBaseEnv), so the actor can never read the key. Omit ⇒ ephemeral fallback.
     if (opts.verifierKeyPath)
         env.GLYPHSTUDIO_VERIFIER_KEY = opts.verifierKeyPath;
+    // VERIFIER RUNTIME PREFERENCE (Track A / Slice 1): forward the machine-scoped
+    // `glyphstudio.verifierRuntime` choice to the supervisor so the agentic build's
+    // pluggable runtime selection honors it ('auto' default ⇒ omit nothing breaks).
+    if (opts.verifierRuntime)
+        env.GLYPHSTUDIO_VERIFIER_RUNTIME = opts.verifierRuntime;
     if (src.PATH !== undefined)
         env.PATH = src.PATH;
     if (src.HOME !== undefined)
@@ -526,6 +535,11 @@ async function openChatSession(opts) {
         ...(typeof opts.workspaceRoot === 'string' && opts.workspaceRoot.trim().length > 0
             ? { workspaceRoot: opts.workspaceRoot.trim() }
             : {}),
+        // MULTI-ROOT binding (additive): pass ALL workspace folders through to the
+        // handshake so the supervisor binds the session's root SET (bridge.ts sanitizes).
+        ...(Array.isArray(opts.workspaceRoots) && opts.workspaceRoots.length > 0
+            ? { workspaceRoots: opts.workspaceRoots }
+            : {}),
         log: output,
         spawn: opts.spawn ?? bridge_1.defaultBridgeSpawn,
         ...(opts.requestTimeoutMs !== undefined ? { requestTimeoutMs: opts.requestTimeoutMs } : {}),
@@ -537,8 +551,28 @@ async function openChatSession(opts) {
     // so a per-connection serialized stream maps unambiguously to the active turn; we do
     // NOT gate on turnId (which we may not yet know when the first delta lands). The
     // event still CARRIES its turnId for the sink to render/assert.
+    // run/event FAN-OUT (#9 Slice 2b). The governed chat session mirrors its trace
+    // events as `run/event` notifications (the SAME envelope the Trust Panel consumes
+    // on the live-run path) — including the `approval_requested` a parked ask/force_ask
+    // mcp/call emits. Wire the single bridge handler EARLY (before connect — the robust
+    // ordering startLiveRun uses) and fan out to the session's registered listeners; a
+    // throwing listener is logged and never breaks the stream.
+    const runEventListeners = [];
+    bridge.setRunEventHandler((params) => {
+        for (const listener of runEventListeners) {
+            try {
+                listener(params);
+            }
+            catch (err) {
+                output.appendLine(`[host] chat run-event listener threw (ignored): ${String(err?.message ?? err)}`);
+            }
+        }
+    });
     let activeSink;
     let settleActive;
+    // Per-session token rollup (cost router Slice 3): every done-event's honest
+    // backend-reported usage accumulates here; turns without usage add 0.
+    let tokensUsed = 0;
     bridge.setChatDeltaHandler((event) => {
         if (!event)
             return;
@@ -548,8 +582,10 @@ async function openChatSession(opts) {
         catch (err) {
             output.appendLine(`[host] chat-delta sink threw (ignored): ${String(err?.message ?? err)}`);
         }
-        if (event.type === 'done')
+        if (event.type === 'done') {
+            tokensUsed = (0, chatRouter_1.trackSessionTokens)(tokensUsed, event.usage);
             settleActive?.({ ok: true });
+        }
         else if (event.type === 'error')
             settleActive?.({ ok: false, message: event.message });
     });
@@ -581,7 +617,7 @@ async function openChatSession(opts) {
         // rejects (runOneTurn resolves-never-rejects), so a failed turn does not wedge
         // the queue for the next caller.
         let turnQueue = Promise.resolve();
-        const runOneTurn = async (messages, handlers) => {
+        const runOneTurn = async (messages, handlers, routing) => {
             if (disposed) {
                 return { ok: false, message: 'chat session is closed.' };
             }
@@ -597,7 +633,29 @@ async function openChatSession(opts) {
                 };
             });
             activeSink = handlers.onEvent;
-            const ack = await bridge.chatSend({ backendId: exports.CHAT_BACKEND_ID, messages });
+            // Per-turn routing (model picker Slice 2): the caller's resolved backend +
+            // optional model override ride the wire; absent ⇒ the pre-picker codex default.
+            const backendId = typeof routing?.backendId === 'string' && routing.backendId.trim().length > 0
+                ? routing.backendId.trim()
+                : exports.CHAT_BACKEND_ID;
+            const model = typeof routing?.model === 'string' && routing.model.trim().length > 0
+                ? routing.model.trim()
+                : undefined;
+            // Per-turn output ceiling (Slice 3): rides the wire only when positive.
+            const maxOutputTokens = typeof routing?.maxOutputTokens === 'number' &&
+                Number.isFinite(routing.maxOutputTokens) &&
+                routing.maxOutputTokens > 0
+                ? Math.floor(routing.maxOutputTokens)
+                : undefined;
+            const ack = await bridge.chatSend({
+                backendId,
+                ...(model ? { model } : {}),
+                ...(maxOutputTokens !== undefined ? { maxOutputTokens } : {}),
+                // Governed-rules steering provenance (optional, additive): forwarded
+                // verbatim — the supervisor validates strictly and chains the audit event.
+                ...(routing?.steering ? { steering: routing.steering } : {}),
+                messages,
+            });
             if (!ack.ok) {
                 // No stream will arrive — synthesize a terminal error so the UI finalizes.
                 const message = ack.reason;
@@ -618,14 +676,19 @@ async function openChatSession(opts) {
             return { ok: outcome.ok, turnId: ack.turnId, ...(outcome.message ? { message: outcome.message } : {}) };
         };
         const session = {
-            sendTurn(messages, handlers) {
+            sendTurn(messages, handlers, routing) {
                 // Enqueue behind the current tail so turns run strictly FIFO; the next turn
                 // starts only after this one resolves and has cleared the active slots.
-                const result = turnQueue.then(() => runOneTurn(messages, handlers));
+                const result = turnQueue.then(() => runOneTurn(messages, handlers, routing));
                 // Advance the tail with a never-rejecting link so a thrown turn can't wedge
                 // the queue. (runOneTurn resolves-never-rejects, but be defensive.)
                 turnQueue = result.then(() => undefined, () => undefined);
                 return result;
+            },
+            // Per-task token rollup (cost router Slice 3): the honest sum of every
+            // backend-reported done-event usage this session.
+            sessionTokensUsed() {
+                return tokensUsed;
             },
             // Repo-aware retrieval (@Codebase). Delegates straight to the bridge client, which
             // resolves-never-rejects (best-effort): a disposed/failed session yields
@@ -656,6 +719,46 @@ async function openChatSession(opts) {
                     return Promise.resolve({ ok: false, error: 'chat session is closed.' });
                 }
                 return bridge.indexBuild(params, opts);
+            },
+            // Incremental index freshness (the save/watch loop). Same best-effort posture:
+            // a disposed/failed session yields { ok:false } so the background loop never
+            // throws and never toasts — it logs and retries on the next batch.
+            indexUpdate(params) {
+                if (disposed) {
+                    return Promise.resolve({ ok: false, error: 'chat session is closed.' });
+                }
+                return bridge.indexUpdate(params);
+            },
+            // Model-picker probe (Slice 2). Same best-effort posture: a disposed session
+            // yields an honest empty result, never a throw.
+            chatBackends() {
+                if (disposed) {
+                    return Promise.resolve({ ok: false, backends: [], error: 'chat session is closed.' });
+                }
+                return bridge.requestChatBackends();
+            },
+            // Governed MCP brokering (#9). Same best-effort posture as the index RPCs:
+            // a disposed session yields honest failure shapes, never a throw.
+            mcpList(params) {
+                if (disposed) {
+                    return Promise.resolve({ ok: false, servers: [], error: 'chat session is closed.' });
+                }
+                return bridge.mcpList(params);
+            },
+            mcpCall(params) {
+                if (disposed) {
+                    return Promise.resolve({ status: 'error', reason: 'chat session is closed.' });
+                }
+                return bridge.mcpCall(params);
+            },
+            approvalRespond(params) {
+                if (disposed) {
+                    return Promise.resolve({ ok: false, error: 'chat session is closed.' });
+                }
+                return bridge.approvalRespond(params);
+            },
+            onRunEvent(listener) {
+                runEventListeners.push(listener);
             },
             dispose: disposeOnce,
         };
@@ -752,6 +855,9 @@ async function runAgenticBuild(opts) {
             prompt: opts.prompt,
             cwd: opts.cwd,
             approved: opts.approved,
+            // Governed-rules steering provenance (optional, additive): forwarded
+            // verbatim — the supervisor validates strictly and chains the audit event.
+            ...(opts.steering ? { steering: opts.steering } : {}),
         });
         if (!ack.ok) {
             // Refused (unapproved) or transport error — no stream will arrive. Synthesize a
@@ -785,6 +891,380 @@ async function runAgenticBuild(opts) {
         return {
             started: false,
             message: `governed agentic build failed: ${String(err?.message ?? err)}`,
+        };
+    }
+}
+/**
+ * Spawn the packaged bridge-server, connect (spawn + hash-pin + handshake),
+ * register the review-event sink, send `review/start`, KEEP THE CHILD ALIVE
+ * across the streamed `review/event` sequence, capture the terminal `result`
+ * (the ChangeReview) or `error`, then dispose. Mirrors {@link runAgenticBuild}.
+ *
+ * Resolve-never-reject: a connect/refusal/transport failure — including the
+ * supervisor's honest "review runner not wired" refusal — resolves with a
+ * populated, non-started outcome the command path renders honestly.
+ */
+async function runChangeReview(opts) {
+    const { output } = opts;
+    const env = buildBridgeEnv(opts);
+    output.appendLine('');
+    output.appendLine('[host] GlyphStudio change review — spawning packaged bridge-server.');
+    output.appendLine(`[host] bridge-server: ${opts.bridgeServerPath}`);
+    output.appendLine(`[host] reviewing (READ-ONLY): ${opts.cwd} — scope=${opts.scope}` +
+        (opts.baseRef ? ` vs ${opts.baseRef}` : ''));
+    const bridge = new bridge_1.SupervisorBridge({
+        binaryPath: opts.bridgeServerPath,
+        expectedSha256: supervisorHash_1.BUNDLED_BRIDGE_SERVER_SHA256,
+        execPath: process.execPath,
+        env,
+        cwd: env.GLYPHSTUDIO_RUNS_BASE,
+        extensionVersion: opts.extensionVersion,
+        log: output,
+        spawn: opts.spawn ?? bridge_1.defaultBridgeSpawn,
+        ...(opts.requestTimeoutMs !== undefined ? { requestTimeoutMs: opts.requestTimeoutMs } : {}),
+    });
+    let disposed = false;
+    const disposeOnce = () => {
+        if (disposed)
+            return;
+        disposed = true;
+        bridge.dispose();
+    };
+    // ONE review per call → a per-connection sink maps unambiguously to the active
+    // review. Capture the terminal result/error to settle the streamed promise.
+    // Register BEFORE any RPC so an event racing the ack is never dropped.
+    let capturedReview;
+    let settle;
+    bridge.setReviewEventHandler((event) => {
+        if (!event)
+            return;
+        try {
+            opts.onReviewEvent(event);
+        }
+        catch (err) {
+            output.appendLine(`[host] review-event sink threw (ignored): ${String(err?.message ?? err)}`);
+        }
+        if (event.type === 'result') {
+            capturedReview = event.review;
+            settle?.({ ok: true });
+        }
+        else if (event.type === 'error') {
+            settle?.({ ok: false, message: event.message });
+        }
+    });
+    try {
+        const connect = await bridge.connect();
+        if (connect.status !== 'connected') {
+            disposeOnce();
+            return {
+                started: false,
+                message: connect.message || `bridge connect failed: ${connect.status}`,
+            };
+        }
+        const supervisorVersion = connect.handshake?.supervisorVersion;
+        // Bind the terminal-event settle BEFORE review/start so a result/error that
+        // races the ack still settles the review.
+        const settlePromise = new Promise((resolve) => {
+            settle = resolve;
+        });
+        const ack = await bridge.startChangeReview({
+            cwd: opts.cwd,
+            scope: opts.scope,
+            ...(opts.baseRef ? { baseRef: opts.baseRef } : {}),
+        });
+        if (!ack.ok) {
+            // Refused (e.g. "review runner not wired") or transport error — no stream
+            // will arrive. Synthesize a terminal error so the caller's UI finalizes.
+            try {
+                opts.onReviewEvent({ runId: 'review-refused', type: 'error', message: ack.reason });
+            }
+            catch {
+                /* sink threw — the outcome below still reports the failure */
+            }
+            disposeOnce();
+            return {
+                started: false,
+                ...(supervisorVersion ? { supervisorVersion } : {}),
+                message: ack.reason,
+            };
+        }
+        // The review was accepted; wait for the terminal result/error to settle.
+        const outcome = await settlePromise;
+        disposeOnce();
+        return {
+            started: true,
+            runId: ack.runId,
+            ...(capturedReview ? { review: capturedReview } : {}),
+            ...(supervisorVersion ? { supervisorVersion } : {}),
+            message: outcome.ok ? '' : (outcome.message ?? 'review failed'),
+        };
+    }
+    catch (err) {
+        disposeOnce();
+        return {
+            started: false,
+            message: `governed change review failed: ${String(err?.message ?? err)}`,
+        };
+    }
+}
+/**
+ * Spawn the packaged bridge-server, connect (spawn + hash-pin + handshake),
+ * send ONE `run/recordHuman`, and dispose. Resolve-never-reject.
+ */
+async function recordHumanViaBridge(opts) {
+    const { output } = opts;
+    const env = buildBridgeEnv(opts);
+    const bridge = new bridge_1.SupervisorBridge({
+        binaryPath: opts.bridgeServerPath,
+        expectedSha256: supervisorHash_1.BUNDLED_BRIDGE_SERVER_SHA256,
+        execPath: process.execPath,
+        env,
+        cwd: env.GLYPHSTUDIO_RUNS_BASE,
+        extensionVersion: opts.extensionVersion,
+        log: output,
+        spawn: opts.spawn ?? bridge_1.defaultBridgeSpawn,
+        ...(opts.requestTimeoutMs !== undefined ? { requestTimeoutMs: opts.requestTimeoutMs } : {}),
+    });
+    try {
+        const connect = await bridge.connect();
+        if (connect.status !== 'connected') {
+            return {
+                ok: false,
+                error: connect.message || `bridge connect failed: ${connect.status}`,
+            };
+        }
+        const res = await bridge.recordHuman(opts.record);
+        if (!res.ok) {
+            return { ok: false, error: res.error };
+        }
+        output.appendLine(`[host] run/recordHuman ${opts.record.type} → run ${opts.record.runId} appended at trace seq ${res.result.seq}.`);
+        return { ok: true, seq: res.result.seq, hash: res.result.hash };
+    }
+    catch (err) {
+        return {
+            ok: false,
+            error: `run/recordHuman failed: ${String(err?.message ?? err)}`,
+        };
+    }
+    finally {
+        bridge.dispose();
+    }
+}
+/**
+ * Spawn the packaged bridge-server, connect (spawn + hash-pin + handshake),
+ * register the plan-event sink, send `plan/start`, KEEP THE CHILD ALIVE across
+ * the streamed `plan/event` sequence AND the park, capture the terminal
+ * `result` (the BuildPlanProposal) or `error`, and hand back a
+ * {@link PlanRunSession} whose approve/reject resumes/closes the SAME parked
+ * run over the SAME connection. Mirrors {@link runChangeReview}'s connect→sink→
+ * ack→settle skeleton, with the session lifetime of
+ * {@link startGovernedTerminalSession}.
+ *
+ * Resolve-never-reject: a connect/refusal/transport failure — including the
+ * supervisor's honest "plan runner not wired" refusal — resolves with a
+ * populated, non-started outcome the command path renders honestly.
+ */
+async function runBuildPlan(opts) {
+    const { output } = opts;
+    const env = buildBridgeEnv(opts);
+    output.appendLine('');
+    output.appendLine('[host] GlyphStudio governed build plan — spawning packaged bridge-server.');
+    output.appendLine(`[host] bridge-server: ${opts.bridgeServerPath}`);
+    output.appendLine(`[host] planning (READ-ONLY): ${opts.cwd}`);
+    const bridge = new bridge_1.SupervisorBridge({
+        binaryPath: opts.bridgeServerPath,
+        expectedSha256: supervisorHash_1.BUNDLED_BRIDGE_SERVER_SHA256,
+        execPath: process.execPath,
+        env,
+        cwd: env.GLYPHSTUDIO_RUNS_BASE,
+        extensionVersion: opts.extensionVersion,
+        log: output,
+        spawn: opts.spawn ?? bridge_1.defaultBridgeSpawn,
+        ...(opts.requestTimeoutMs !== undefined ? { requestTimeoutMs: opts.requestTimeoutMs } : {}),
+    });
+    let disposed = false;
+    const disposeOnce = () => {
+        if (disposed)
+            return;
+        disposed = true;
+        bridge.dispose();
+    };
+    // ONE plan per call → a per-connection sink maps unambiguously to the active
+    // plan run. Capture the terminal result/error to settle the streamed promise.
+    // Register BEFORE any RPC so an event racing the ack is never dropped.
+    let capturedProposal;
+    let settle;
+    bridge.setPlanEventHandler((event) => {
+        if (!event)
+            return;
+        try {
+            opts.onPlanEvent(event);
+        }
+        catch (err) {
+            output.appendLine(`[host] plan-event sink threw (ignored): ${String(err?.message ?? err)}`);
+        }
+        if (event.type === 'result') {
+            capturedProposal = event.proposal;
+            settle?.({ ok: true });
+        }
+        else if (event.type === 'error') {
+            settle?.({ ok: false, message: event.message });
+        }
+    });
+    try {
+        const connect = await bridge.connect();
+        if (connect.status !== 'connected') {
+            disposeOnce();
+            return {
+                started: false,
+                message: connect.message || `bridge connect failed: ${connect.status}`,
+            };
+        }
+        const supervisorVersion = connect.handshake?.supervisorVersion;
+        // Bind the terminal-event settle BEFORE plan/start so a result/error that
+        // races the ack still settles the plan turn.
+        const settlePromise = new Promise((resolve) => {
+            settle = resolve;
+        });
+        const ack = await bridge.startBuildPlan({ cwd: opts.cwd, prompt: opts.prompt });
+        if (!ack.ok) {
+            // Refused (e.g. "plan runner not wired") or transport error — no stream
+            // will arrive. Synthesize a terminal error so the caller's UI finalizes.
+            try {
+                opts.onPlanEvent({ runId: 'plan-refused', type: 'error', message: ack.reason });
+            }
+            catch {
+                /* sink threw — the outcome below still reports the failure */
+            }
+            disposeOnce();
+            return {
+                started: false,
+                ...(supervisorVersion ? { supervisorVersion } : {}),
+                message: ack.reason,
+            };
+        }
+        const runId = ack.runId;
+        // The plan turn was accepted; wait for the terminal result/error to settle.
+        const outcome = await settlePromise;
+        if (!outcome.ok || !capturedProposal) {
+            // The plan run errored — nothing parked, nothing to approve. Tear down.
+            disposeOnce();
+            return {
+                started: true,
+                runId,
+                ...(supervisorVersion ? { supervisorVersion } : {}),
+                message: outcome.message ?? 'plan run ended without a result',
+            };
+        }
+        const proposal = capturedProposal;
+        // PARKED: keep the child alive — the parked run lives in ITS memory. Hand
+        // back the single-shot session whose approve/reject resolves it.
+        let resolved = false;
+        const session = {
+            runId,
+            async approveAndBuild(approveOpts) {
+                if (resolved || disposed) {
+                    return { started: false, message: 'plan session already resolved/closed.' };
+                }
+                resolved = true;
+                try {
+                    // Bind the build stream + settle BEFORE build/start (events race acks).
+                    let capturedReview;
+                    let settleBuild;
+                    const buildSettle = new Promise((resolve) => {
+                        settleBuild = resolve;
+                    });
+                    bridge.setBuildEventHandler((event) => {
+                        if (!event)
+                            return;
+                        try {
+                            approveOpts.onBuildEvent(event);
+                        }
+                        catch (err) {
+                            output.appendLine(`[host] build-event sink threw (ignored): ${String(err?.message ?? err)}`);
+                        }
+                        if (event.type === 'result') {
+                            capturedReview = event.review;
+                            settleBuild?.({ ok: true });
+                        }
+                        else if (event.type === 'error') {
+                            settleBuild?.({ ok: false, message: event.message });
+                        }
+                    });
+                    // RESUME the parked run: SAME runId, the EXPLICIT authority grant the
+                    // command path acquired (semantics unchanged), and the FINAL plan.
+                    const buildAck = await bridge.startAgenticBuild({
+                        runId,
+                        // Steering-prefixed prompt when the command path resolved governed
+                        // rules at approve time (advise-vs-enforce slice); else the original.
+                        prompt: approveOpts.promptOverride ?? opts.prompt,
+                        cwd: opts.cwd,
+                        approved: true,
+                        planApproval: { plan: approveOpts.plan, edited: approveOpts.edited },
+                        ...(approveOpts.steering ? { steering: approveOpts.steering } : {}),
+                    });
+                    if (!buildAck.ok) {
+                        try {
+                            approveOpts.onBuildEvent({ runId, type: 'error', message: buildAck.reason });
+                        }
+                        catch {
+                            /* sink threw — the outcome below still reports the failure */
+                        }
+                        disposeOnce();
+                        return { started: false, runId, message: buildAck.reason };
+                    }
+                    const buildOutcome = await buildSettle;
+                    disposeOnce();
+                    return {
+                        started: true,
+                        runId: buildAck.runId,
+                        ...(capturedReview ? { review: capturedReview } : {}),
+                        message: buildOutcome.ok ? '' : (buildOutcome.message ?? 'build failed'),
+                    };
+                }
+                catch (err) {
+                    disposeOnce();
+                    return {
+                        started: false,
+                        runId,
+                        message: `plan-approved build failed: ${String(err?.message ?? err)}`,
+                    };
+                }
+            },
+            async reject(reason) {
+                if (resolved || disposed) {
+                    return { ok: false, message: 'plan session already resolved/closed.' };
+                }
+                resolved = true;
+                try {
+                    const rej = await bridge.rejectBuildPlan({ runId, ...(reason ? { reason } : {}) });
+                    return rej.ok
+                        ? { ok: true, message: '' }
+                        : { ok: false, message: rej.reason };
+                }
+                catch (err) {
+                    return { ok: false, message: `plan/reject failed: ${String(err?.message ?? err)}` };
+                }
+                finally {
+                    disposeOnce();
+                }
+            },
+            dispose: disposeOnce,
+        };
+        return {
+            started: true,
+            runId,
+            proposal,
+            ...(supervisorVersion ? { supervisorVersion } : {}),
+            message: '',
+            session,
+        };
+    }
+    catch (err) {
+        disposeOnce();
+        return {
+            started: false,
+            message: `governed build plan failed: ${String(err?.message ?? err)}`,
         };
     }
 }

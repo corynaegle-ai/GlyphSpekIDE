@@ -73,6 +73,7 @@ const fs = __importStar(require("node:fs"));
 const path = __importStar(require("node:path"));
 const vscode = __importStar(require("vscode"));
 const chatParticipant_1 = require("./chatParticipant");
+const chatRouter_1 = require("./chatRouter");
 const commitMessageLogic_1 = require("./commitMessageLogic");
 /* ============================================================== *
  * USER-FACING COPY (AC26 — honest, centralized, never overstates trust)
@@ -684,12 +685,21 @@ async function requestCommitMessage(diff, evidenceMeta, sessionFactory, output, 
         const messages = buildCommitMessages(diff, evidenceMeta);
         let accumulated = '';
         let turnError;
+        // Per-turn routing (model picker Slices 2+3) from the shared cost-router
+        // reader; the honest fallback note + decision reason + "≈" estimate are
+        // logged on this surface's output channel.
+        const routing = (0, chatParticipant_1.resolveChatRoutingFromSettings)('commit-message', (0, chatRouter_1.promptBytesOf)(messages), opened.session.sessionTokensUsed?.());
+        if (routing.note) {
+            output.appendLine(`[commit-message] ${routing.note}`);
+        }
+        output.appendLine(`[commit-message] routing: ${routing.backendId} — ${routing.reason}`);
+        output.appendLine(`[commit-message] estimate: ${routing.estimateLine}`);
         // Time budget (AC23/AC14): race the turn against a timeout.
         const turn = (0, chatParticipant_1.runGatewayTurn)(opened.session, messages, (text) => {
             accumulated += text;
         }, (message) => {
             turnError = message;
-        });
+        }, routing);
         const timeout = new Promise((resolve) => {
             timer = setTimeout(() => resolve({ ok: false, message: 'the governed gateway exceeded the time budget.' }), GATEWAY_TIMEOUT_MS);
         });

@@ -212,6 +212,24 @@
         </h2>
         <div id="live-badges" class="badge-row"></div>
         <div id="live-failures" class="failure-stack"></div>
+        <!--
+          SESSION CHECKPOINT affordance (#10 Slice 3). live.js renders a small
+          run-scoped "Restore checkpoint…" strip here ONLY when the host posted
+          `checkpointAvailable` for the selected run — i.e. only for a checkpoint
+          whose checkpoint_created event really reached that run's hash chain.
+          HONEST copy: the checkpoint is an ADVISORY snapshot of tracked files,
+          never "verified". Empty (no fabricated affordance) otherwise.
+        -->
+        <div id="live-checkpoint"></div>
+        <!--
+          GOVERNED-TERMINAL BROKER CHIPS. live.js renders the run-scoped
+          "Command decisions" strip here ONLY when the host posted
+          `commandDecisionChips` for the selected run — per-command egress
+          decisions the broker really traced (policy_decision events). HONEST
+          copy: soft-plane rows say "observed (soft plane — not blocked)",
+          never "approved"/"verified". Empty (never fabricated) otherwise.
+        -->
+        <div id="live-command-chips"></div>
       </section>
 
       <section class="claims-verdict">

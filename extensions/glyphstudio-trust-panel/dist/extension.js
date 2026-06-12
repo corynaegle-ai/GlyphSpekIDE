@@ -60,6 +60,8 @@ const crypto = __importStar(require("node:crypto"));
 const node_child_process_1 = require("node:child_process");
 const supervisorRunner_1 = require("./supervisorRunner");
 const supervisorBridgeRunner_1 = require("./supervisorBridgeRunner");
+const planDocument_1 = require("./planDocument");
+const changeReview_1 = require("./changeReview");
 const governedTerminalEnv_1 = require("./governedTerminalEnv");
 const agentCli_1 = require("./agentCli");
 const agentLaunch_1 = require("./agentLaunch");
@@ -70,22 +72,37 @@ const ptyHost_1 = require("./ptyHost");
 const nodePtyBaseDirs_1 = require("./nodePtyBaseDirs");
 const inlineScript_1 = require("./inlineScript");
 const chatParticipant_1 = require("./chatParticipant");
+const steeringAudit_1 = require("./steeringAudit");
 const inlineEdit_1 = require("./inlineEdit");
 const terminalCmdK_1 = require("./terminalCmdK");
 const commitMessage_1 = require("./commitMessage");
 const indexStatusBar_1 = require("./indexStatusBar");
+const chatBackendPicker_1 = require("./chatBackendPicker");
+const chatRouter_1 = require("./chatRouter");
 const indexProgress_1 = require("./indexProgress");
+const codeIndexGate_1 = require("./codeIndexGate");
+const indexFreshness_1 = require("./indexFreshness");
+const workspaceRoots_1 = require("./workspaceRoots");
+const indexUpdateFanout_1 = require("./indexUpdateFanout");
+const indexPurge_1 = require("./indexPurge");
 const inlineCompletion_1 = require("./inlineCompletion");
 const ungovernedTerminalNotice_1 = require("./ungovernedTerminalNotice");
 const ungovernedTerminalOpenNotice_1 = require("./ungovernedTerminalOpenNotice");
+const agentInvocationSteer_1 = require("./agentInvocationSteer");
+const terminalContext_1 = require("./terminalContext");
+const commitMessageLogic_1 = require("./commitMessageLogic");
 const governedFloatingTerminal_1 = require("./governedFloatingTerminal");
+const terminalDecisionChips_1 = require("./terminalDecisionChips");
 const autoImport_1 = require("./autoImport");
+const gitContext_1 = require("./gitContext");
+const sessionCheckpoint_1 = require("./sessionCheckpoint");
 const bridgeProtocol_1 = require("./bridgeProtocol");
 const policyHash_1 = require("./policyHash");
 const runEventProtocol_1 = require("./runEventProtocol");
 const mockRunStream_1 = require("./mockRunStream");
 const webviewGestureGate_1 = require("./webviewGestureGate");
 const configScope_1 = require("./configScope");
+const verifierKeyExchange_1 = require("./verifierKeyExchange");
 const governedRunsModel_1 = require("./governedRunsModel");
 const agentRunSnapshot_1 = require("./agentRunSnapshot");
 const agentRunDetail_1 = require("./agentRunDetail");
@@ -145,6 +162,10 @@ function getWebviewGestureGate() {
     if (!webviewGestureGate)
         webviewGestureGate = new webviewGestureGate_1.WebviewGestureGate();
     return webviewGestureGate;
+}
+let recordHumanDecisionCapability;
+function installRecordHumanDecisionCapability(cap) {
+    recordHumanDecisionCapability = cap;
 }
 /**
  * The module-private GOVERNED-RUNS MODEL backing the activity-bar "Governed Runs"
@@ -636,6 +657,23 @@ function resolveReduceMotion() {
     return haloMotion === false;
 }
 /**
+ * Read the MACHINE-SCOPED `glyphstudio.verifierRuntime` setting (Track A / Slice 1 —
+ * the pluggable verifier-runtime preference): 'auto' (default — Docker when its
+ * daemon is up, else the honest inline degrade), 'docker', 'firecracker' (explicit
+ * hard-plane opt-in), or 'off' (never isolate). Forwarded to the bridge-server via
+ * GLYPHSTUDIO_VERIFIER_RUNTIME (supervisorBridgeRunner.buildBridgeEnv). The
+ * `"scope": "machine"` declaration makes VS Code refuse workspace/folder values, so
+ * a repo's .vscode/settings.json cannot redirect verifier execution. An unknown
+ * value degrades to 'auto' (the supervisor independently re-validates). Guarded so
+ * a stub host without getConfiguration is safe.
+ */
+function resolveVerifierRuntime() {
+    if (typeof vscode.workspace.getConfiguration !== 'function')
+        return 'auto';
+    const raw = vscode.workspace.getConfiguration('glyphstudio').get('verifierRuntime', 'auto');
+    return raw === 'docker' || raw === 'firecracker' || raw === 'off' ? raw : 'auto';
+}
+/**
  * Read the GlyphStudio icon symbol sprite (media/glyphstudio-icons.svg) for inline
  * injection into a webview body (docs/assets/ICON-USAGE.md). The sprite is a
  * static, first-party product asset — never untrusted input — so inlining it is
@@ -692,6 +730,19 @@ class TrustPanel {
          */
         this.pendingRunEvents = [];
         /**
+         * Per-run `commandDecisionChips` rows minted before the webview signalled
+         * ready (the chips debounce can fire mid-boot). Latest rows per run only —
+         * replayed on ready, like the other pending seams. View-only; the rows are a
+         * projection of decisions the broker already traced.
+         */
+        this.pendingCommandDecisionChips = new Map();
+        /**
+         * The last chip rows posted per run (serialized) so the debounced repaint
+         * only posts when the rows actually CHANGED. selectRun bypasses this
+         * (force) so a re-focused run always re-syncs its strip.
+         */
+        this.lastPostedChipRowsJson = new Map();
+        /**
          * The most recent AgenticBuildReview posted per runId (Phase C). The webview's
          * decision message carries only { runId, decision } — the host scopes the Accept /
          * Reject outcome (esp. the revert) to EXACTLY this review's changedFiles, so it keeps
@@ -738,6 +789,31 @@ class TrustPanel {
                     const runId = this.pendingSelectRunId;
                     this.pendingSelectRunId = undefined;
                     void this.panel.webview.postMessage({ type: 'selectRun', runId });
+                    // The focused run's trace-anchored checkpoint (if any) rides along, so
+                    // a selection that raced the boot still gets its restore affordance.
+                    this.postCheckpointAvailableForRun(runId);
+                    // …and so do its broker decision chips (re-derived from the store).
+                    this.postCommandDecisionChips(runId, { force: true });
+                }
+                // Replay a pending checkpoint-availability (#10 Slice 3) so an anchor
+                // that landed during webview boot still surfaces its affordance.
+                if (this.pendingCheckpointAvailable) {
+                    const cpMsg = this.pendingCheckpointAvailable;
+                    this.pendingCheckpointAvailable = undefined;
+                    void this.panel.webview.postMessage(cpMsg);
+                }
+                // Replay pending command-decision-chip rows (broker chips) so a chips
+                // repaint that raced the webview boot still reaches the run view.
+                if (this.pendingCommandDecisionChips.size > 0) {
+                    for (const [chipRunId, rows] of this.pendingCommandDecisionChips) {
+                        this.lastPostedChipRowsJson.set(chipRunId, JSON.stringify(rows));
+                        void this.panel.webview.postMessage({
+                            type: 'commandDecisionChips',
+                            runId: chipRunId,
+                            rows,
+                        });
+                    }
+                    this.pendingCommandDecisionChips.clear();
                 }
                 // Replay a pending Agentic Build Review (Phase B) so a preview command
                 // that raced the webview boot still renders its review.
@@ -867,6 +943,18 @@ class TrustPanel {
                     return this.handleAgenticBuildDecision(msg.runId, msg.decision);
                 }
             }
+            else if (msg.type === 'restoreCheckpoint') {
+                // SESSION CHECKPOINT RESTORE (#10 Slice 3). The operator clicked the
+                // run-scoped "Restore checkpoint…" affordance. This message can ONLY
+                // come from our own webview, and the button itself grants NOTHING:
+                // the host re-resolves the checkpoint from the in-memory session
+                // registry by runId+sha (refusing honestly when it is gone) and then
+                // runs the EXACT same modal-confirm-gated restore flow as the
+                // palette command (runCheckpointRestoreFlow). Returned for tests.
+                if (typeof msg.runId === 'string' && typeof msg.sha === 'string') {
+                    return this.handleRestoreCheckpoint(msg.runId, msg.sha);
+                }
+            }
         }, null, this.disposables);
     }
     /**
@@ -906,6 +994,89 @@ class TrustPanel {
             return;
         }
         void this.panel.webview.postMessage({ type: 'selectRun', runId });
+        // The focused run's trace-anchored checkpoint (if any, from the session
+        // registry) rides along so the run view can show its restore affordance.
+        this.postCheckpointAvailableForRun(runId);
+        // …and its broker decision chips, re-derived fresh from the chip store so a
+        // panel opened AFTER the decisions streamed still gets the rows.
+        this.postCommandDecisionChips(runId, { force: true });
+    }
+    /**
+     * Post the run's current command-decision-chip rows (terminal broker chips)
+     * to the webview. Rows are RE-DERIVED from the module store at post time, so
+     * the panel never renders stale rows. Skips a no-change repaint on the
+     * debounced path; `force` (the selectRun/ready path) always re-posts so a
+     * re-focused run re-syncs. Buffered until the webview is ready, like the
+     * other pending seams. View-only — a projection of decisions the broker
+     * already traced; it confers no trust.
+     */
+    postCommandDecisionChips(runId, opts) {
+        const rows = governedTerminalDecisionChips.buildChipRows(runId, Date.now());
+        // Never post (or buffer) an empty strip for a run that never had chip input
+        // — the webview correctly renders nothing for an absent entry.
+        if (rows.length === 0 && !this.lastPostedChipRowsJson.has(runId))
+            return;
+        const json = JSON.stringify(rows);
+        if (!opts?.force && this.lastPostedChipRowsJson.get(runId) === json)
+            return;
+        if (!this.ready) {
+            this.pendingCommandDecisionChips.set(runId, rows);
+            return;
+        }
+        this.lastPostedChipRowsJson.set(runId, json);
+        void this.panel.webview.postMessage({ type: 'commandDecisionChips', runId, rows });
+    }
+    /**
+     * Surface the run-scoped "Restore checkpoint…" affordance (#10 Slice 3) for a
+     * checkpoint. HONESTY: posts NOTHING unless the checkpoint is trace-anchored
+     * (buildCheckpointAvailableMessage returns undefined without a runId — and a
+     * runId is only ever attached after checkpoint_created really reached the
+     * run's hash chain). Buffered until the webview is ready, like the other
+     * pending seams. View-only — the affordance grants nothing; the restore's
+     * modal confirm is the destructive gate.
+     */
+    notifyCheckpointAvailable(cp) {
+        const msg = (0, sessionCheckpoint_1.buildCheckpointAvailableMessage)(cp);
+        if (!msg)
+            return; // not trace-anchored — never surface it
+        if (!this.ready) {
+            this.pendingCheckpointAvailable = msg;
+            return;
+        }
+        void this.panel.webview.postMessage(msg);
+    }
+    /**
+     * Derive-and-post the NEWEST trace-anchored checkpoint for `runId` from the
+     * in-memory session registry (the selectRun / ready-replay path — covers a
+     * panel opened after the anchor landed). Posts nothing when the run has no
+     * anchored checkpoint: the webview then shows no affordance (never fabricated).
+     */
+    postCheckpointAvailableForRun(runId) {
+        const cp = (0, sessionCheckpoint_1.listSessionCheckpoints)().find((c) => c.runId === runId);
+        if (cp)
+            this.notifyCheckpointAvailable(cp);
+    }
+    /**
+     * The webview's `restoreCheckpoint` click (#10 Slice 3). Re-resolve the
+     * checkpoint from the SESSION REGISTRY by runId + sha (the webview carries
+     * only the 12-char display sha) — the registry is in-memory, so "gone" is an
+     * expected honest refusal, never a guess — then reuse the EXACT Slice-2
+     * restore flow (modal destructive confirm listing what changes, scoped
+     * tracked-divergence-only restore, checkpoint_restored anchoring, the same
+     * notification strings).
+     */
+    async handleRestoreCheckpoint(runId, sha) {
+        const folder = vscode.workspace.workspaceFolders?.[0];
+        if (!folder) {
+            void vscode.window.showWarningMessage('GlyphStudio: Restore Checkpoint needs an open workspace folder (a git repository).');
+            return;
+        }
+        const cp = (0, sessionCheckpoint_1.findAnchoredCheckpoint)(runId, sha);
+        if (!cp) {
+            void vscode.window.showWarningMessage(`GlyphStudio: restore failed — ${(0, sessionCheckpoint_1.describeCheckpointGoneFromRegistry)(sha)}`);
+            return;
+        }
+        await runCheckpointRestoreFlow(cp, folder);
     }
     /**
      * Render an AgenticBuildReview (Phase B view layer) in the panel. The host does
@@ -995,33 +1166,90 @@ class TrustPanel {
     async handleAgenticBuildDecision(runId, decision) {
         const entry = this.reviewsByRunId.get(runId);
         if (!entry) {
-            // No retained review for this runId — record the decision honestly without a
-            // working-tree action (we cannot scope a revert to a review we do not have).
-            void vscode.window.showInformationMessage(`GlyphStudio: review decision "${decision}" recorded for run ${runId} (no retained review to act on).`);
+            // No retained review for this runId — no working-tree action is possible (we
+            // cannot scope a revert to a review we do not have), but the DECISION itself
+            // is still appended to the run's trace; the supervisor refuses honestly if it
+            // has never heard of the run, and the copy below never overclaims.
+            const marker = (0, agenticBuildPromotion_1.planDecisionOutcome)(decision, { changedFiles: [] }).traceMarker;
+            const rec = await this.recordDecisionToTrace(runId, marker, {
+                decision,
+                changedFileCount: 0,
+            });
+            const note = (0, agenticBuildPromotion_1.describeDecisionRecording)(rec);
+            if (note.warning) {
+                void vscode.window.showWarningMessage(`GlyphStudio: review decision "${decision}" for run ${runId} (no retained review ` +
+                    `to act on) — ${note.warning}`);
+            }
+            else {
+                void vscode.window.showInformationMessage(`GlyphStudio: review decision "${decision}" recorded for run ${runId}` +
+                    `${note.suffix} (no retained review to act on).`);
+            }
             return;
         }
         const { review, preview, cwd } = entry;
         const plan = (0, agenticBuildPromotion_1.planDecisionOutcome)(decision, review);
-        // A preview/fixture (or a review with no real cwd) has no real working tree to act
-        // on — record the outcome honestly without touching disk.
-        if (preview || !cwd) {
-            void vscode.window.showInformationMessage(`GlyphStudio: ${plan.traceMarker} recorded for ${preview ? 'PREVIEW ' : ''}run ${runId}. ` +
-                `${plan.summary}${preview ? ' (preview — no real changes to apply or revert.)' : ''}`);
+        const changedFileCount = Array.isArray(review.changedFiles) ? review.changedFiles.length : 0;
+        // A PREVIEW/fixture review has no real run behind it — the recording RPC is
+        // NEVER called (there is no trace to append to) and the copy says "noted",
+        // never "recorded": the "recorded" claim is reserved for a real chain append.
+        if (preview) {
+            void vscode.window.showInformationMessage(`GlyphStudio: ${plan.traceMarker} noted for PREVIEW run ${runId} — nothing recorded ` +
+                `to a trace (preview/fixture review; no real changes to apply or revert). ${plan.summary}`);
+            return;
+        }
+        // A real review with no retained cwd has no working tree to act on, but the run
+        // (and its persisted trace) is real — append the decision honestly.
+        if (!cwd) {
+            const rec = await this.recordDecisionToTrace(runId, plan.traceMarker, {
+                decision,
+                changedFileCount,
+                summary: plan.summary,
+            });
+            const note = (0, agenticBuildPromotion_1.describeDecisionRecording)(rec);
+            if (note.warning) {
+                void vscode.window.showWarningMessage(`GlyphStudio: ${note.warning}`);
+            }
+            else {
+                void vscode.window.showInformationMessage(`GlyphStudio: ${plan.traceMarker} recorded for run ${runId}${note.suffix}. ` +
+                    `${plan.summary} (No retained working tree — nothing to apply or revert.)`);
+            }
             return;
         }
         if (decision === 'accepted') {
-            // Keep the changes (already in the working tree). human_accepted is recorded.
+            // Keep the changes (already in the working tree) + APPEND human_accepted to the
+            // run's hash-chained trace (#10 Slice 1 — the append that makes the decision real
+            // evidence; source is forced 'human' supervisor-side).
             //
             // N3: NO post-decision "Stage Changes?" prompt. Accept is the hot path — the
             // changes are already in the working tree, so Accept needs no further action.
             // Staging is an optional git nicety the operator can do themselves (and the diff,
             // not the index, is the safety net), so we DO NOT interrupt the accept with a
-            // notification. Friction belongs at the authority boundary, not after every Accept.
+            // notification. A SUCCESSFUL recording therefore stays silent too — but a FAILED
+            // recording must never be silent (honesty beats the hot path).
+            const rec = await this.recordDecisionToTrace(runId, plan.traceMarker, {
+                decision,
+                changedFileCount,
+            });
+            const note = (0, agenticBuildPromotion_1.describeDecisionRecording)(rec);
+            if (note.warning) {
+                void vscode.window.showWarningMessage(`GlyphStudio: ${note.warning}`);
+            }
             return;
         }
         if (decision === 'changes-requested') {
             // Keep the changes + capture the request. A follow-up build is a later nicety.
-            void vscode.window.showInformationMessage(`GlyphStudio: ${plan.traceMarker} recorded for run ${runId}. ${plan.summary}`);
+            const rec = await this.recordDecisionToTrace(runId, plan.traceMarker, {
+                decision,
+                changedFileCount,
+                summary: plan.summary,
+            });
+            const note = (0, agenticBuildPromotion_1.describeDecisionRecording)(rec);
+            if (note.warning) {
+                void vscode.window.showWarningMessage(`GlyphStudio: ${plan.summary} ${note.warning}`);
+            }
+            else {
+                void vscode.window.showInformationMessage(`GlyphStudio: ${plan.traceMarker} recorded for run ${runId}${note.suffix}. ${plan.summary}`);
+            }
             return;
         }
         // rejected → REVERT exactly the run's changedFiles, behind a destructive confirm.
@@ -1030,27 +1258,66 @@ class TrustPanel {
         const confirm = await vscode.window.showWarningMessage(`Discard the agent's changes to ${n} file(s) in ${cwd}? This reverts EXACTLY the ` +
             "run's changed files (a scoped git operation) and cannot be undone.", { modal: true }, DISCARD);
         if (confirm !== DISCARD) {
-            // Operator backed out of the destructive action — change nothing, keep the diff.
+            // Operator backed out of the destructive action — change nothing, keep the diff,
+            // RECORD nothing (no decision was made).
             return;
         }
+        // The decision is made at confirm — record it BEFORE the revert so even a revert
+        // failure leaves the human_rejected verdict in the chain (the messages below then
+        // carry the real seq, or the honest could-not-record warning).
+        const rec = await this.recordDecisionToTrace(runId, plan.traceMarker, {
+            decision,
+            changedFileCount,
+        });
+        const note = (0, agenticBuildPromotion_1.describeDecisionRecording)(rec);
+        const recordedCopy = note.warning ?? `human_rejected recorded${note.suffix}.`;
         const result = (0, agenticBuildPromotion_1.revertChangedFiles)(cwd, plan.filesToRevert);
         if (!result.isGitRepo) {
             // FAIL SAFE: we cannot auto-revert outside a git repo — tell the user + list the
             // files so they can revert manually. Nothing was changed.
             const list = plan.filesToRevert.map((f) => `  - ${f.path}`).join('\n');
             void vscode.window.showWarningMessage(`GlyphStudio: ${cwd} is not a git repository, so the agent's changes cannot be ` +
-                `auto-reverted. human_rejected recorded. Revert these ${n} file(s) manually:\n${list}`);
+                `auto-reverted. ${recordedCopy} Revert these ${n} file(s) manually:\n${list}`);
             return;
         }
         const failed = result.files.filter((f) => !f.ok);
         if (failed.length === 0) {
-            void vscode.window.showInformationMessage(`GlyphStudio: rejected run ${runId} — reverted the agent's changes to ${n} file(s). ` +
-                'human_rejected recorded.');
+            const message = `GlyphStudio: rejected run ${runId} — reverted the agent's changes to ${n} file(s). ` +
+                recordedCopy;
+            if (note.warning) {
+                void vscode.window.showWarningMessage(message);
+            }
+            else {
+                void vscode.window.showInformationMessage(message);
+            }
         }
         else {
             const list = failed.map((f) => `  - ${f.path}: ${f.error ?? 'failed'}`).join('\n');
             void vscode.window.showWarningMessage(`GlyphStudio: reverted ${n - failed.length}/${n} file(s); ${failed.length} could not be ` +
-                `reverted (human_rejected recorded):\n${list}`);
+                `reverted (${recordedCopy}):\n${list}`);
+        }
+    }
+    /**
+     * APPEND one human decision to the run's hash-chained trace via the narrow
+     * module capability ({@link installRecordHumanDecisionCapability} →
+     * `run/recordHuman`). Resolve-never-reject: `ok:false` (capability missing,
+     * bridge refusal, transport error) is the caller's cue to show the honest
+     * "applied locally but NOT recorded" warning — never a hollow "recorded".
+     */
+    async recordDecisionToTrace(runId, type, payload) {
+        const cap = recordHumanDecisionCapability;
+        if (!cap) {
+            return {
+                ok: false,
+                error: 'the recording capability is not installed (extension not fully activated).',
+            };
+        }
+        try {
+            const res = await cap({ runId, type, payload });
+            return res.ok ? { ok: true, seq: res.seq } : { ok: false, error: res.error };
+        }
+        catch (err) {
+            return { ok: false, error: String(err?.message ?? err) };
         }
     }
     /** Read a run-bundle directory and post its files into the webview. */
@@ -1258,6 +1525,12 @@ class TrustPanel {
         // altitude and never renders a higher assurance than the stream supplies. The
         // scaffold's stubs ingest a no-op, so this is inert until per-surface readers land.
         getGovernanceSurfaceRegistry().dispatch(rawEvent);
+        // Feed the GOVERNED-TERMINAL BROKER CHIPS from the SAME stream: a
+        // policy_decision trace event for a run that IS a governed-terminal session
+        // (the runId-keyed ownership structures decide — never a guess) is folded
+        // into the per-command chip store, and a debounced repaint is scheduled.
+        // Validate-then-fold like the taps above; malformed/foreign input is ignored.
+        ingestGovernedTerminalChipEvent(rawEvent);
         const validation = (0, runEventProtocol_1.validateRunEvent)(rawEvent);
         if (!validation.ok) {
             // SCHEMA-VERSION MISMATCH (sweep-19 Medium #6 — FAIL CLOSED). A `rev` problem
@@ -1588,313 +1861,6 @@ function resolveOutputDir(_repo) {
     return path.join(resolveRunsBase(), stamp);
 }
 /**
- * A STUB ModelGateway. CLEARLY MARKED: it performs NO real provider call and dials
- * NO supervisor — it exists so the governed-chat UI is demoable before the
- * supervisor's stdio bridge server is packaged. It offers a small fixed allowlist
- * and answers an allowlisted call with a synthetic completion; a non-allowlisted
- * model is DENIED (mirroring the broker's default-deny); an untrusted-provenance
- * call surfaces force_ask (mirroring the taint firewall). It NEVER holds, reads, or
- * returns a credential. Replace with the real SupervisorBridge gateway once packaged.
- *
- * NOT exported (spec §9): module-private, reachable only by the first-party
- * command handlers below.
- */
-function stubModelGateway() {
-    const allowed = [
-        {
-            provider: 'anthropic',
-            model: 'claude-3-7-sonnet',
-            endpointHost: 'api.anthropic.com',
-            label: 'anthropic / claude-3-7-sonnet',
-        },
-        {
-            provider: 'openai',
-            model: 'gpt-4o',
-            endpointHost: 'api.openai.com',
-            label: 'openai / gpt-4o',
-        },
-    ];
-    return {
-        // DEMO POSTURE (sweep-20 High #4): this gateway makes NO supervisor call. The
-        // webview reads this and renders the demo/unbrokered state instead of claiming
-        // the call was brokered/auditable/traced.
-        mode: 'stub',
-        async allowlist() {
-            return allowed.slice();
-        },
-        async call(params) {
-            const onList = allowed.some((m) => m.provider === params.provider && m.model === params.model);
-            if (!onList) {
-                return {
-                    decision: 'deny',
-                    ok: false,
-                    error: `model ${params.provider}/${params.model} not on allowlist (default-deny)`,
-                };
-            }
-            const untrusted = params.provenanceLabel !== 'user' && params.provenanceLabel !== 'system';
-            if (untrusted) {
-                return {
-                    decision: 'force_ask',
-                    ok: false,
-                    error: `model call requires confirmation (untrusted provenance '${params.provenanceLabel}')`,
-                };
-            }
-            const turns = params.messages.length;
-            return {
-                decision: 'allow',
-                ok: true,
-                completion: `[stub model:${params.model}] received ${turns} turn(s). This is a synthetic ` +
-                    'completion — no real provider was called. Package the supervisor bridge ' +
-                    'server to broker a real model call.',
-                usage: { inputTokens: turns * 8, outputTokens: 24, costMicroUsd: 0 },
-                traceEventRef: `stub-${Date.now().toString(36)}`,
-            };
-        },
-    };
-}
-/**
- * Singleton governed-chat webview. Hosts the chat + inline-edit surface, surfaces
- * ONLY the supervisor's allowlisted models, renders decision/completion/usage/
- * traceRef, handles deny + force_ask, and DIFF-GATES any edit it applies to a file.
- * The provider credential never reaches this panel — it only ever sees the
- * redacted result from the gateway.
- */
-class ChatPanel {
-    static createOrShow(extensionUri, gateway) {
-        const column = vscode.window.activeTextEditor?.viewColumn ?? vscode.ViewColumn.One;
-        if (ChatPanel.current) {
-            ChatPanel.current.panel.reveal(column);
-            return ChatPanel.current;
-        }
-        const panel = vscode.window.createWebviewPanel('glyphstudioChat', 'GlyphStudio Chat', column, {
-            enableScripts: true,
-            retainContextWhenHidden: true,
-            localResourceRoots: [vscode.Uri.joinPath(extensionUri, 'media')],
-        });
-        ChatPanel.current = new ChatPanel(panel, extensionUri, gateway);
-        return ChatPanel.current;
-    }
-    constructor(panel, extensionUri, gateway) {
-        this.disposables = [];
-        this.ready = false;
-        this.panel = panel;
-        this.extensionUri = extensionUri;
-        this.gateway = gateway;
-        this.panel.webview.html = this.getWebviewContent(this.panel.webview);
-        this.panel.onDidDispose(() => this.dispose(), null, this.disposables);
-        this.panel.webview.onDidReceiveMessage(
-        // RETURN the onMessage promise (VS Code ignores it) so a test can await an
-        // otherwise fire-and-forget message handler deterministically.
-        (msg) => this.onMessage(msg), null, this.disposables);
-    }
-    reveal() {
-        const column = vscode.window.activeTextEditor?.viewColumn ?? vscode.ViewColumn.One;
-        this.panel.reveal(column);
-    }
-    /** Set the active run id the chat brokers calls against. */
-    setRunId(runId) {
-        this.runId = runId;
-        if (this.ready)
-            void this.panel.webview.postMessage({ type: 'chatRunId', runId });
-    }
-    /**
-     * Seed an inline-edit: stash the selection (with its provenance) as context to
-     * fold into the next user turn, and prefill the input via a status message.
-     */
-    seedInlineEdit(filePath, selection, instruction) {
-        this.pendingContext = [
-            {
-                ref: filePath,
-                kind: 'workspace-file',
-                content: selection,
-                provenanceLabel: 'workspace',
-            },
-        ];
-        void this.panel.webview.postMessage({
-            type: 'chatStatus',
-            status: `inline-edit context staged from ${filePath} (${selection.length} chars). Your next message edits it.`,
-        });
-        if (instruction) {
-            // Treat the instruction as an immediate user turn against the selection.
-            void this.handleSend(instruction, true, 'user');
-        }
-    }
-    async onMessage(msg) {
-        if (!msg || typeof msg !== 'object')
-            return;
-        if (msg.type === 'ready') {
-            this.ready = true;
-            // Tell the webview the gateway's honesty posture FIRST (sweep-20 High #4): on
-            // the stub gateway it renders an explicit demo/unbrokered banner and must not
-            // claim the call was brokered/auditable/traced. The webview defaults to the
-            // demo posture until this arrives, so it never over-claims during boot.
-            void this.panel.webview.postMessage({ type: 'chatGatewayMode', mode: this.gateway.mode });
-            const models = await this.gateway.allowlist();
-            // Guard: never forward a credential-shaped field to the webview.
-            void this.panel.webview.postMessage({ type: 'chatAllowlist', models });
-            if (this.runId) {
-                void this.panel.webview.postMessage({ type: 'chatRunId', runId: this.runId });
-            }
-            return;
-        }
-        if (msg.type === 'chatSelectModel') {
-            // Record the operator's model selection (sweep-20 Medium #5). It is RE-VALIDATED
-            // against the current allowlist at send time, so recording a label here is safe
-            // even if the allowlist changes before the next send.
-            const label = typeof msg.label === 'string' ? msg.label : undefined;
-            this.selectedLabel = label && label.length > 0 ? label : undefined;
-            return;
-        }
-        if (msg.type === 'chatSend') {
-            await this.handleSend(String(msg.text ?? ''), Boolean(msg.includeSelection), 'user');
-            return;
-        }
-        if (msg.type === 'chatApproveRetry') {
-            // The operator approved a force_ask: retry as a TRUSTED (user) provenance
-            // turn so the taint firewall permits it (the human is now in the loop).
-            await this.handleSend(String(msg.text ?? ''), Boolean(msg.includeSelection), 'user');
-            return;
-        }
-    }
-    /**
-     * Broker one chat turn. Assembles the {@link ModelCallParams} (WITH any staged
-     * inline-edit context / active selection), calls the gateway, and posts the
-     * redacted result back to the webview. If the result is an allowed completion AND
-     * an inline-edit context was staged, it DIFF-GATES the edit (shows the proposed
-     * change and only applies on explicit confirmation).
-     */
-    async handleSend(text, includeSelection, provenance) {
-        if (!text.trim())
-            return;
-        if (!this.runId) {
-            void this.panel.webview.postMessage({
-                type: 'chatStatus',
-                status: 'no active run — open a governed run first (GlyphStudio: Run Governed Task).',
-            });
-            return;
-        }
-        const contextSources = [];
-        if (this.pendingContext)
-            contextSources.push(...this.pendingContext);
-        if (includeSelection) {
-            const sel = activeEditorSelection();
-            if (sel) {
-                contextSources.push({
-                    ref: sel.ref,
-                    kind: 'workspace-file',
-                    content: sel.text,
-                    provenanceLabel: 'workspace',
-                });
-            }
-        }
-        // Resolve the model THE OPERATOR SELECTED, re-validated against the CURRENT
-        // supervisor allowlist immediately before the call (sweep-20 Medium #5). The
-        // selection wins when still allowlisted; otherwise we fall back to the first
-        // allowlisted model (a single allowlist read covers both branches). This stops
-        // the host calling one model while the operator selected another.
-        const chosen = await this.resolveModelForCall();
-        if (!chosen) {
-            void this.panel.webview.postMessage({
-                type: 'chatStatus',
-                status: 'no allowlisted model is available — the supervisor offered none.',
-            });
-            return;
-        }
-        const params = {
-            runId: this.runId,
-            provider: chosen.provider,
-            model: chosen.model,
-            messages: [{ role: 'user', content: text }],
-            provenanceLabel: provenance,
-            ...(contextSources.length ? { contextSources } : {}),
-        };
-        const result = await this.gateway.call(params);
-        void this.panel.webview.postMessage({ type: 'chatResult', result });
-        // DIFF-GATE an inline edit: if this turn carried file context AND the model
-        // produced an allowed completion, offer to apply it as a diff (never auto-apply).
-        if (this.pendingContext &&
-            result.ok &&
-            result.decision === 'allow' &&
-            typeof result.completion === 'string') {
-            const ctx = this.pendingContext[0];
-            this.pendingContext = undefined;
-            await this.offerDiffGatedEdit(ctx.ref, ctx.content ?? '', result.completion);
-        }
-    }
-    /**
-     * Resolve the model to call (sweep-20 Medium #5). Reads the CURRENT supervisor
-     * allowlist ONCE and honors the operator's selected label when it is STILL
-     * allowlisted; otherwise falls back to the first allowlisted model. Returns
-     * undefined only when the allowlist is empty (the UI then cannot send). Validating
-     * the selection against the live allowlist right before the call means a model the
-     * supervisor has since dropped can never be used just because it was selected.
-     */
-    async resolveModelForCall() {
-        const models = await this.gateway.allowlist();
-        if (models.length === 0)
-            return undefined;
-        if (this.selectedLabel) {
-            const selected = models.find((m) => m.label === this.selectedLabel);
-            if (selected)
-                return selected;
-        }
-        return models[0];
-    }
-    /**
-     * DIFF-GATE a proposed inline edit: show the operator the before/after as a diff
-     * and apply the edit to the file ONLY on explicit confirmation. We never write
-     * the file without the operator choosing "Apply edit".
-     */
-    async offerDiffGatedEdit(ref, before, after) {
-        if (before === after)
-            return;
-        const choice = await vscode.window.showInformationMessage(`GlyphStudio: the model proposed an edit to ${ref}. Review and apply?`, { modal: true }, 'Show diff', 'Apply edit');
-        if (choice === 'Show diff') {
-            // Open a read-only diff between the current selection and the proposal.
-            const left = vscode.Uri.parse(`untitled:${ref} (current)`);
-            const right = vscode.Uri.parse(`untitled:${ref} (proposed)`);
-            const leftDoc = await vscode.workspace.openTextDocument({ content: before });
-            const rightDoc = await vscode.workspace.openTextDocument({ content: after });
-            void left;
-            void right;
-            await vscode.commands.executeCommand('vscode.diff', leftDoc.uri, rightDoc.uri, `GlyphStudio edit · ${ref}`);
-            return;
-        }
-        if (choice === 'Apply edit') {
-            const editor = vscode.window.activeTextEditor;
-            if (editor && !editor.selection.isEmpty) {
-                await editor.edit((b) => b.replace(editor.selection, after));
-            }
-            else {
-                void vscode.window.showWarningMessage('GlyphStudio: no active selection to apply the edit to — edit not applied.');
-            }
-        }
-    }
-    dispose() {
-        ChatPanel.current = undefined;
-        while (this.disposables.length)
-            this.disposables.pop()?.dispose();
-    }
-    getWebviewContent(webview) {
-        const mediaUri = vscode.Uri.joinPath(this.extensionUri, 'media');
-        const htmlPath = vscode.Uri.joinPath(mediaUri, 'chat.html');
-        let html = fs.readFileSync(htmlPath.fsPath, 'utf8');
-        const stylesUri = webview.asWebviewUri(vscode.Uri.joinPath(mediaUri, 'styles.css'));
-        const chatViewUri = webview.asWebviewUri(vscode.Uri.joinPath(mediaUri, 'chatView.js'));
-        const chatUri = webview.asWebviewUri(vscode.Uri.joinPath(mediaUri, 'chat.js'));
-        const nonce = crypto.randomBytes(16).toString('base64');
-        // Inline the GlyphStudio icon sprite (see readIconsSprite / ICON-USAGE.md).
-        const iconsSprite = readIconsSprite(mediaUri);
-        return html
-            .replace('{{iconsSprite}}', iconsSprite)
-            .replace(/\{\{cspSource\}\}/g, webview.cspSource)
-            .replace(/\{\{nonce\}\}/g, nonce)
-            .replace(/\{\{stylesUri\}\}/g, stylesUri.toString())
-            .replace(/\{\{chatViewUri\}\}/g, chatViewUri.toString())
-            .replace(/\{\{chatUri\}\}/g, chatUri.toString());
-    }
-}
-/**
  * Singleton native-chat webview. Owns ONE {@link ChatSession} (opened lazily on the
  * first send and reused across turns), assembles the conversation the webview posts,
  * drives bridge chat/send, and forwards each chat/delta event to the webview. The
@@ -1979,18 +1945,37 @@ class NativeChatPanel {
                 // ensureSession already posted the error.
                 return;
             }
+            // Per-turn routing (model picker Slices 2+3) from the SAME shared
+            // cost-router reader every gateway surface uses; the honest fallback note
+            // (if any) plus the decision reason + "≈" estimate are rendered VISIBLY in
+            // the panel — never a silent reroute.
+            const tokensBefore = session.sessionTokensUsed?.() ?? 0;
+            const routing = (0, chatParticipant_1.resolveChatRoutingFromSettings)('native-chat', (0, chatRouter_1.promptBytesOf)(clean), tokensBefore);
+            if (routing.note) {
+                this.post({ type: 'chatDelta', text: `_${routing.note}_\n\n` });
+            }
+            this.post({
+                type: 'chatDelta',
+                text: `_routed to ${routing.backendId} — ${routing.reason} ${routing.estimateLine}_\n\n`,
+            });
             const outcome = await session.sendTurn(clean, {
                 onEvent: (event) => this.onChatEvent(event),
-            });
+            }, routing);
             // A transport-level failure that produced no terminal event still finalizes.
             if (!outcome.ok && outcome.message) {
                 // onChatEvent already rendered a terminal error if one streamed; if not,
                 // surface the outcome message so the UI never hangs in the thinking state.
-                this.postError(outcome.message);
+                this.postGatewayError(outcome.message);
+            }
+            // ONE-TIME per-task budget warning (cost router Slice 3): fires exactly on
+            // the turn that CROSSED the configured budget (the rollup is monotonic).
+            const budgetNote = (0, chatRouter_1.budgetWarning)(tokensBefore, session.sessionTokensUsed?.() ?? 0, routing.perTaskTokenBudget);
+            if (budgetNote) {
+                this.post({ type: 'chatDelta', text: `\n\n_${budgetNote}_\n\n` });
             }
         }
         catch (err) {
-            this.postError(`chat turn failed: ${String(err?.message ?? err)}`);
+            this.postGatewayError(`chat turn failed: ${String(err?.message ?? err)}`);
         }
         finally {
             this.sending = false;
@@ -2006,7 +1991,7 @@ class NativeChatPanel {
             this.post({ type: 'chatDone' });
         }
         else if (event.type === 'error') {
-            this.postError(event.message);
+            this.postGatewayError(event.message);
         }
     }
     /** Open the chat session lazily; report a connect failure honestly to the webview. */
@@ -2015,7 +2000,7 @@ class NativeChatPanel {
             return this.session;
         const opened = await this.sessionFactory.open();
         if (!opened.connected || !opened.session) {
-            this.postError(opened.message || 'could not open the governed chat session.');
+            this.postGatewayError(opened.message || 'could not open the governed chat session.');
             return undefined;
         }
         this.session = opened.session;
@@ -2026,8 +2011,18 @@ class NativeChatPanel {
         // `ready` signal is delivered once it boots — no pre-ready buffering needed.
         void this.panel.webview.postMessage(msg);
     }
+    /** A local input-validation error (no gateway involved): posted verbatim. */
     postError(message) {
         this.post({ type: 'chatError', message });
+    }
+    /**
+     * Surface a gateway/bridge failure HONESTLY in the webview: the non-secret failure
+     * message, then the classified actionable hint + OutputChannel pointer (the SAME
+     * honest-failure taxonomy the chat participant renders — chatParticipant.ts
+     * classifyGatewayFailure). Never synthetic text, never a silent hang.
+     */
+    postGatewayError(message) {
+        this.post({ type: 'chatError', message: `${message} — ${(0, chatParticipant_1.gatewayFailureDetail)(message)}` });
     }
     dispose() {
         NativeChatPanel.current = undefined;
@@ -2056,18 +2051,6 @@ class NativeChatPanel {
             .replace(/\{\{stylesUri\}\}/g, stylesUri.toString())
             .replace(/\{\{nativeChatUri\}\}/g, nativeChatUri.toString());
     }
-}
-/** The active editor's selection (or whole document) + its workspace ref. */
-function activeEditorSelection() {
-    const editor = vscode.window.activeTextEditor;
-    if (!editor)
-        return undefined;
-    const doc = editor.document;
-    const ref = vscode.workspace.asRelativePath(doc.uri);
-    const text = editor.selection.isEmpty
-        ? doc.getText()
-        : doc.getText(editor.selection);
-    return { ref, text };
 }
 function activate(context) {
     const gate = getWebviewGestureGate();
@@ -2275,6 +2258,83 @@ function activate(context) {
     context.subscriptions.push(vscode.commands.registerCommand('glyphstudio.openTrustPanel', () => {
         TrustPanel.createOrShow(context.extensionUri, gate);
     }));
+    // VERIFIER KEY EXCHANGE (Track C / Slice 4). Per-developer Ed25519 verifier keys
+    // are exchanged MANUALLY, OUT-OF-BAND (chat/email/etc.) — a key NEVER travels
+    // inside a run bundle (the panel intentionally ignores bundle-embedded keys).
+    // These two commands are the whole exchange UX: EXPORT copies this machine's
+    // PUBLIC key (+ its fingerprint, which IS the verdict keyId) for sending; TRUST
+    // validates a pasted key and appends it to glyphstudio.trustedVerifierKeys at
+    // USER/GLOBAL scope ONLY (ConfigurationTarget.Global). The sweep-07 defense
+    // (selectGlobalScopedTrustKeys ignoring workspace scopes + the setting's
+    // "scope": "machine") stays fully intact: we never read merged values and never
+    // write a workspace scope. All parsing / fingerprint / merge logic lives in the
+    // pure, unit-tested verifierKeyExchange module — these handlers are UI glue only.
+    context.subscriptions.push(vscode.commands.registerCommand('glyphstudio.exportVerifierKey', async () => {
+        // Established keystore contract (same as run launch, see ensureVerifierKeystore):
+        // generate on demand. Export is a deliberate operator action, so creating the
+        // keypair here is honest — and the toast says so when it happens.
+        const existedBefore = fs.existsSync(path.join(verifierKeystoreDir(), 'public.pem'));
+        let publicKeyPem;
+        let publicKeyPath;
+        try {
+            const keystore = ensureVerifierKeystore();
+            publicKeyPem = keystore.publicKeyPem;
+            publicKeyPath = keystore.publicKeyPath;
+        }
+        catch (err) {
+            void vscode.window.showErrorMessage(`GlyphStudio: could not read or create the verifier keystore: ${err instanceof Error ? err.message : String(err)}`);
+            return;
+        }
+        const parsed = (0, verifierKeyExchange_1.parseVerifierPublicKeyPem)(publicKeyPem);
+        if (!parsed.ok) {
+            void vscode.window.showErrorMessage(`GlyphStudio: the verifier keystore key at ${publicKeyPath} is invalid — ${parsed.error}`);
+            return;
+        }
+        await vscode.env.clipboard.writeText((0, verifierKeyExchange_1.formatVerifierKeyExportPayload)(parsed.key));
+        void vscode.window.showInformationMessage(`${existedBefore
+            ? 'Verifier public key copied to clipboard.'
+            : 'New verifier keypair created; public key copied to clipboard.'} Fingerprint (verdict keyId): ${(0, verifierKeyExchange_1.formatFingerprintForDisplay)(parsed.key.fingerprint)} — share the fingerprint over a SECOND channel so the receiver can compare.`);
+    }));
+    context.subscriptions.push(vscode.commands.registerCommand('glyphstudio.trustVerifierKey', async () => {
+        const pasted = await vscode.window.showInputBox({
+            title: 'Trust a Verifier Key',
+            prompt: 'Paste the Ed25519 verifier PUBLIC key PEM you received out-of-band',
+            placeHolder: '-----BEGIN PUBLIC KEY----- … (pasting the whole exported message is fine)',
+            ignoreFocusOut: true,
+        });
+        if (pasted === undefined || pasted.trim().length === 0) {
+            return;
+        }
+        const parsed = (0, verifierKeyExchange_1.parseVerifierPublicKeyPem)(pasted);
+        if (!parsed.ok) {
+            void vscode.window.showErrorMessage(`GlyphStudio: ${parsed.error}`);
+            return;
+        }
+        const display = (0, verifierKeyExchange_1.formatFingerprintForDisplay)(parsed.key.fingerprint);
+        const confirm = await vscode.window.showInformationMessage(`Trust verifier key ${display}?`, {
+            modal: true,
+            detail: `Fingerprint (verdict keyId): ${display}\n\n` +
+                'Compare this fingerprint with the sender over a second channel (call/chat) ' +
+                'BEFORE trusting. Verdicts signed by this key will verify as ' +
+                'product-AUTHORITATIVE in the Trust Panel on this machine.',
+        }, 'Trust this key');
+        if (confirm !== 'Trust this key') {
+            return;
+        }
+        const config = vscode.workspace.getConfiguration('glyphstudio');
+        const inspect = config.inspect('trustedVerifierKeys');
+        // Merge into the USER/GLOBAL value only — never the workspace value, which the
+        // sweep-07 read path rejects anyway (a repo must not be able to inject a key).
+        const merge = (0, verifierKeyExchange_1.mergeTrustedVerifierKey)(inspect?.globalValue, parsed.key);
+        if (!merge.added) {
+            void vscode.window.showInformationMessage(`GlyphStudio: verifier key ${display} is already trusted.`);
+            return;
+        }
+        await config.update('trustedVerifierKeys', merge.keys, vscode.ConfigurationTarget.Global);
+        void vscode.window.showInformationMessage(`GlyphStudio: verifier key ${display} trusted (user settings). Trusted keys are ` +
+            'injected when the Trust Panel loads — close and reopen the Trust Panel ' +
+            '(or reload the window) to apply.');
+    }));
     // SET FRICTION TIER (Blended Workbench PATCH-009). The CANONICAL friction control —
     // the native title-bar Authority Ladder (fork, glyphstudioTitleLadder.ts) — invokes
     // this on a rung click. It (a) validates the tier, (b) routes through the SINGLE
@@ -2372,6 +2432,101 @@ function activate(context) {
     const buildOutput = vscode.window.createOutputChannel('GlyphStudio Governed Build');
     context.subscriptions.push(buildOutput);
     context.subscriptions.push(vscode.commands.registerCommand('glyphstudio.promoteChatToBuild', (intentArg) => promoteChatToBuild(context, gate, buildOutput, intentArg)));
+    // Install the NARROW run/recordHuman capability the Trust Panel's Accept /
+    // Reject / Request-changes handler uses to APPEND the operator's decision to
+    // the run's hash-chained trace (#10 Slice 1 — previously the notifications
+    // CLAIMED "recorded" with no append path at all). The build ran in its own
+    // since-disposed bridge child, so this spawns a short-lived child over the
+    // SAME runs base and the supervisor grafts onto the persisted chain tail.
+    installRecordHumanDecisionCapability((record) => (0, supervisorBridgeRunner_1.recordHumanViaBridge)({
+        bridgeServerPath: resolveBundledBridgeServerPath(context),
+        extensionVersion: resolveExtensionVersion(context),
+        runsBase: resolveRunsBase(),
+        output: buildOutput,
+        record,
+    }));
+    // VERIFIER-BACKED CHANGE REVIEW (#7) — "GlyphStudio: Review Changes (Verifier-Backed)".
+    // Reviews the workspace's PROPOSED state (working tree vs HEAD, or branch vs a base
+    // ref) through the governed supervisor: ADVISORY model findings (opinions, never
+    // assurance) + the deterministic verifier verdict — two never-blurring layers. NO
+    // APPROVAL MODAL (frozen design decision): a review is READ-ONLY over the repo,
+    // explicitly user-invoked, and its only egress is the same governed gateway turn the
+    // commit-message feature already uses modal-free — friction follows authority, and a
+    // review grants none. The invocation is recorded honestly in the run's hash-chained
+    // trace (the runner's review_requested event).
+    const reviewOutput = vscode.window.createOutputChannel('GlyphStudio Change Review');
+    context.subscriptions.push(reviewOutput);
+    context.subscriptions.push(vscode.commands.registerCommand('glyphstudio.reviewChanges', () => reviewChanges(context, reviewOutput)));
+    // PLAN & BUILD (#8) — "GlyphStudio: Plan & Build (Governed)". ONE governed
+    // READ-ONLY model turn proposes a structured plan; the run PARKS while the user
+    // reviews/edits the plan as markdown in an untitled editor; approval passes the
+    // EXISTING build authority gate UNCHANGED and resumes the SAME run/trace into
+    // the governed build; rejection closes the run honestly. NO APPROVAL MODAL
+    // before planning (frozen director decision — friction follows authority, and
+    // a plan turn grants none; see promoteChatToBuild for the gate that still
+    // fires before the build executes). `intentArg` is the optional chat-surfaced
+    // prompt — the same "Plan First" seam promoteChatToBuild exposes for builds.
+    context.subscriptions.push(vscode.commands.registerCommand('glyphstudio.planBuild', (intentArg) => planBuild(context, gate, buildOutput, intentArg)));
+    // SESSION CHECKPOINTS (#10 Slice 2). Manual create + restore over the pure
+    // sessionCheckpoint.ts core (git-stash-create dangling commits — no ref
+    // pollution). HONESTY: session-scoped (git-GC-ephemeral, registry not
+    // persisted), advisory (never "verified"), untracked content NOT captured
+    // (paths listed only). A manual checkpoint has no governed run, so it is
+    // surfaced as "not trace-anchored" — allowed, never an error.
+    context.subscriptions.push(vscode.commands.registerCommand('glyphstudio.createCheckpoint', async () => {
+        const folder = vscode.workspace.workspaceFolders?.[0];
+        if (!folder) {
+            void vscode.window.showWarningMessage('GlyphStudio: Create Checkpoint needs an open workspace folder (a git repository).');
+            return;
+        }
+        if (!checkpointEnabled()) {
+            void vscode.window.showInformationMessage('GlyphStudio: checkpoints are disabled (glyphstudio.checkpoint.enabled).');
+            return;
+        }
+        const label = await vscode.window.showInputBox({
+            prompt: 'Checkpoint label (optional)',
+            placeHolder: 'e.g. "before the refactor"',
+        });
+        if (label === undefined)
+            return; // Escape cancels
+        const result = await (0, sessionCheckpoint_1.createSessionCheckpoint)((0, gitContext_1.createProcessGitRunner)(folder.uri.fsPath), {
+            label: label.trim().length > 0 ? label.trim() : 'manual checkpoint',
+        });
+        if (!result.ok) {
+            void vscode.window.showWarningMessage(`GlyphStudio: checkpoint not created — ${result.error}`);
+            return;
+        }
+        const cp = result.checkpoint;
+        const changed = cp.changedFiles.length + cp.changedFilesOmitted;
+        const untracked = cp.untrackedPaths.length + cp.untrackedOmitted;
+        void vscode.window.showInformationMessage(`GlyphStudio: checkpoint ${(0, sessionCheckpoint_1.shortSha)(cp.sha)} created — ${changed} tracked changed file(s) ` +
+            `captured, ${untracked} untracked path(s) listed (content NOT captured). ` +
+            `${sessionCheckpoint_1.NOT_TRACE_ANCHORED} (no governed run attached). ${sessionCheckpoint_1.CHECKPOINT_ADVISORY_NOTE}`);
+    }));
+    context.subscriptions.push(vscode.commands.registerCommand('glyphstudio.restoreCheckpoint', async () => {
+        const folder = vscode.workspace.workspaceFolders?.[0];
+        if (!folder) {
+            void vscode.window.showWarningMessage('GlyphStudio: Restore Checkpoint needs an open workspace folder (a git repository).');
+            return;
+        }
+        const checkpoints = (0, sessionCheckpoint_1.listSessionCheckpoints)(); // newest first
+        if (checkpoints.length === 0) {
+            void vscode.window.showInformationMessage('GlyphStudio: no session checkpoints yet. Checkpoints are session-scoped — ' +
+                'they do not survive a window reload.');
+            return;
+        }
+        const picked = await vscode.window.showQuickPick(checkpoints.map((cp) => ({
+            label: cp.label,
+            description: `${(0, sessionCheckpoint_1.shortSha)(cp.sha)} · ${cp.createdAtIso}`,
+            detail: (0, sessionCheckpoint_1.describeCheckpointForPick)(cp),
+            cp,
+        })), {
+            placeHolder: 'Restore which checkpoint? (tracked files only — untracked content was never captured)',
+        });
+        if (!picked)
+            return;
+        await runCheckpointRestoreFlow(picked.cp, folder, buildOutput);
+    }));
     // REVOKE the per-workspace "Always Allow" governed-build grant (N1). Clears the
     // workspaceState key so the next governed build shows the up-front authority modal
     // again. Honest, idempotent, and surfaces whether a grant was actually present.
@@ -2423,7 +2578,7 @@ function activate(context) {
     // It IS recorded in deliberatelyUngovernedTerminals so the A1 onDidOpenTerminal listener
     // skips it (its own one-time confirming notice is the single honest signal — no
     // double-nag). The command is also palette-invokable.
-    context.subscriptions.push(vscode.commands.registerCommand('glyphstudio.openUngovernedTerminal', () => openUngovernedTerminal(context)));
+    context.subscriptions.push(vscode.commands.registerCommand('glyphstudio.openUngovernedTerminal', () => openUngovernedTerminal(context, supervisorOutput)));
     // GOVERNANCE-BOUNDARY LEGIBILITY (A1, Part 2 — honesty about STOCK terminals). A
     // "GlyphStudio IDE" still exposes ungoverned stock terminals (the integrated terminal,
     // task/debug shells — full host env, untraced egress) that look almost identical to a
@@ -2478,31 +2633,149 @@ function activate(context) {
             }
         }));
     }
+    // AGENT-CLI INVOCATION STEER (agent mode Slice 1 — OBSERVE-NOT-BLOCK). When a known
+    // agent CLI (claude/codex/gemini) is INVOKED in a terminal GlyphStudio does not govern
+    // (stock, or the deliberate ⌃⌘U terminal), emit an ALWAYS-ON operator-visible audit
+    // line to the Governed Run channel (no new trace event types) and show a dismissible
+    // steer offering the governed path. We NEVER block/kill/modify the terminal — the
+    // command runs untouched. Governed-owned terminals are skipped entirely. The trigger
+    // (`onDidStartTerminalShellExecution`) post-dates the @types pin, so the module
+    // feature-detects it and gracefully no-ops on hosts/stubs without it (it returns
+    // undefined and nothing is wired). All vscode capabilities are injected so the whole
+    // path — including the feature-detect — is unit-tested headlessly
+    // (agentInvocationSteer.test.mjs).
+    // The ONE governed-ownership classification, shared by the steer below AND the
+    // @Terminal capture: the event hands back the SAME ext-host Terminal object the
+    // trackers hold, so WeakSet membership is the ownership truth; the floating ⌃⌘K
+    // governed terminal is renderer-created and recognized by its NAME marker (the H6
+    // seam key); the deliberate ⌃⌘U terminal is its own kind (NOT stock — the user chose
+    // it).
+    const classifyTerminalGovernance = (terminal) => {
+        const asTerminal = terminal;
+        if (glyphSpekOwnedTerminals.has(asTerminal) ||
+            (0, governedFloatingTerminal_1.isGovernedFloatingTerminalName)({ terminalName: terminal.name })) {
+            return 'governed';
+        }
+        return deliberatelyUngovernedTerminals.has(asTerminal)
+            ? 'deliberately-ungoverned'
+            : 'stock';
+    };
+    {
+        const steerSubscription = (0, agentInvocationSteer_1.attachAgentInvocationSteer)({
+            onDidStartTerminalShellExecution: vscode.window.onDidStartTerminalShellExecution,
+            knownClis: agentCli_1.KNOWN_AGENT_CLIS,
+            classifyTerminal: classifyTerminalGovernance,
+            appendAuditLine: (line) => supervisorOutput.appendLine(line),
+            isSteerDismissed: () => Boolean(context.globalState.get(agentInvocationSteer_1.AGENT_INVOCATION_STEER_DISMISSED_KEY)),
+            persistSteerDismissed: () => {
+                void context.globalState.update(agentInvocationSteer_1.AGENT_INVOCATION_STEER_DISMISSED_KEY, true);
+            },
+            // The requireGovernedAgentRuns lock (agent mode Slice 2). Read per EVENT via the
+            // global/default-only inspect() helper so a settings change applies live AND a
+            // workspace cannot flip the org's lock in either direction.
+            isRequireGovernedAgentRuns: () => resolveRequireGovernedAgentRuns(),
+            // Under the lock the module passes { modal: true } and omits "Don't show again";
+            // off-lock this is the same non-modal warning as before ({ modal: false } is the
+            // showWarningMessage default).
+            showSteer: (message, options, buttons) => vscode.window.showWarningMessage(message, { modal: options.modal }, ...buttons),
+            openGovernedTerminal: () => {
+                void vscode.commands.executeCommand('glyphstudio.openGovernedTerminal');
+            },
+        });
+        if (steerSubscription)
+            context.subscriptions.push(steerSubscription);
+    }
+    // @TERMINAL GOVERNED-OUTPUT CAPTURE (@-context Slice C). Captures the COMPLETED
+    // command outputs of terminals GLYPHSTUDIO ITSELF created as governed — and ONLY
+    // those (the per-run-envelope posture: we govern what we create; stock terminals are
+    // NEVER captured, the deliberate ⌃⌘U terminal is ungoverned → not captured). Uses the
+    // SAME classifyTerminalGovernance the steer uses, over the STABLE shell-integration
+    // events (which post-date the @types pin → injected + feature-detected like the steer;
+    // absent APIs mean capture never arms and `@terminal` reports it honestly). Output is
+    // ANSI-stripped and secret-REDACTED AT CAPTURE TIME (redactObviousSecrets — before the
+    // ring stores bytes; every later truncation cuts only already-redacted text), held in
+    // bounded SESSION MEMORY only (never persisted to disk), and attached to a chat turn
+    // only when the user types `@terminal`. Audit is arm/disarm only — per-command lines
+    // would be noise. `read()` is a passive mirror of the data written to the terminal —
+    // it does not consume or alter the terminal's own display.
+    const terminalCapture = (0, terminalContext_1.attachTerminalCapture)({
+        onDidStartTerminalShellExecution: vscode.window.onDidStartTerminalShellExecution,
+        onDidEndTerminalShellExecution: vscode.window.onDidEndTerminalShellExecution,
+        classifyTerminal: classifyTerminalGovernance,
+        getActiveTerminal: () => vscode.window.activeTerminal,
+        // Read PER EVENT so disabling stops new capture live (no bytes stored while off).
+        isEnabled: () => {
+            try {
+                return (vscode.workspace.getConfiguration('glyphstudio.chat.terminal').get('enabled') !== false);
+            }
+            catch {
+                return true;
+            }
+        },
+        redactDiffStyle: commitMessageLogic_1.redactObviousSecrets,
+        appendAuditLine: (line) => supervisorOutput.appendLine(line),
+        now: () => Date.now(),
+    });
+    if (terminalCapture)
+        context.subscriptions.push(terminalCapture);
+    // GOVERNED-TERMINAL BROKER CHIPS — command-window tracker. An INDEPENDENT
+    // subscription on the SAME stable-in-fork shell-integration events the steer +
+    // @Terminal capture use (post-@types-pin → feature-detected; multiple listeners
+    // on one VS Code event are fine, and this deliberately does NOT entangle with
+    // terminalCapture's stream consumption). ONLY terminals classified 'governed'
+    // are tracked, and ONLY when their runId resolves through the existing
+    // ownership structures (the ext-created WeakMap / the floating env marker) —
+    // an unresolvable terminal is left alone (no guessing). The window boundaries
+    // let the chip store correlate the run's policy_decision events to the command
+    // that was running. View-only; best-effort (a failure never touches the shell).
+    {
+        const subscribeStart = vscode.window.onDidStartTerminalShellExecution;
+        const subscribeEnd = vscode.window.onDidEndTerminalShellExecution;
+        if (typeof subscribeStart === 'function' && typeof subscribeEnd === 'function') {
+            const onStart = subscribeStart;
+            const onEnd = subscribeEnd;
+            const chipRunIdFor = (e) => {
+                const terminal = e?.terminal;
+                if (!terminal || classifyTerminalGovernance(terminal) !== 'governed')
+                    return undefined;
+                return resolveGovernedTerminalRunId(terminal);
+            };
+            context.subscriptions.push(onStart((e) => {
+                try {
+                    const runId = chipRunIdFor(e);
+                    if (!runId)
+                        return;
+                    const cmd = e?.execution?.commandLine?.value;
+                    governedTerminalDecisionChips.noteCommandStart(runId, typeof cmd === 'string' ? cmd : undefined, Date.now());
+                    scheduleCommandDecisionChipsPost(runId);
+                }
+                catch {
+                    /* best-effort: chips must never affect the terminal */
+                }
+            }), onEnd((e) => {
+                try {
+                    const runId = chipRunIdFor(e);
+                    if (!runId)
+                        return;
+                    governedTerminalDecisionChips.noteCommandEnd(runId, Date.now(), typeof e?.exitCode === 'number' ? e.exitCode : undefined);
+                    scheduleCommandDecisionChipsPost(runId);
+                }
+                catch {
+                    /* best-effort: chips must never affect the terminal */
+                }
+            }));
+        }
+    }
     // GlyphStudio CHAT (M7). Chat = a governed terminal running INTERACTIVE Claude Code.
     // The interactive TUI IS the chat: it runs on the user's OWN subscription (auth from
     // ~/.claude; GlyphStudio injects no credential), governed (egress via the supervisor's
     // metadata-only proxy), and traced (a governed-unsandboxed run in the Trust Panel +
     // Governed Runs sidebar). This reuses the EXACT openGovernedTerminal machinery and
-    // auto-launches the detected interactive agent CLI. It NO LONGER opens the stub
-    // ChatPanel/stubModelGateway — that fake gateway is retired as the chat path. The
-    // API-key model broker is a separate, secondary path (parked).
+    // auto-launches the detected interactive agent CLI. The demo stub gateway
+    // (stubModelGateway + the legacy ChatPanel webview) that early builds shipped is
+    // DELETED — see the RETIRED block above NativeChatPanel. The real bridged gateway
+    // is the only chat path; a failure renders an honest classified error.
     context.subscriptions.push(vscode.commands.registerCommand('glyphstudio.openChat', () => openGovernedChat(context, supervisorOutput)));
-    // INTERNAL/TEST-ONLY demo door for the RETIRED stub ChatPanel + stubModelGateway
-    // surface. The legacy stub chat webview (chat.html sprite injection + the stub
-    // gateway's model-selection/broker logic) is no longer reachable from a user-facing
-    // command (openChat runs a governed terminal; inlineEdit is now the REAL governed
-    // gateway edit). This command is deliberately NOT contributed in package.json#commands
-    // (it does not appear in the palette) — it exists ONLY so the surviving stub-panel
-    // unit tests (iconSpriteInjection / chatModelSelection) can still open and assert that
-    // retired surface. Remove it when the stub ChatPanel itself is deleted.
-    context.subscriptions.push(vscode.commands.registerCommand('glyphstudio.openStubChatPanel', () => {
-        const panel = ChatPanel.createOrShow(context.extensionUri, stubModelGateway());
-        panel.reveal();
-        // Seed a demo run id so the stub gateway's broker path has an active run to call
-        // against (the send path refuses with "no active run" otherwise) — matching what
-        // the retired demo-inlineEdit door used to do.
-        panel.setRunId(`stub-${Date.now().toString(36)}`);
-    }));
     // GlyphStudio NATIVE CHAT (M7). The "normal chat window": a webview where the user
     // types a message and sees the assistant reply, GOVERNED through our gateway —
     // bridge chat/send → the GlyphStudio model gateway's CODEX backend on the user's own
@@ -2510,10 +2783,22 @@ function activate(context) {
     // UNSANDBOXED, never product-trusted); GlyphStudio injects no credential (Codex
     // authenticates from its own ~/.codex store). Distinct from glyphstudio.openChat,
     // which runs interactive Claude Code in a governed terminal.
-    const chatOutput = vscode.window.createOutputChannel('GlyphStudio Chat (Gateway)');
+    const chatOutput = vscode.window.createOutputChannel(chatParticipant_1.GATEWAY_OUTPUT_CHANNEL_NAME);
     context.subscriptions.push(chatOutput);
+    // PER-SESSION INDEX FAN-OUT (index freshness for EVERY bridge child). The extension
+    // runs SEPARATE bridge-server children for the Index-Workspace session, the
+    // repo-aware FIM completion session, and the chat session(s) — each holds its OWN
+    // in-memory index. The save/watch freshness loop (setupIndexWorkspace →
+    // IndexWatchBatcher) dispatches each debounced `index/update` batch through this
+    // ONE shared registry so every live session's index stays fresh, not just the
+    // Index-Workspace child's. Live sessions register on open and unregister on their
+    // existing dispose paths; a child with no index yet refuses benignly
+    // (existing-index-only) until its lazy build lands. Gates unchanged: the loop is
+    // still gated by glyphstudio.codeIndex.enabled → glyphstudio.index.watch.
+    const indexUpdateFanout = new indexUpdateFanout_1.IndexUpdateFanout();
+    context.subscriptions.push({ dispose: () => indexUpdateFanout.dispose() });
     context.subscriptions.push(vscode.commands.registerCommand('glyphstudio.openNativeChat', () => {
-        const factory = buildNativeChatSessionFactory(context, chatOutput);
+        const factory = withIndexUpdateRegistration(indexUpdateFanout, 'chat-panel', buildNativeChatSessionFactory(context, chatOutput));
         const panel = NativeChatPanel.createOrShow(context.extensionUri, factory);
         panel.reveal();
     }));
@@ -2528,7 +2813,15 @@ function activate(context) {
     // extra user step. This is a brokered, metadata-TRACED model call on the user's own
     // ChatGPT subscription (governed, UNSANDBOXED, never product-trusted); no credential
     // is injected. The separate command-palette webview above is the legacy surface.
-    context.subscriptions.push((0, chatParticipant_1.registerGlyphStudioChatAgent)(buildNativeChatSessionFactory(context, chatOutput), chatOutput));
+    context.subscriptions.push((0, chatParticipant_1.registerGlyphStudioChatAgent)(
+    // Fan-out registration: the chat child's lazily-built index (warmUpCodeIndex
+    // kicks it on session open) is kept fresh by the save/watch loop.
+    withIndexUpdateRegistration(indexUpdateFanout, 'chat', buildNativeChatSessionFactory(context, chatOutput)), chatOutput, 
+    // @Terminal snapshot capability: a getter closure over the capture's ring +
+    // governed-terminal registry (records arrive ALREADY capture-time redacted).
+    // Absent (shell-integration events unavailable → capture never armed) the chat
+    // side renders the honest shell-integration-unavailable marker.
+    terminalCapture ? () => terminalCapture.snapshot() : undefined));
     // INLINE EDIT (Cmd-K-style) — a REAL governed, gateway-backed edit. Reuses the EXACT
     // SAME governed Codex session factory the chat participant above is wired with
     // (buildNativeChatSessionFactory → openChatSession → chat/send → Codex gateway), so an
@@ -2559,6 +2852,10 @@ function activate(context) {
     // palette-invokable entry. The underlying generation still flows through the SAME governed
     // Codex gateway + terminalCommandGen sanitize via glyphstudio.governedTerminal.generateCommand.
     (0, terminalCmdK_1.registerTerminalCmdK)(context, chatOutput);
+    // CHAT MODEL PICKER (model picker Slice 2) — the "GlyphStudio: Select Chat Model"
+    // command + the right-side `$(hubot) backend:model` status-bar item. Writes the two
+    // glyphstudio.chat routing settings every gateway surface above reads per turn.
+    setupChatModelPicker(context, chatOutput);
     // D1/D2/D3/D4a — HEADLESS NL-generate for the FORK's ⌃⌘K floating terminal's
     // "describe a command" fold-in. Reuses the SAME governed Codex gateway +
     // terminalCommandGen sanitize as glyphstudio.terminalGenerateCommand, but RETURNS the
@@ -2626,8 +2923,8 @@ function activate(context) {
     // session-bound index the chat retrieval + repo-aware FIM use (never a parallel index);
     // `glyphstudio.index.persist` carries the encrypted-persist opt-in to the bridge. Honest,
     // best-effort, never throws.
-    setupIndexWorkspace(context, supervisorOutput);
-    // TAB COMPLETION (UNGOVERNED, on-device LOCAL assist — OPT-IN).
+    setupIndexWorkspace(context, supervisorOutput, indexUpdateFanout);
+    // TAB COMPLETION (UNGOVERNED, on-device LOCAL assist).
     // A VS Code InlineCompletionItemProvider that fills code at the cursor using the
     // user's OWN local Ollama daemon's fill-in-the-middle endpoint (inlineCompletion.ts
     // / ollamaFimClient.ts). LOCAL-only: loopback, NO egress, NO credential, works
@@ -2635,16 +2932,11 @@ function activate(context) {
     // breaks typing. HONESTY: this is a STOCK-SURFACE local assist that sits OUTSIDE the
     // governed envelope — it calls Ollama DIRECTLY and is NOT routed through the GlyphStudio
     // Model broker, so it does NOT appear in the governed Model-Calls trace (broker routing
-    // is intentionally PARKED until completion goes remote). So nothing default-on implies
-    // governance, it is OFF by default: gated on glyphstudio.inlineCompletion.enabled
-    // (default FALSE — opt in); model from glyphstudio.inlineCompletion.model. Registered for
-    // all documents (pattern '**'). When the setting is false we register NO provider, so
-    // the feature fully no-ops. Guarded so a minimal host / test stub without the
+    // is intentionally PARKED until completion goes remote). The provider is registered once
+    // and reads glyphstudio.inlineCompletion.enabled live on every request, so toggling the
+    // setting works without a reload. Guarded so a minimal host / test stub without the
     // inline-completion API degrades gracefully (it simply registers no provider).
     if (typeof vscode.languages?.registerInlineCompletionItemProvider === 'function' &&
-        vscode.workspace
-            .getConfiguration('glyphstudio')
-            .get('inlineCompletion.enabled', false) &&
         // Respect workspace trust: don't run the local assist in an untrusted workspace.
         // Guarded so a stub host without the trust API still works (treats it as trusted).
         (typeof vscode.workspace.isTrusted !== 'boolean' || vscode.workspace.isTrusted)) {
@@ -2663,7 +2955,7 @@ function activate(context) {
         // failed session yields a not-warm retriever that always falls back.
         const workspaceRoot = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
         const repoRetriever = workspaceRoot
-            ? buildCompletionRepoRetriever(context, inlineOutput, workspaceRoot)
+            ? buildCompletionRepoRetriever(context, inlineOutput, workspaceRoot, indexUpdateFanout)
             : undefined;
         // COMPILE-CHECK GATE INDICATOR. A spinning status-bar item shown ONLY while the gate is
         // searching for a compiling completion (the primary failed the structural gate and the
@@ -2793,7 +3085,9 @@ function activate(context) {
         // long tail). The loop's OWN per-chunk budget stays at the smaller client default (128).
         () => vscode.workspace
             .getConfiguration('glyphstudio')
-            .get('inlineCompletion.maxTokens', 256));
+            .get('inlineCompletion.maxTokens', 256), () => vscode.workspace
+            .getConfiguration('glyphstudio')
+            .get('inlineCompletion.enabled', true));
         context.subscriptions.push(vscode.languages.registerInlineCompletionItemProvider({ pattern: '**' }, inlineProvider));
         // AUTO-IMPORT-AFTER-ACCEPT COMMAND. VS Code runs an InlineCompletionItem.command after the
         // item is accepted; this handler adds any workspace import the accepted snippet references
@@ -2875,6 +3169,130 @@ function registerAddMissingImportsCommand(context, output) {
         }
     }));
 }
+/** The model-picker command id (registered in package.json#commands). */
+const SELECT_CHAT_MODEL_COMMAND = 'glyphstudio.chat.selectModel';
+/**
+ * Set up the per-request chat MODEL PICKER (model picker Slice 2): the
+ * {@link SELECT_CHAT_MODEL_COMMAND} command (probe `chat/backends` via a short-lived
+ * governed session → QuickPick from the pure {@link buildPickerItems} → write the two
+ * routing settings) and a right-side status-bar item showing the CURRENT settings
+ * (`$(hubot) backend:model|default`), refreshed live on settings changes. Clicking
+ * the item runs the command.
+ *
+ * HONESTY: every QuickPick option comes from the supervisor's probed result —
+ * unavailable backends render as DISABLED informational items carrying the honest
+ * detail; a failed probe (bridge down / a pre-Slice-1 supervisor bundle without the
+ * chat/backends method) renders ONE honest "no backends reachable" notice and writes
+ * nothing. The status bar makes NO availability claim it has not probed.
+ */
+function setupChatModelPicker(context, output) {
+    const readSettings = () => {
+        try {
+            const cfg = vscode.workspace?.getConfiguration?.('glyphstudio.chat');
+            const backend = cfg?.get?.('backend');
+            const model = cfg?.get?.('model');
+            return {
+                backend: typeof backend === 'string' ? backend : '',
+                model: typeof model === 'string' ? model : '',
+            };
+        }
+        catch {
+            return { backend: '', model: '' };
+        }
+    };
+    // The most recent probe (from the last command invocation) — lets the status-bar
+    // tooltip carry the HONEST probed status for the selected backend. Never invented:
+    // absent until a probe ran.
+    let lastProbe;
+    let statusItem;
+    if (typeof vscode.window.createStatusBarItem === 'function') {
+        const align = vscode.StatusBarAlignment?.Right ?? 2;
+        statusItem = vscode.window.createStatusBarItem(align, 41);
+        statusItem.command = SELECT_CHAT_MODEL_COMMAND;
+        context.subscriptions.push(statusItem);
+    }
+    const refreshStatus = () => {
+        if (!statusItem)
+            return;
+        const settings = readSettings();
+        const selected = (settings.backend ?? '').trim() || 'codex';
+        const probed = lastProbe?.find((b) => b.id === selected);
+        const p = (0, chatBackendPicker_1.chatModelStatusPresentation)(settings, probed);
+        statusItem.text = p.text;
+        statusItem.tooltip = p.tooltip;
+        statusItem.show();
+    };
+    refreshStatus();
+    // LIVE settings reflection: a change to either routing setting (picker write OR a
+    // hand edit of settings.json) updates the status bar without a reload.
+    if (typeof vscode.workspace?.onDidChangeConfiguration === 'function') {
+        context.subscriptions.push(vscode.workspace.onDidChangeConfiguration((e) => {
+            if (e.affectsConfiguration('glyphstudio.chat.backend') ||
+                e.affectsConfiguration('glyphstudio.chat.model')) {
+                refreshStatus();
+            }
+        }));
+    }
+    context.subscriptions.push(vscode.commands.registerCommand(SELECT_CHAT_MODEL_COMMAND, async () => {
+        // PROBE via a SHORT-LIVED governed session (the same factory every gateway
+        // surface uses); disposed before the picker shows. A connect/RPC failure is
+        // rendered honestly as "backends unknown", never as invented options.
+        let backends;
+        try {
+            const opened = await buildNativeChatSessionFactory(context, output).open();
+            if (opened.connected && opened.session) {
+                const probe = await opened.session.chatBackends();
+                opened.session.dispose();
+                if (probe.ok) {
+                    backends = probe.backends;
+                    lastProbe = probe.backends;
+                    // Feed the cost router's reachability hint (Slice 3): the per-turn
+                    // auto-routing path reads THIS last-probe cache, never a live RPC.
+                    (0, chatRouter_1.recordProbedBackendsForRouting)(probe.backends);
+                }
+                else {
+                    output.appendLine(`[model-picker] chat/backends probe failed (backends unknown): ${probe.error ?? 'no detail'}`);
+                }
+            }
+            else {
+                output.appendLine(`[model-picker] governed session unavailable (backends unknown): ${opened.message}`);
+            }
+        }
+        catch (err) {
+            output.appendLine(`[model-picker] chat/backends probe threw (backends unknown): ${String(err?.message ?? err)}`);
+        }
+        const items = (0, chatBackendPicker_1.buildPickerItems)(backends);
+        const qpItems = items.map((descriptor) => ({
+            label: descriptor.label,
+            ...(descriptor.description ? { description: descriptor.description } : {}),
+            ...(descriptor.detail ? { detail: descriptor.detail } : {}),
+            descriptor,
+        }));
+        const picked = await vscode.window.showQuickPick(qpItems, {
+            placeHolder: 'GlyphStudio: select the chat backend + model (routes every gateway turn)',
+            matchOnDescription: true,
+            matchOnDetail: true,
+        });
+        if (!picked)
+            return;
+        const settings = (0, chatBackendPicker_1.selectionToSettings)(picked.descriptor);
+        if (!settings) {
+            // An informational (unavailable / no-backends) item: honest no-op, settings
+            // untouched. The detail the user just read IS the explanation.
+            return;
+        }
+        try {
+            const cfg = vscode.workspace.getConfiguration('glyphstudio.chat');
+            await cfg.update('backend', settings.backend, vscode.ConfigurationTarget.Global);
+            await cfg.update('model', settings.model, vscode.ConfigurationTarget.Global);
+            output.appendLine(`[model-picker] chat routing set: backend=${settings.backend} model=${settings.model || '(backend default)'}`);
+        }
+        catch (err) {
+            output.appendLine(`[model-picker] failed to write chat routing settings: ${String(err?.message ?? err)}`);
+        }
+        refreshStatus();
+    }));
+}
 /** The no-CLI "Index Workspace" command id (registered in package.json#commands). */
 const INDEX_WORKSPACE_COMMAND = 'glyphstudio.indexWorkspace';
 /**
@@ -2890,6 +3308,39 @@ const INDEX_WORKSPACE_COMMAND = 'glyphstudio.indexWorkspace';
  * rendered (toast + status-bar error state); the command never throws.
  */
 /**
+ * LIVE read of the MASTER code-index kill-switch (`glyphstudio.codeIndex.enabled`,
+ * default ON — see codeIndexGate.ts). Read FRESH at every gated call site (command
+ * invocation, auto-index trigger, each repo-aware completion request, each retriever
+ * call) so flipping the setting takes effect without a reload: new index work stops
+ * immediately; an already-built in-memory index is not torn down mid-session.
+ * Defensive — a minimal host without a config API resolves to the default (enabled).
+ */
+function currentCodeIndexEnabled() {
+    try {
+        return (0, codeIndexGate_1.isCodeIndexEnabled)(vscode.workspace?.getConfiguration?.('glyphstudio'));
+    }
+    catch {
+        return true;
+    }
+}
+/**
+ * LIVE read of the index-freshness gate pair, in the REQUIRED ORDER: the MASTER
+ * kill-switch (`glyphstudio.codeIndex.enabled`) FIRST via the one shared
+ * codeIndexGate helper, THEN the per-feature `glyphstudio.index.watch` toggle
+ * (default ON). Read fresh at every watch event and every batch flush — both are
+ * save-frequency (human-scale), never the keystroke path — so flipping either
+ * setting takes effect immediately without a reload. Defensive — a minimal host
+ * without a config API resolves to the defaults (enabled).
+ */
+function currentIndexWatchEnabled() {
+    try {
+        return (0, indexFreshness_1.isIndexWatchEnabled)(vscode.workspace?.getConfiguration?.('glyphstudio'));
+    }
+    catch {
+        return true;
+    }
+}
+/**
  * Resolve the `glyphstudio.index.vectorStore` setting to a valid {@link VectorStoreKind},
  * falling back to the default ('flat' — the exact, fast store) for any unrecognized
  * value. Returned undefined is never produced; the supervisor also defaults defensively.
@@ -2900,7 +3351,25 @@ function resolveVectorStoreSetting() {
         .get('index.vectorStore', 'flat');
     return raw === 'brute' || raw === 'flat' || raw === 'ann' ? raw : 'flat';
 }
-function setupIndexWorkspace(context, output) {
+/**
+ * The LIVE indexable workspace roots: every open workspace folder's fsPath, capped to
+ * the supervisor-bindable prefix (workspaceRoots.ts MAX_WORKSPACE_ROOTS — the SAME
+ * first-N the handshake binds, so the roots we build/update/retrieve are exactly the
+ * bound set). Read fresh at each use so folder changes are picked up where the call
+ * path allows. Defensive: a minimal host without the API yields []. Never throws.
+ */
+function liveIndexWorkspaceRoots() {
+    try {
+        return (0, workspaceRoots_1.boundWorkspaceRoots)((vscode.workspace.workspaceFolders ?? []).map((f) => f.uri.fsPath));
+    }
+    catch {
+        return [];
+    }
+}
+function setupIndexWorkspace(context, output, fanout) {
+    // MULTI-ROOT: every open workspace folder is indexable (capped to the supervisor's
+    // bindable prefix — workspaceRoots.ts MAX_WORKSPACE_ROOTS). `workspaceRoot` stays
+    // folder 0: the legacy single-root binding + the fallback root for rootless batches.
     const workspaceRoot = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
     // The status-bar item (when the host supports it). Created left of center so it sits
     // with the other GlyphStudio surface affordances; clicking it runs the command (reindex).
@@ -2935,6 +3404,9 @@ function setupIndexWorkspace(context, output) {
                 extensionVersion: resolveExtensionVersion(context),
                 runsBase: resolveRunsBase(),
                 workspaceRoot,
+                // MULTI-ROOT: bind ALL open folders into the session's root set so the
+                // per-root build/update/retrieve calls below are accepted for each folder.
+                workspaceRoots: liveIndexWorkspaceRoots(),
                 output,
             })
                 .then((res) => (res.connected ? res.session : undefined))
@@ -2957,9 +3429,151 @@ function setupIndexWorkspace(context, output) {
     });
     // Serialize builds: a click while a build runs should not start a second concurrent one.
     let building = false;
+    // ── INDEX FRESHNESS LOOP (save/watch incremental re-index) ──────────────────
+    // Once an index is WARM (built this session — including a hydrated persisted
+    // build), register onDidSaveTextDocument + a FileSystemWatcher scoped to
+    // workspaceFolders[0] (multi-root is a separate known gap), debounce the events
+    // into batches (IndexWatchBatcher), and FAN ONE `index/update` batch out to
+    // EVERY live registered session (workspace / fim / chat — each bridge child
+    // holds its OWN index; see indexUpdateFanout.ts). The supervisor filters each
+    // batch through the indexer's own discovery/ignore gates and re-embeds only
+    // the windows whose content hash changed (deleted files are evicted).
+    //
+    // GATES (in order, read LIVE per event/flush — save-frequency, never the
+    // keystroke path): the master kill-switch first, then glyphstudio.index.watch.
+    // HONESTY: each batch logs ONE compact per-target line to this OutputChannel
+    // (plus a once-per-session benign no-index note); no toasts.
+    // DISPOSAL: the save listener, the watcher, the batcher's timer, and the
+    // workspace fan-out target all go into context.subscriptions; the batcher's
+    // dispose() cancels its timer so nothing can fire (or hold the host open)
+    // after deactivate.
+    let watchStarted = false;
+    const startIndexWatch = () => {
+        if (watchStarted || disposed || !workspaceRoot)
+            return;
+        watchStarted = true;
+        // FAN-OUT TARGET: the Index-Workspace session itself (the child that built the
+        // index that armed this loop). The capability opens the long-lived session
+        // lazily — exactly the pre-fan-out send behavior for this child.
+        const unregisterWorkspaceTarget = fanout.register('workspace', async (batch) => {
+            const session = await openSession();
+            if (!session)
+                return { ok: false, error: 'bridge unavailable' };
+            return session.indexUpdate({
+                // MULTI-ROOT: a per-root batch addresses ITS OWN root's index; a rootless
+                // (legacy) batch falls back to the session's folder-0 root as before.
+                workspaceRoot: batch.workspaceRoot ?? workspaceRoot,
+                changed: batch.changed,
+                deleted: batch.deleted,
+            });
+        });
+        const batcher = new indexFreshness_1.IndexWatchBatcher({
+            send: async (batch) => {
+                try {
+                    if (disposed || !currentIndexWatchEnabled())
+                        return;
+                    // MULTI-ROOT SPLIT. The batcher accumulates ABSOLUTE paths (so one quiet
+                    // period covers a cross-root save burst — debounce semantics unchanged);
+                    // the drained batch is split here into PER-ROOT batches (workspace-
+                    // relative POSIX paths + the owning root), one `index/update` dispatch
+                    // per root in folder order. Roots are read LIVE so a folder added since
+                    // activation still routes (its session binding may lag until reopen).
+                    const perRootBatches = (0, workspaceRoots_1.splitWatchBatchByRoot)(batch, liveIndexWorkspaceRoots());
+                    // PER-SESSION FAN-OUT. Deliberately NOT awaited: awaiting the per-target
+                    // outcomes here would re-serialize ALL targets behind the slowest child
+                    // (the batcher holds one send in flight at a time). Per-target in-flight
+                    // tracking + per-root coalescing live in the fanout, so this flush returns
+                    // once each per-root batch is handed to every live target; the compact
+                    // outcome line is logged when all targets settle. Resolve-never-reject.
+                    for (const rootBatch of perRootBatches) {
+                        void fanout
+                            .dispatch(rootBatch)
+                            .then((outcomes) => {
+                            output.appendLine((0, indexUpdateFanout_1.formatIndexUpdateFanoutLine)(rootBatch, outcomes));
+                            for (const o of outcomes) {
+                                if (o.kind === 'skipped-no-index' && o.firstSkip) {
+                                    output.appendLine((0, indexUpdateFanout_1.formatNoIndexFirstSkipLine)(o.label));
+                                }
+                            }
+                        })
+                            .catch(() => undefined);
+                    }
+                }
+                catch (err) {
+                    // Background-only: never throw, never toast — log and let the next batch retry.
+                    output.appendLine(`[indexWatch] incremental update failed (non-fatal): ${String(err?.message ?? err)}`);
+                }
+            },
+        });
+        context.subscriptions.push({
+            dispose: () => {
+                unregisterWorkspaceTarget();
+                batcher.dispose();
+            },
+        });
+        const note = (uri, kind) => {
+            try {
+                if (disposed || !uri)
+                    return;
+                // LIVE gate (master kill-switch → index.watch): flipping either setting
+                // stops the loop at the very next event, no reload needed.
+                if (!currentIndexWatchEnabled())
+                    return;
+                // MULTI-ROOT: only paths owned by SOME live workspace folder enter the
+                // batch (an unowned event must not arm the debounce timer). The batcher
+                // accumulates the ABSOLUTE path; the per-root split happens at flush.
+                if (!(0, workspaceRoots_1.owningWorkspaceRoot)(uri.fsPath, liveIndexWorkspaceRoots()))
+                    return;
+                if (kind === 'deleted')
+                    batcher.noteDeleted(uri.fsPath);
+                else
+                    batcher.noteChanged(uri.fsPath);
+            }
+            catch {
+                /* an event handler must never throw into the host */
+            }
+        };
+        if (typeof vscode.workspace.onDidSaveTextDocument === 'function') {
+            context.subscriptions.push(vscode.workspace.onDidSaveTextDocument((doc) => note(doc?.uri, 'changed')));
+        }
+        // The watcher catches create/delete + out-of-editor changes (git checkout,
+        // codegen). Deletes matter: they drive the supervisor's orphan eviction.
+        // MULTI-ROOT: one watcher PER workspace folder (the folders open when the loop
+        // arms — the watcher set is not re-wired on later folder changes).
+        const watchFolders = (vscode.workspace.workspaceFolders ?? []).slice(0, workspaceRoots_1.MAX_WORKSPACE_ROOTS);
+        if (watchFolders.length > 0 && typeof vscode.workspace.createFileSystemWatcher === 'function') {
+            for (const folder of watchFolders) {
+                try {
+                    const pattern = typeof vscode.RelativePattern === 'function'
+                        ? new vscode.RelativePattern(folder, '**/*')
+                        : '**/*';
+                    const watcher = vscode.workspace.createFileSystemWatcher(pattern);
+                    watcher.onDidCreate((uri) => note(uri, 'changed'));
+                    watcher.onDidChange((uri) => note(uri, 'changed'));
+                    watcher.onDidDelete((uri) => note(uri, 'deleted'));
+                    context.subscriptions.push(watcher);
+                }
+                catch {
+                    /* minimal host without the watcher API: saves alone still keep it fresh */
+                }
+            }
+        }
+        output.appendLine('[indexWatch] index freshness loop active — saves and file changes re-index incrementally in the background.');
+    };
     const runIndexWorkspace = async () => {
         if (disposed)
             return;
+        // MASTER KILL-SWITCH (glyphstudio.codeIndex.enabled — the deployment-level privacy
+        // gate). When false, NO index is built: the manual command and the auto-index
+        // trigger both land here and refuse HONESTLY (actionable message naming the
+        // setting, matching the no-folder refusal below). Checked FIRST — the deployment
+        // posture beats every other precondition — and read LIVE so flipping the setting
+        // takes effect on the next invocation without a reload. No bridge session is
+        // opened and no index/build RPC is issued on this path.
+        if (!currentCodeIndexEnabled()) {
+            void vscode.window.showInformationMessage(codeIndexGate_1.CODE_INDEX_DISABLED_COMMAND_MESSAGE);
+            return;
+        }
         if (!workspaceRoot) {
             void vscode.window.showInformationMessage('GlyphStudio: open a folder to index its workspace.');
             return;
@@ -3001,31 +3615,84 @@ function setupIndexWorkspace(context, output) {
                     void vscode.window.showWarningMessage('GlyphStudio: could not start the indexer (bridge unavailable).');
                     return;
                 }
+                // MULTI-ROOT FAN-OUT: index/build is a single-root RPC, so one call per
+                // workspace folder, SEQUENTIALLY in folder order. A per-root failure is
+                // logged + surfaced but does NOT abort the remaining roots — partial
+                // coverage beats none. Single-folder workspaces take the exact same path
+                // (n=1 → unscaled progress, unprefixed messages).
+                const buildRoots = liveIndexWorkspaceRoots();
+                if (buildRoots.length === 0) {
+                    // Folder set changed under us (e.g. all folders removed since the
+                    // command fired). Honest refusal, same wording as the entry gate.
+                    setStatus({ kind: 'error', reason: 'no workspace folder' });
+                    void vscode.window.showInformationMessage('GlyphStudio: open a folder to index its workspace.');
+                    return;
+                }
                 // PERCENT IN THE NOTIFICATION (the fix). vscode increments are CUMULATIVE
                 // to 100, so each report carries the DELTA percent since the last (computed
                 // by indexProgressIncrement). The embed phase drives the bar; discover/chunk
-                // just update the message. Best-effort: a throwing report never fails the build.
-                let lastPercent = 0;
-                const onProgress = (event) => {
+                // just update the message. Best-effort: a throwing report never fails the
+                // build. With n roots each root owns a 1/n share of the bar, and messages
+                // are prefixed with the folder name so the user can tell roots apart.
+                let totalFiles = 0;
+                let totalChunks = 0;
+                let totalBuildMs = 0;
+                let successCount = 0;
+                const failures = [];
+                for (const buildRoot of buildRoots) {
+                    const rootLabel = path.basename(buildRoot);
+                    let lastPercent = 0;
+                    const onProgress = (event) => {
+                        try {
+                            const { increment, percent } = (0, indexProgress_1.indexProgressIncrement)(event, lastPercent);
+                            lastPercent = percent;
+                            const message = (0, indexProgress_1.indexProgressMessage)(event);
+                            progress.report({
+                                increment: increment / buildRoots.length,
+                                message: buildRoots.length > 1 && message ? `${rootLabel}: ${message}` : message,
+                            });
+                        }
+                        catch {
+                            /* progress is best-effort: never let a report break the build */
+                        }
+                    };
                     try {
-                        const { increment, percent } = (0, indexProgress_1.indexProgressIncrement)(event, lastPercent);
-                        lastPercent = percent;
-                        progress.report({ increment, message: (0, indexProgress_1.indexProgressMessage)(event) });
+                        const result = await session.indexBuild({ workspaceRoot: buildRoot, persist, vectorStore }, { timeoutMs: buildTimeoutMs, onProgress });
+                        if (!result.ok || !result.stats) {
+                            const reason = result.error ?? 'unknown error';
+                            failures.push({ root: buildRoot, error: reason });
+                            output.appendLine(`[indexWorkspace] build failed for ${buildRoot}: ${reason}`);
+                            continue;
+                        }
+                        totalFiles += result.stats.files;
+                        totalChunks += result.stats.chunks;
+                        totalBuildMs += result.stats.totalMs;
+                        successCount += 1;
                     }
-                    catch {
-                        /* progress is best-effort: never let a report break the build */
+                    catch (err) {
+                        const reason = String(err?.message ?? err);
+                        failures.push({ root: buildRoot, error: reason });
+                        output.appendLine(`[indexWorkspace] build failed for ${buildRoot}: ${reason}`);
                     }
-                };
-                const result = await session.indexBuild({ workspaceRoot, persist, vectorStore }, { timeoutMs: buildTimeoutMs, onProgress });
-                if (!result.ok || !result.stats) {
-                    setStatus({ kind: 'error', reason: result.error });
-                    void vscode.window.showWarningMessage(`GlyphStudio: indexing failed${result.error ? ` (${result.error})` : ''}.`);
+                }
+                if (successCount === 0) {
+                    const firstError = failures[0]?.error;
+                    setStatus({ kind: 'error', reason: firstError });
+                    void vscode.window.showWarningMessage(`GlyphStudio: indexing failed${firstError ? ` (${firstError})` : ''}.`);
                     return;
                 }
-                const { files, chunks, totalMs } = result.stats;
-                setStatus({ kind: 'indexed', files, chunks });
-                const secs = (totalMs / 1000).toFixed(1);
-                void vscode.window.showInformationMessage(`Indexed ${files} ${files === 1 ? 'file' : 'files'} · ${chunks} chunks · ${secs}s`);
+                setStatus({ kind: 'indexed', files: totalFiles, chunks: totalChunks });
+                const secs = (totalBuildMs / 1000).toFixed(1);
+                const rootsNote = buildRoots.length > 1 ? ` across ${successCount}/${buildRoots.length} folders` : '';
+                void vscode.window.showInformationMessage(`Indexed ${totalFiles} ${totalFiles === 1 ? 'file' : 'files'} · ${totalChunks} chunks · ${secs}s${rootsNote}`);
+                if (failures.length > 0) {
+                    void vscode.window.showWarningMessage(`GlyphStudio: indexing failed for ${failures.length} ${failures.length === 1 ? 'folder' : 'folders'} (${failures
+                        .map((f) => path.basename(f.root))
+                        .join(', ')}); see the output log.`);
+                }
+                // The index is WARM (built this session — a persisted build hydrates
+                // inside the same RPC): start the save/watch freshness loop. Idempotent.
+                startIndexWatch();
             });
         }
         catch (err) {
@@ -3042,6 +3709,56 @@ function setupIndexWorkspace(context, output) {
     context.subscriptions.push(vscode.commands.registerCommand(INDEX_WORKSPACE_COMMAND, () => {
         void runIndexWorkspace();
     }));
+    // PURGE PERSISTED INDEX (glyphstudio.purgeIndex). Deletes the workspace-local
+    // encrypted snapshot at <workspaceRoot>/.glyphstudio/index. Deliberately NOT
+    // gated on the master kill-switch — a deployment that just disabled indexing
+    // is exactly the one that wants the leftover snapshot gone. Honest + best-
+    // effort: a missing snapshot is a friendly no-op; every failure is caught and
+    // rendered; the command never throws. (Pure logic + messages: indexPurge.ts.)
+    context.subscriptions.push(vscode.commands.registerCommand(indexPurge_1.PURGE_INDEX_COMMAND, async () => {
+        // MULTI-ROOT: each workspace folder may hold its own persisted snapshot
+        // (<root>/.glyphstudio/index) — a privacy surface — so purge ALL of them.
+        // The single-folder path is byte-identical to the historical behavior.
+        const purgeRoots = liveIndexWorkspaceRoots();
+        if (purgeRoots.length === 0) {
+            void vscode.window.showInformationMessage(indexPurge_1.PURGE_INDEX_NO_FOLDER_MESSAGE);
+            return;
+        }
+        let deletedCount = 0;
+        let failedCount = 0;
+        let lastFailureReason = '';
+        let singleResult;
+        for (const purgeRoot of purgeRoots) {
+            try {
+                const result = await (0, indexPurge_1.purgePersistedIndex)(purgeRoot);
+                singleResult = result;
+                if (result.existed)
+                    deletedCount += 1;
+                output.appendLine(`[purgeIndex] ${result.existed ? 'deleted' : 'nothing persisted at'} ${result.dir}`);
+            }
+            catch (err) {
+                const reason = String(err?.message ?? err);
+                failedCount += 1;
+                lastFailureReason = reason;
+                output.appendLine(`[purgeIndex] failed for ${purgeRoot} (non-fatal): ${reason}`);
+            }
+        }
+        if (purgeRoots.length === 1) {
+            if (failedCount > 0 || !singleResult) {
+                void vscode.window.showWarningMessage(`GlyphStudio: could not purge the persisted index (${lastFailureReason}).`);
+            }
+            else {
+                void vscode.window.showInformationMessage((0, indexPurge_1.purgeResultMessage)(singleResult));
+            }
+            return;
+        }
+        if (failedCount > 0) {
+            void vscode.window.showWarningMessage(`GlyphStudio: could not purge the persisted index for ${failedCount} of ${purgeRoots.length} folders (${lastFailureReason}); see the output log.`);
+        }
+        void vscode.window.showInformationMessage(deletedCount > 0
+            ? `GlyphStudio: persisted index deleted for ${deletedCount} of ${purgeRoots.length} folders. An index already built in memory this session is not wiped — reload the window to drop it.`
+            : 'GlyphStudio: no persisted index to purge — nothing is stored on disk for any workspace folder.');
+    }));
     // AUTO INDEX (glyphstudio.index.autoIndex, default ON). When enabled, build the code index
     // in the BACKGROUND on activation — i.e. when a folder/workspace is opened — so repo-aware
     // chat and Tab are warm before first use. Non-blocking; reuses the exact command build path.
@@ -3049,8 +3766,17 @@ function setupIndexWorkspace(context, output) {
     const indexCfg = vscode.workspace.getConfiguration('glyphstudio');
     const autoIndex = indexCfg.get('index.autoIndex', indexCfg.get('index.autoIndexOnOpen', true));
     if (autoIndex && workspaceRoot) {
-        output.appendLine('[indexWorkspace] Auto Index enabled — building the index in the background.');
-        void runIndexWorkspace();
+        if (!currentCodeIndexEnabled()) {
+            // MASTER KILL-SWITCH: auto-index is NOT user-invoked, so refusing with a startup
+            // toast would be noise — skip SILENTLY here (OutputChannel line only; the honest
+            // window message lives where the user acts, the Index Workspace command refusal).
+            // Deliberately bypasses runIndexWorkspace so the disabled toast never fires on open.
+            output.appendLine('[indexWorkspace] Auto Index skipped — the code index is disabled (glyphstudio.codeIndex.enabled=false).');
+        }
+        else {
+            output.appendLine('[indexWorkspace] Auto Index enabled — building the index in the background.');
+            void runIndexWorkspace();
+        }
     }
 }
 /**
@@ -3060,7 +3786,14 @@ function setupIndexWorkspace(context, output) {
 function readRepoAwareConfig() {
     const cfg = vscode.workspace.getConfiguration('glyphstudio');
     return {
-        enabled: cfg.get('inlineCompletion.repoAware', false),
+        // MASTER KILL-SWITCH (glyphstudio.codeIndex.enabled) ANDed with the per-feature
+        // toggle: when the deployment-level gate is off the repo-aware path is OFF
+        // regardless of inlineCompletion.repoAware. Read FRESH per completion request
+        // (this whole config is), so flipping either setting takes effect on the next
+        // keystroke without a reload — the provider then short-circuits to plain FIM:
+        // no retrieval call, no index warm-up kick, no scope-band cache population, no
+        // background prefetch (all are inside the provider's `repoCfg?.enabled` branch).
+        enabled: (0, codeIndexGate_1.isCodeIndexEnabled)(cfg) && cfg.get('inlineCompletion.repoAware', false),
         topK: cfg.get('inlineCompletion.repoAwareTopK', inlineCompletion_1.DEFAULT_REPO_AWARE_TOP_K),
         timeoutMs: cfg.get('inlineCompletion.repoAwareTimeoutMs', inlineCompletion_1.DEFAULT_REPO_AWARE_TIMEOUT_MS),
         maxContextChars: cfg.get('inlineCompletion.repoAwareMaxContextChars', inlineCompletion_1.DEFAULT_REPO_AWARE_MAX_CONTEXT_CHARS),
@@ -3352,10 +4085,11 @@ function definitionTargetInWorkspace(targetUri) {
  * resolves to `{ ok:false, hits:[] }` and leaves `isWarm()` false — the provider then
  * always falls back to plain FIM. Nothing here egresses code (the index is local).
  */
-function buildCompletionRepoRetriever(context, output, workspaceRoot) {
+function buildCompletionRepoRetriever(context, output, workspaceRoot, fanout) {
     let sessionPromise;
     let warm = false;
     let disposed = false;
+    let unregisterFanout;
     const openSession = () => {
         if (!sessionPromise) {
             sessionPromise = (0, supervisorBridgeRunner_1.openChatSession)({
@@ -3363,9 +4097,30 @@ function buildCompletionRepoRetriever(context, output, workspaceRoot) {
                 extensionVersion: resolveExtensionVersion(context),
                 runsBase: resolveRunsBase(),
                 workspaceRoot,
+                // MULTI-ROOT: bind every workspace folder in the handshake so per-root
+                // freshness updates and owning-root retrieves are accepted by the child.
+                workspaceRoots: liveIndexWorkspaceRoots(),
                 output,
             })
                 .then((res) => (res.connected ? res.session : undefined))
+                .then((session) => {
+                // PER-SESSION INDEX FAN-OUT: the completion child holds its OWN in-memory
+                // index (lazily built on the provider's first warm-up retrieve); register
+                // its indexUpdate capability so the save/watch freshness loop keeps it
+                // fresh. Until that lazy build lands the supervisor refuses updates
+                // (existing-index-only) — a benign skip the fanout surfaces once.
+                // Unregistered in the dispose hook below (no dangling targets).
+                if (session && !disposed) {
+                    unregisterFanout = fanout.register('fim', (batch) => session.indexUpdate({
+                        // Per-root freshness batches carry their owning root; a legacy
+                        // rootless batch falls back to the historical single root.
+                        workspaceRoot: batch.workspaceRoot ?? workspaceRoot,
+                        changed: batch.changed,
+                        deleted: batch.deleted,
+                    }));
+                }
+                return session;
+            })
                 .catch(() => undefined);
         }
         return sessionPromise;
@@ -3374,6 +4129,7 @@ function buildCompletionRepoRetriever(context, output, workspaceRoot) {
     context.subscriptions.push({
         dispose: () => {
             disposed = true;
+            unregisterFanout?.();
             void sessionPromise?.then((s) => {
                 try {
                     s?.dispose();
@@ -3386,15 +4142,34 @@ function buildCompletionRepoRetriever(context, output, workspaceRoot) {
     });
     return {
         isWarm: () => warm,
-        async retrieve(query, k) {
+        async retrieve(query, k, documentFsPath) {
             if (disposed)
                 return { ok: false, hits: [] };
+            // MASTER KILL-SWITCH defense in depth: the provider already short-circuits via
+            // readRepoAwareConfig (enabled=false → this is never called), but no present or
+            // FUTURE caller may reach the index RPC while the deployment-level gate is off.
+            // `{ ok:false }` is the established not-warm shape → the caller falls back to
+            // plain FIM. Read live, so disabling mid-session stops the very next retrieve.
+            if (!currentCodeIndexEnabled())
+                return { ok: false, hits: [] };
+            // MULTI-ROOT: retrieve against the root that OWNS the document being completed
+            // (deepest containing workspace folder), not blindly folder 0. A document
+            // outside every workspace folder gets NO repo context (cross-root leakage is
+            // worse than plain FIM). No document path (e.g. legacy callers/warm-up) keeps
+            // the historical first-folder behavior.
+            let retrieveRoot = workspaceRoot;
+            if (typeof documentFsPath === 'string' && documentFsPath.length > 0) {
+                const owner = (0, workspaceRoots_1.owningWorkspaceRoot)(documentFsPath, liveIndexWorkspaceRoots());
+                if (!owner)
+                    return { ok: false, hits: [] };
+                retrieveRoot = owner;
+            }
             try {
                 const session = await openSession();
                 if (!session)
                     return { ok: false, hits: [] };
                 const result = await session.indexRetrieve({
-                    workspaceRoot,
+                    workspaceRoot: retrieveRoot,
                     query,
                     k,
                     vectorStore: resolveVectorStoreSetting(),
@@ -3508,6 +4283,137 @@ function resolveExtensionVersion(context) {
  * `intentArg` is the optional chat-surfaced prompt (a follow-up "Build This" after a chat
  * turn); when absent the command is standalone and quick-inputs the intent.
  */
+/* ================================================================== *
+ * SESSION CHECKPOINTS (#10 Slice 2) — THIN wiring over sessionCheckpoint.ts.
+ *
+ * The pure module owns all git logic (over the gitContext.ts GitRunner seam),
+ * the destructive-confirm gate, and the honesty wording; this wiring owns only
+ * the setting, the commands, the modal, and trace anchoring via the Slice-1
+ * run/recordHuman capability. HONESTY: a checkpoint record carries a runId
+ * ONLY after its checkpoint_created event really reached the run's hash chain
+ * — runId presence on a record IS the "trace-anchored" claim, so it is never
+ * set optimistically.
+ * ================================================================== */
+/** The `glyphstudio.checkpoint.enabled` setting (default true). */
+function checkpointEnabled() {
+    return (vscode.workspace.getConfiguration('glyphstudio').get('checkpoint.enabled', true) ===
+        true);
+}
+/**
+ * APPEND checkpoint_created / checkpoint_restored to the run's hash-chained
+ * trace via the Slice-1 run/recordHuman capability (compact counts-only
+ * payload — never file lists/content; well under the 16KB cap). Returns true
+ * iff the append really reached the chain. A failure surfaces the HONEST
+ * "could NOT be trace-anchored" warning — the checkpoint itself is kept either
+ * way (anchoring records THAT it happened; it never makes the snapshot more
+ * than advisory).
+ */
+async function recordCheckpointToTrace(runId, type, cp, output) {
+    const verb = type === 'checkpoint_created' ? 'created' : 'restored';
+    let error;
+    const cap = recordHumanDecisionCapability;
+    if (!cap) {
+        error = 'the recording capability is not installed (extension not fully activated).';
+    }
+    else {
+        try {
+            const res = await cap({ runId, type, payload: (0, sessionCheckpoint_1.buildCheckpointTracePayload)(cp) });
+            if (res.ok) {
+                output?.appendLine(`[checkpoint] ${type} for ${(0, sessionCheckpoint_1.shortSha)(cp.sha)} anchored to run ${runId} at trace seq ${res.seq}.`);
+                return true;
+            }
+            error = res.error;
+        }
+        catch (err) {
+            error = String(err?.message ?? err);
+        }
+    }
+    void vscode.window.showWarningMessage(`GlyphStudio: checkpoint ${verb} but could NOT be trace-anchored: ${error}`);
+    return false;
+}
+/**
+ * The SINGLE interactive restore flow (#10 Slice 3 extraction) — shared by the
+ * "GlyphStudio: Restore Checkpoint…" palette command and the Trust Panel's
+ * run-scoped "Restore checkpoint…" affordance, so the modal destructive
+ * confirm, the outcome notifications, and the checkpoint_restored anchoring
+ * can never drift apart between the two doors. Semantics are EXACTLY Slice 2's:
+ *   - modal confirm listing what changes (the injected destructive gate);
+ *   - tracked-divergence-only scoped restore (the pure module's per-file ops);
+ *   - failure/partial → honest warning, NO checkpoint_restored recorded;
+ *   - already-clean → honest info, NO checkpoint_restored recorded;
+ *   - full success → info notification, then checkpoint_restored anchored to
+ *     the run's chain ONLY when the checkpoint carries a runId (i.e. its
+ *     creation really reached that chain).
+ */
+async function runCheckpointRestoreFlow(cp, folder, output) {
+    const outcome = await (0, sessionCheckpoint_1.restoreSessionCheckpoint)((0, gitContext_1.createProcessGitRunner)(folder.uri.fsPath), cp, async (summary) => {
+        // The DESTRUCTIVE gate: a modal listing exactly what will change.
+        const choice = await vscode.window.showWarningMessage((0, sessionCheckpoint_1.describeRestorePlanForConfirm)(summary), { modal: true }, 'Restore');
+        return choice === 'Restore';
+    });
+    if (!outcome.ok) {
+        if (outcome.reason === 'cancelled')
+            return; // the user's own Escape/Cancel
+        void vscode.window.showWarningMessage(`GlyphStudio: restore failed — ${outcome.error}`);
+        return;
+    }
+    if (outcome.alreadyClean) {
+        void vscode.window.showInformationMessage(`GlyphStudio: the working tree already matches checkpoint ${(0, sessionCheckpoint_1.shortSha)(cp.sha)} ` +
+            '(tracked files) — nothing to restore.');
+        return;
+    }
+    void vscode.window.showInformationMessage(`GlyphStudio: restored ${outcome.files.length} tracked file(s) to checkpoint ` +
+        `${(0, sessionCheckpoint_1.shortSha)(cp.sha)} (“${cp.label}”). Untracked files were not touched.`);
+    // Trace anchoring: only a checkpoint whose creation really reached a run's
+    // chain carries a runId; mirror the restore onto the SAME run's trace.
+    if (cp.runId) {
+        await recordCheckpointToTrace(cp.runId, 'checkpoint_restored', cp, output);
+    }
+}
+/**
+ * AUTO-CHECKPOINT before a governed agentic build (when
+ * glyphstudio.checkpoint.enabled). ADVISORY + best-effort: a checkpoint
+ * failure (not a repo, unborn HEAD, git error) is logged honestly and NEVER
+ * blocks the build the operator just approved. Created WITHOUT a runId —
+ * build/start has not minted one yet; the caller anchors it (and only then
+ * attaches the runId) after the run completes.
+ */
+async function autoCheckpointBeforeBuild(cwd, output) {
+    if (!checkpointEnabled())
+        return undefined;
+    const result = await (0, sessionCheckpoint_1.createSessionCheckpoint)((0, gitContext_1.createProcessGitRunner)(cwd), {
+        label: 'auto: before agentic build',
+    });
+    if (!result.ok) {
+        output.appendLine(`[checkpoint] auto-checkpoint skipped — ${result.error}`);
+        return undefined;
+    }
+    const cp = result.checkpoint;
+    output.appendLine(`[checkpoint] auto-checkpoint ${(0, sessionCheckpoint_1.shortSha)(cp.sha)} created before the build ` +
+        `(${cp.changedFiles.length + cp.changedFilesOmitted} tracked changed file(s) captured; ` +
+        `${cp.untrackedPaths.length + cp.untrackedOmitted} untracked path(s) listed — content NOT captured). ` +
+        'Session-scoped + advisory.');
+    return cp;
+}
+/**
+ * Anchor a pre-build auto-checkpoint to the run the build minted: append
+ * checkpoint_created to the run's trace, and ONLY on a real chain append
+ * attach the runId to the record (so the registry's "trace-anchored" claim is
+ * evidence-backed, never optimistic).
+ */
+async function anchorAutoCheckpoint(cp, runId, output) {
+    const anchored = await recordCheckpointToTrace(runId, 'checkpoint_created', cp, output);
+    if (anchored) {
+        (0, sessionCheckpoint_1.attachRunIdToCheckpoint)(cp.createdAtIso, cp.sha, runId);
+        // Surface the Trust Panel's run-scoped "Restore checkpoint…" affordance ONLY
+        // now — after the checkpoint_created event really reached the run's chain
+        // (the runId attach above IS the trace-anchored claim). An unanchored
+        // checkpoint never reaches the webview (buildCheckpointAvailableMessage
+        // re-gates on runId as defense in depth). No-op when no panel is open; a
+        // later panel derives the affordance from the registry on selectRun/ready.
+        TrustPanel.peekCurrent()?.notifyCheckpointAvailable(cp);
+    }
+}
 async function promoteChatToBuild(context, gate, output, intentArg) {
     // (1) cwd = the open workspace folder. No folder → honest error, do nothing.
     const folder = vscode.workspace.workspaceFolders?.[0];
@@ -3537,6 +4443,29 @@ async function promoteChatToBuild(context, gate, output, intentArg) {
         return;
     }
     const { cwd, prompt } = preflight;
+    // GOVERNED RULES STEERING for the agentic build (advise-vs-enforce slice):
+    // resolve the developer's rules against the build instruction (always-apply +
+    // manual `@<rule>` mentions; glob rules no-op — a build prompt names no file
+    // paths). When rules apply, PREPEND the assembled block to the prompt sent to
+    // the gateway and carry the hashes-only steering payload so the supervisor
+    // chains a `steering_rules_applied` audit event onto the build run's trace.
+    // STEERING ONLY: it advises the model; enforcement stays in the policy layer.
+    // Best-effort + non-fatal: any failure builds without rules, never blocks.
+    let buildPrompt = prompt;
+    let buildSteering;
+    try {
+        const rulesTurn = (0, chatParticipant_1.resolveTurnRules)(prompt, []);
+        if (rulesTurn.message?.content) {
+            buildPrompt = `${rulesTurn.message.content}\n\n${prompt}`;
+            buildSteering = (0, steeringAudit_1.buildSteeringPayload)('agentic', rulesTurn.selected, rulesTurn.message.content);
+            output.appendLine(`[host] governed rules steering this build: ${rulesTurn.provenance.map((p) => p.name).join(', ')} ` +
+                '(advisory steering; policy enforcement is separate).');
+        }
+    }
+    catch {
+        buildPrompt = prompt;
+        buildSteering = undefined;
+    }
     // (3) UP-FRONT AUTHORITY APPROVAL. This is the operator gesture that grants the build
     // authority — minted via the SAME first-party operator-gesture registry that gates a
     // product-trusted run, so a third-party `executeCommand('glyphstudio.promoteChatToBuild')`
@@ -3603,6 +4532,11 @@ async function promoteChatToBuild(context, gate, output, intentArg) {
             'this build will sign with a per-run ephemeral key; the IDE will NOT emit a "Verified:" ' +
             'commit-message trailer (correct fail-safe).');
     }
+    // AUTO-CHECKPOINT (#10 Slice 2): snapshot the worktree's TRACKED state BEFORE the
+    // agent edits anything (dangling commit; advisory; never blocks the build). The
+    // runId does not exist yet — build/start mints it — so the checkpoint_created
+    // anchor is appended after the run completes (see anchorAutoCheckpoint below).
+    const autoCheckpoint = await autoCheckpointBeforeBuild(cwd, output);
     // Open + reveal the Trust Panel FIRST so it is ready to receive the review.
     const panel = TrustPanel.createOrShow(context.extensionUri, gate);
     panel.reveal();
@@ -3617,15 +4551,28 @@ async function promoteChatToBuild(context, gate, output, intentArg) {
         extensionVersion: resolveExtensionVersion(context),
         runsBase: resolveRunsBase(),
         ...(verifierKeyPath ? { verifierKeyPath } : {}),
-        prompt,
+        // Pluggable verifier-runtime preference (machine-scoped setting → env →
+        // supervisor): 'auto' default; 'off'/daemon-down degrades honestly with a
+        // structured reason on the streamed review (never a fabricated 'full').
+        verifierRuntime: resolveVerifierRuntime(),
+        // The steering-prefixed prompt (when rules applied); intent display above
+        // stays the operator's original task text.
+        prompt: buildPrompt,
         cwd,
         approved: true,
+        ...(buildSteering ? { steering: buildSteering } : {}),
         output,
         onBuildEvent: (event) => reportBuildProgress(event, output, progress),
     }));
     if (!result.started) {
         void vscode.window.showErrorMessage(`GlyphStudio: governed build not started — ${result.message}`);
         return;
+    }
+    // Anchor the pre-build auto-checkpoint to the run's hash chain now that the run
+    // is terminal (its bridge child has exited, so the short-lived recordHuman child
+    // grafts onto the persisted chain tail without racing a live appender).
+    if (autoCheckpoint && result.runId) {
+        await anchorAutoCheckpoint(autoCheckpoint, result.runId, output);
     }
     if (result.review) {
         // Render the diff + commands + verdict in the Trust Panel for the SECOND gate. Pass
@@ -3636,6 +4583,385 @@ async function promoteChatToBuild(context, gate, output, intentArg) {
     }
     else {
         void vscode.window.showWarningMessage(`GlyphStudio: governed build ${result.runId ?? ''} ended without a review — ${result.message || 'no result event'}.`);
+    }
+}
+/**
+ * "GlyphStudio: Plan & Build (Governed)" (#8 — plan mode). The plan-first twin
+ * of {@link promoteChatToBuild}:
+ *
+ *   1. Resolve cwd + intent (the same input acquisition as promoteChatToBuild).
+ *   2. NO AUTHORITY MODAL HERE (frozen director decision): the plan turn is
+ *      READ-ONLY — one governed model turn that edits nothing and runs nothing.
+ *      Friction follows authority, and planning grants none. The EXISTING
+ *      authority gate fires below, at approval, before any build executes —
+ *      semantics UNCHANGED from a plan-less build.
+ *   3. Drive ONE governed plan turn (plan/start → streamed plan/event → the run
+ *      PARKS on the terminal proposal).
+ *   4. Open the proposal as MARKDOWN in an UNTITLED editor; the user reviews and
+ *      may edit steps/goal/risks freely.
+ *   5. Modal: "Approve Plan & Build" → STRICT-parse the CURRENT editor text
+ *      (problems → an actionable error, the editor stays open, re-approvable) →
+ *      the EXISTING confirmBuildAuthorityWithGrant gate → build/start RESUME on
+ *      the SAME runId with planApproval {plan, edited} → the Trust Panel renders
+ *      the terminal review exactly like the promote-to-build flow.
+ *      "Reject Plan" (the ONLY offer for a parse-failed/unavailable proposal) →
+ *      plan/reject closes the run honestly. Dismissing the dialog also rejects
+ *      (the parked run is never silently abandoned).
+ *
+ * A plan is ADVISORY — a model opinion. It never upgrades assurance and never
+ * substitutes for the authority grant. Never throws into the host.
+ */
+async function planBuild(context, gate, output, intentArg) {
+    try {
+        // (1) cwd + intent — promoteChatToBuild's acquisition, verbatim semantics.
+        const folder = vscode.workspace.workspaceFolders?.[0];
+        const candidateCwd = folder?.uri.fsPath;
+        let intent = typeof intentArg === 'string' && intentArg.trim().length > 0 ? intentArg.trim() : undefined;
+        if (!intent && candidateCwd) {
+            intent = await vscode.window.showInputBox({
+                prompt: 'GlyphStudio — what should the governed agent PLAN (and, after your approval, build)?',
+                placeHolder: 'e.g. "add input validation to the signup form and a test for it"',
+                ignoreFocusOut: true,
+                validateInput: (v) => v.trim().length === 0
+                    ? 'Enter a task — what should the agent plan? (the build only starts after you approve the plan)'
+                    : undefined,
+            });
+            if (intent === undefined)
+                return; // cancelled the quick-input (Escape)
+        }
+        const preflight = (0, agenticBuildPromotion_1.resolveBuildPreflight)(candidateCwd, intent);
+        if (!preflight.ok) {
+            void vscode.window.showWarningMessage(`GlyphStudio: ${preflight.reason}`);
+            return;
+        }
+        const { cwd, prompt } = preflight;
+        // TRUSTED VERIFIER KEY + runtime preference: resolved NOW because the
+        // approved build executes on the SAME bridge child the plan spawns (the
+        // park lives in its memory) — best-effort, same fail-safe as the build flow.
+        let verifierKeyPath;
+        try {
+            verifierKeyPath = ensureVerifierKeystore().privateKeyPath;
+        }
+        catch (err) {
+            output.appendLine(`[host] verifier keystore unavailable (${String(err?.message ?? err)}) — ` +
+                'an approved build will sign with a per-run ephemeral key (no "Verified:" trailer; correct fail-safe).');
+        }
+        output.show(true);
+        output.appendLine('');
+        output.appendLine(`[plan] governed plan turn (READ-ONLY) for ${cwd}.`);
+        output.appendLine(`[plan] intent: ${prompt}`);
+        // (3) ONE governed plan turn. No modal — see the doc comment. The result
+        // PARKS the run server-side; `session` is the live approve/reject handle.
+        const result = await vscode.window.withProgress({
+            location: vscode.ProgressLocation.Notification,
+            cancellable: false,
+            title: 'GlyphStudio: governed plan turn…',
+        }, (progress) => (0, supervisorBridgeRunner_1.runBuildPlan)({
+            bridgeServerPath: resolveBundledBridgeServerPath(context),
+            extensionVersion: resolveExtensionVersion(context),
+            runsBase: resolveRunsBase(),
+            ...(verifierKeyPath ? { verifierKeyPath } : {}),
+            verifierRuntime: resolveVerifierRuntime(),
+            output,
+            cwd,
+            prompt,
+            onPlanEvent: (event) => {
+                if (event.type === 'state') {
+                    output.appendLine(`[plan] ${event.runId} — ${event.state}`);
+                    progress.report({ message: event.state });
+                }
+                else if (event.type === 'error') {
+                    output.appendLine(`[plan] ${event.runId} — ERROR: ${event.message}`);
+                }
+            },
+        }));
+        if (!result.started) {
+            void vscode.window.showErrorMessage(`GlyphStudio: plan not started — ${result.message}`);
+            return;
+        }
+        const { proposal, session } = result;
+        if (!proposal || !session) {
+            void vscode.window.showWarningMessage(`GlyphStudio: plan run ${result.runId ?? ''} ended without a proposal — ${result.message || 'no result event'}.`);
+            return;
+        }
+        output.appendLine(`[plan] ${session.runId} — ${(0, planDocument_1.buildPlanSummaryLine)(proposal)} (run parked)`);
+        // (4) Open the proposal as editable markdown in an UNTITLED editor.
+        const doc = await vscode.workspace.openTextDocument({
+            language: 'markdown',
+            content: (0, planDocument_1.renderPlanMarkdown)(proposal),
+        });
+        const editor = await vscode.window.showTextDocument(doc, { preview: false });
+        const closePlanEditor = async () => {
+            // Best-effort: focus the plan document and close it (an untitled doc whose
+            // text we authored — closing discards nothing the user still needs).
+            try {
+                await vscode.window.showTextDocument(doc, { preview: false });
+                await vscode.commands.executeCommand('workbench.action.revertAndCloseActiveEditor');
+            }
+            catch {
+                /* the editor may already be gone — never block the flow on UI cleanup */
+            }
+        };
+        // parse-failed/unavailable → honest message, ONLY Reject (no approve path).
+        if (proposal.parseStatus !== 'ok' || !proposal.plan) {
+            const choice = await vscode.window.showWarningMessage(`GlyphStudio: ${(0, planDocument_1.buildPlanSummaryLine)(proposal)} — there is no plan to approve. ` +
+                'Reject the plan run (the rejection is recorded on its trace).', { modal: true }, 'Reject Plan');
+            void choice; // dismiss and Reject both close honestly — never a silent abandon.
+            const rej = await session.reject(proposal.reason ?? `plan ${proposal.parseStatus}`);
+            output.appendLine(rej.ok
+                ? `[plan] ${session.runId} — rejected (no usable plan); run closed.`
+                : `[plan] ${session.runId} — reject failed: ${rej.message}`);
+            await closePlanEditor();
+            return;
+        }
+        const proposedPlan = proposal.plan;
+        // (5) The decision loop: approve (parse the CURRENT text → the EXISTING
+        // authority gate → resume) or reject. Parse/gate failures keep the editor
+        // open and RE-OFFER the decision — the plan stays parked until resolved.
+        for (;;) {
+            const choice = await vscode.window.showWarningMessage(`GlyphStudio: ${(0, planDocument_1.buildPlanSummaryLine)(proposal)} — review (and edit) the plan in the editor, then decide. ` +
+                'Approving runs the governed build against the FINAL text of the plan document.', { modal: true }, 'Approve Plan & Build', 'Reject Plan');
+            if (choice === undefined || choice === 'Reject Plan') {
+                // Dismissal rejects too: a parked run is never silently abandoned.
+                const rej = await session.reject(choice === undefined ? 'plan dialog dismissed' : undefined);
+                output.appendLine(rej.ok
+                    ? `[plan] ${session.runId} — plan rejected; run closed honestly.`
+                    : `[plan] ${session.runId} — reject failed: ${rej.message}`);
+                await closePlanEditor();
+                return;
+            }
+            // APPROVE: strict-parse the CURRENT editor text. Problems → actionable
+            // error, the editor stays open, the decision re-offers (re-approvable).
+            const finalText = editor.document.getText();
+            const parsed = (0, planDocument_1.parsePlanMarkdown)(finalText);
+            if (!parsed.ok) {
+                output.appendLine(`[plan] ${session.runId} — plan document not approvable:`);
+                for (const p of parsed.problems)
+                    output.appendLine(`[plan]   - ${p}`);
+                void vscode.window.showErrorMessage(`GlyphStudio: the plan document cannot be approved — ${parsed.problems.join('; ')}`);
+                continue;
+            }
+            const finalPlan = parsed.plan;
+            const edited = (0, planDocument_1.planEdited)(proposedPlan, finalPlan);
+            // THE EXISTING AUTHORITY GATE, UNCHANGED (promoteChatToBuild's exact
+            // machinery): the remembered per-workspace grant skips the modal; a
+            // decline re-offers the plan decision (the run stays parked).
+            const alreadyGranted = context.workspaceState.get(BUILD_AUTHORITY_GRANTED_KEY) === true;
+            if (!alreadyGranted) {
+                const grant = await (0, agenticBuildPromotion_1.confirmBuildAuthorityWithGrant)(cwd, (message, proceedLabel, alwaysLabel) => Promise.resolve(vscode.window.showWarningMessage(message, { modal: true }, proceedLabel, alwaysLabel)));
+                if (!grant.granted) {
+                    output.appendLine(`[plan] ${session.runId} — governed build DECLINED at the authority gate; the plan stays parked.`);
+                    continue;
+                }
+                if (grant.remember) {
+                    await context.workspaceState.update(BUILD_AUTHORITY_GRANTED_KEY, true);
+                    output.appendLine(`[host] governed-build authority GRANTED + remembered for this workspace (${cwd}).`);
+                }
+            }
+            else {
+                output.appendLine(`[host] governed-build authority previously remembered for this workspace (${cwd}) — proceeding without the modal.`);
+            }
+            try {
+                gate.gestures.consume(gate.gestures.mint());
+            }
+            catch {
+                /* gesture bookkeeping is best-effort; the modal confirm is the authority gate */
+            }
+            output.appendLine(`[plan] ${session.runId} — plan APPROVED (edited=${edited}); resuming the parked run into the governed build.`);
+            // AUTO-CHECKPOINT (#10 Slice 2): same pre-build snapshot as promoteChatToBuild.
+            // The runId IS known here (the parked plan run), but the anchor is still
+            // appended only after the run completes — the parked session's bridge child
+            // owns the live chain tail until then.
+            const autoCheckpoint = await autoCheckpointBeforeBuild(cwd, output);
+            // GOVERNED RULES STEERING for the plan-approved build (advise-vs-enforce
+            // slice): resolved at APPROVE time (the rules current when the build
+            // actually starts) over the original plan prompt. When rules apply, the
+            // resumed build's prompt is the steering-prefixed override and the
+            // hashes-only payload rides build/start so the supervisor chains a
+            // `steering_rules_applied` event onto the SAME parked run/trace. Advisory
+            // steering only — never enforcement. Best-effort + non-fatal.
+            let planPromptOverride;
+            let planSteering;
+            try {
+                const rulesTurn = (0, chatParticipant_1.resolveTurnRules)(prompt, []);
+                if (rulesTurn.message?.content) {
+                    planPromptOverride = `${rulesTurn.message.content}\n\n${prompt}`;
+                    planSteering = (0, steeringAudit_1.buildSteeringPayload)('agentic', rulesTurn.selected, rulesTurn.message.content);
+                    output.appendLine(`[plan] governed rules steering the approved build: ${rulesTurn.provenance.map((p) => p.name).join(', ')} ` +
+                        '(advisory steering; policy enforcement is separate).');
+                }
+            }
+            catch {
+                planPromptOverride = undefined;
+                planSteering = undefined;
+            }
+            // Trust Panel first (the build flow's ordering), then the RESUME.
+            const panel = TrustPanel.createOrShow(context.extensionUri, gate);
+            panel.reveal();
+            const buildResult = await vscode.window.withProgress({
+                location: vscode.ProgressLocation.Notification,
+                cancellable: false,
+                title: 'GlyphStudio: governed agentic build (plan-approved)…',
+            }, (progress) => session.approveAndBuild({
+                plan: finalPlan,
+                edited,
+                ...(planPromptOverride ? { promptOverride: planPromptOverride } : {}),
+                ...(planSteering ? { steering: planSteering } : {}),
+                onBuildEvent: (event) => reportBuildProgress(event, output, progress),
+            }));
+            await closePlanEditor();
+            if (!buildResult.started) {
+                void vscode.window.showErrorMessage(`GlyphStudio: plan-approved build not started — ${buildResult.message}`);
+                return;
+            }
+            // Anchor the pre-build auto-checkpoint now that the run is terminal (the
+            // session's bridge child has exited — no live appender to race).
+            if (autoCheckpoint) {
+                await anchorAutoCheckpoint(autoCheckpoint, buildResult.runId ?? session.runId, output);
+            }
+            if (buildResult.review) {
+                panel.postAgenticBuildReview(buildResult.review, false, cwd);
+                void vscode.window.showInformationMessage(`GlyphStudio: governed build ${buildResult.runId ?? ''} complete — review the diff + verdict in the ` +
+                    'Trust Panel, then Accept or Reject.');
+            }
+            else {
+                void vscode.window.showWarningMessage(`GlyphStudio: governed build ${buildResult.runId ?? ''} ended without a review — ${buildResult.message || 'no result event'}.`);
+            }
+            return;
+        }
+    }
+    catch (err) {
+        // Defense-in-depth: the command must never throw into the host.
+        const detail = String(err?.message ?? err);
+        output.appendLine(`[plan] threw: ${detail}`);
+        void vscode.window.showErrorMessage(`GlyphStudio: plan & build failed — ${detail}`);
+    }
+}
+/**
+ * The REAL git runner for the change-review preflight — the injected seam
+ * changeReview.ts declares (`ReviewGitRunner`), so the preflight logic stays pure
+ * + headless-tested while this thin wrapper owns the child process. Resolves
+ * (never rejects); a non-zero exit / spawn failure resolves `{ ok: false }`.
+ */
+const reviewGitRunner = (args, cwd) => new Promise((resolve) => {
+    (0, node_child_process_1.execFile)('git', args, { cwd, timeout: 15_000 }, (err, stdout) => {
+        resolve({ ok: !err, stdout: typeof stdout === 'string' ? stdout : '' });
+    });
+});
+/**
+ * "GlyphStudio: Review Changes (Verifier-Backed)" (#7). Quick-pick the scope
+ * (working tree default; branch variant detects/asks the base ref), run the
+ * honest PREFLIGHT (a non-repo / empty-diff refusal never spawns a bridge), then
+ * drive ONE governed review over the bridge (review/start → streamed
+ * review/event → terminal ChangeReview). Completion surfaces the frozen-wording
+ * summary line plus an action onto the ESTABLISHED Trust Panel run-opening path
+ * (OPEN_RUN_COMMAND → panel.selectRun) — the panel's ChangeReview rendering
+ * itself lands with the integration slice. Never throws into the host.
+ */
+async function reviewChanges(context, output) {
+    try {
+        // (1) cwd = the open workspace folder. No folder → honest refusal, do nothing.
+        const folder = vscode.workspace.workspaceFolders?.[0];
+        if (!folder) {
+            void vscode.window.showWarningMessage('GlyphStudio: Review Changes needs an open workspace folder (a git repository) to review.');
+            return;
+        }
+        const cwd = folder.uri.fsPath;
+        const pick = await vscode.window.showQuickPick([
+            {
+                label: 'Working tree changes',
+                description: 'review uncommitted changes vs HEAD',
+                scope: 'working-tree',
+                picked: true,
+            },
+            {
+                label: 'Branch vs base ref…',
+                description: 'review everything this branch changed vs a base (e.g. origin/main)',
+                scope: 'branch',
+            },
+        ], {
+            placeHolder: 'GlyphStudio: what should the verifier-backed review cover?',
+            ignoreFocusOut: true,
+        });
+        if (!pick)
+            return; // cancelled
+        let baseRef;
+        if (pick.scope === 'branch') {
+            const detected = await (0, changeReview_1.detectBaseRef)(cwd, reviewGitRunner);
+            const entered = await vscode.window.showInputBox({
+                prompt: 'GlyphStudio — base ref to diff this branch against',
+                value: detected ?? '',
+                placeHolder: 'e.g. origin/main',
+                ignoreFocusOut: true,
+                validateInput: (v) => v.trim().length === 0 ? 'Enter a base ref (e.g. origin/main).' : undefined,
+            });
+            if (entered === undefined)
+                return; // cancelled (Escape)
+            baseRef = entered.trim();
+        }
+        // (3) PREFLIGHT — honest, specific refusals (not a repo; nothing to review;
+        // unknown base ref) BEFORE any bridge spawn. The pure logic lives in
+        // changeReview.ts; only the git child process is owned here.
+        const preflight = await (0, changeReview_1.reviewPreflight)({ cwd, scope: pick.scope, ...(baseRef ? { baseRef } : {}) }, reviewGitRunner);
+        if (!preflight.ok) {
+            void vscode.window.showWarningMessage(`GlyphStudio: ${preflight.reason}`);
+            return;
+        }
+        output.appendLine('');
+        output.appendLine(`[review] starting verifier-backed change review — scope=${preflight.params.scope}` +
+            (preflight.params.baseRef ? ` vs ${preflight.params.baseRef}` : '') +
+            ` (${preflight.params.cwd}).`);
+        // (4) Drive ONE governed review over the bridge, narrating streamed lifecycle
+        // markers honestly. The terminal result/error is handled below.
+        const result = await vscode.window.withProgress({
+            location: vscode.ProgressLocation.Notification,
+            cancellable: false,
+            title: 'GlyphStudio: verifier-backed change review…',
+        }, (progress) => (0, supervisorBridgeRunner_1.runChangeReview)({
+            bridgeServerPath: resolveBundledBridgeServerPath(context),
+            extensionVersion: resolveExtensionVersion(context),
+            runsBase: resolveRunsBase(),
+            output,
+            cwd: preflight.params.cwd,
+            scope: preflight.params.scope,
+            ...(preflight.params.baseRef ? { baseRef: preflight.params.baseRef } : {}),
+            onReviewEvent: (event) => {
+                if (event.type === 'state') {
+                    output.appendLine(`[review] ${event.runId} — ${event.state}`);
+                    progress.report({ message: event.state });
+                }
+                else if (event.type === 'error') {
+                    output.appendLine(`[review] ${event.runId} — ERROR: ${event.message}`);
+                }
+            },
+        }));
+        if (!result.started) {
+            void vscode.window.showErrorMessage(`GlyphStudio: change review not started — ${result.message}`);
+            return;
+        }
+        if (!result.review) {
+            void vscode.window.showWarningMessage(`GlyphStudio: change review ${result.runId ?? ''} ended without a result — ` +
+                `${result.message || 'no result event'}.`);
+            return;
+        }
+        // (5) The terminal ChangeReview: surface the FROZEN-WORDING summary line
+        // (findings stay advisory; the assurance qualifier is the shipped vocabulary)
+        // + the established Trust Panel run-opening action.
+        const display = (0, changeReview_1.projectChangeReviewDisplay)(result.review);
+        output.appendLine(`[review] ${display.runId} — ${display.summaryLine}`);
+        if (display.isolationUnavailableReason) {
+            output.appendLine(`[review] ${display.runId} — why not independently verified: ${display.isolationUnavailableReason}`);
+        }
+        const action = await vscode.window.showInformationMessage(`GlyphStudio: ${display.summaryLine}`, 'Open in Trust Panel');
+        if (action === 'Open in Trust Panel') {
+            void vscode.commands.executeCommand(governedRunsTree_1.OPEN_RUN_COMMAND, display.runId);
+        }
+    }
+    catch (err) {
+        // Defense-in-depth: the command must never throw into the host.
+        const detail = String(err?.message ?? err);
+        output.appendLine(`[review] threw: ${detail}`);
+        void vscode.window.showErrorMessage(`GlyphStudio: change review failed — ${detail}`);
     }
 }
 /**
@@ -3879,6 +5205,106 @@ const governedFloatingLossSubs = new Map();
  * about which runs it owns and so a future ext-side consumer can scope on it.
  */
 const governedFloatingOwnedRunIds = new Set();
+/* ================================================================== *
+ * GOVERNED-TERMINAL BROKER DECISION CHIPS (per-command egress decisions).
+ *
+ * The pure model lives in terminalDecisionChips.ts; this block is the thin
+ * host wiring: (1) the module-level store, (2) the terminal→runId resolution
+ * over the EXISTING ownership structures, (3) the run/event tap that feeds
+ * `policy_decision` events for governed-terminal sessions into the store, and
+ * (4) a debounced repaint post to the Trust Panel. View-only end to end — the
+ * chips render what the broker already traced; they confer no trust.
+ * ================================================================== */
+/** The one host-side chip store (per-run bounded; see terminalDecisionChips.ts). */
+const governedTerminalDecisionChips = new terminalDecisionChips_1.TerminalDecisionChipStore();
+/**
+ * runIds of governed-terminal sessions the EXTENSION created via
+ * openGovernedTerminalSurface (panel governed terminal / governed chat). The
+ * floating ⌃⌘K sessions are already runId-registered (governedFloatingSessions
+ * / governedFloatingOwnedRunIds); this set is their ext-created counterpart so
+ * the chip tap can tell a governed-TERMINAL run from any other run streaming
+ * through the panel. Never pruned (runIds are tiny; chips may render post-stop).
+ */
+const governedSurfaceTerminalRunIds = new Set();
+/**
+ * Terminal → runId for governed terminals the EXTENSION created (the floating
+ * terminal is renderer-created and resolved by its env marker instead). A
+ * WeakMap so a closed terminal is collected without close tracking (the
+ * glyphSpekOwnedTerminals idiom).
+ */
+const governedTerminalRunIdByTerminal = new WeakMap();
+/** True iff `runId` belongs to a governed-terminal session (either surface). */
+function isGovernedTerminalSessionRun(runId) {
+    return (governedSurfaceTerminalRunIds.has(runId) ||
+        governedFloatingSessions.has(runId) ||
+        governedFloatingOwnedRunIds.has(runId));
+}
+/**
+ * Resolve the governed runId for a terminal handed back by the shell-
+ * integration events. Ext-created governed terminals resolve via the WeakMap
+ * recorded at creation; the renderer-created floating terminal resolves via
+ * the {@link FLOATING_GOVERNED_TERMINAL_ENV_MARKER} env marker (value = runId)
+ * surfaced on `creationOptions.env`. Returns undefined when neither structure
+ * knows the terminal — the caller then does NOTHING (no guessing).
+ */
+function resolveGovernedTerminalRunId(terminal) {
+    if (!terminal || typeof terminal !== 'object')
+        return undefined;
+    const direct = governedTerminalRunIdByTerminal.get(terminal);
+    if (direct)
+        return direct;
+    const opts = terminal
+        .creationOptions;
+    const marker = opts?.env?.[governedFloatingTerminal_1.FLOATING_GOVERNED_TERMINAL_ENV_MARKER];
+    return typeof marker === 'string' && marker.length > 0 ? marker : undefined;
+}
+/**
+ * Tap one raw run/event envelope (called from TrustPanel.postRunEvent — the
+ * fan-out point every governed-terminal stream reaches): when it is a
+ * `policy_decision` trace event for a run that IS a governed-terminal session,
+ * ingest it into the chip store and schedule a debounced repaint. Shape is
+ * checked locally (validate-then-fold, like the other postRunEvent taps);
+ * anything malformed/foreign is ignored.
+ */
+function ingestGovernedTerminalChipEvent(raw) {
+    if (!raw || typeof raw !== 'object')
+        return;
+    const env = raw;
+    if (env.kind !== 'trace_event')
+        return;
+    if (typeof env.runId !== 'string' || env.runId.length === 0)
+        return;
+    if (!isGovernedTerminalSessionRun(env.runId))
+        return;
+    const ev = env.event;
+    if (!ev || typeof ev !== 'object' || ev.type !== 'policy_decision')
+        return;
+    const ts = typeof ev.ts === 'number' ? ev.ts : Date.now();
+    if (governedTerminalDecisionChips.ingest(env.runId, ev.payload, ts)) {
+        scheduleCommandDecisionChipsPost(env.runId);
+    }
+}
+/** Per-run debounce timers for the chips repaint post. */
+const commandDecisionChipsTimers = new Map();
+/** Debounce window: egress decisions arrive in bursts; one repaint per burst. */
+const COMMAND_DECISION_CHIPS_DEBOUNCE_MS = 300;
+/**
+ * Debounced (~300ms, per run) repaint: post the run's current chip rows to the
+ * live Trust Panel, if one is open. View-only + best-effort — when no panel is
+ * open the post is skipped; the store retains the data, so a later panel
+ * recovers the rows on selectRun (postCommandDecisionChips re-derives).
+ */
+function scheduleCommandDecisionChipsPost(runId) {
+    if (commandDecisionChipsTimers.has(runId))
+        return;
+    const timer = setTimeout(() => {
+        commandDecisionChipsTimers.delete(runId);
+        TrustPanel.peekCurrent()?.postCommandDecisionChips(runId);
+    }, COMMAND_DECISION_CHIPS_DEBOUNCE_MS);
+    // A pending UI repaint must never keep the ext-host process alive.
+    timer.unref?.();
+    commandDecisionChipsTimers.set(runId, timer);
+}
 /**
  * GOVERNANCE-BOUNDARY LEGIBILITY (⌃⌘U). The set of terminals the user DELIBERATELY opened
  * as explicitly UNGOVERNED via `glyphstudio.openUngovernedTerminal`. These are genuinely NOT
@@ -3891,6 +5317,24 @@ const governedFloatingOwnedRunIds = new Set();
  * does NOT imply governance — it only records intentional ungoverned-ness.
  */
 const deliberatelyUngovernedTerminals = new WeakSet();
+/**
+ * Read the MACHINE-SCOPED enterprise lock `glyphstudio.governance.requireGovernedAgentRuns`
+ * (agent mode Slice 2; default FALSE — flipping the default is a flagged CIO decision).
+ * SECURITY (the sweep-07 house pattern): read via inspect() + selectGlobalScopedBool,
+ * accepting ONLY the user/global (else default) scopes — a repo's .vscode/settings.json
+ * must be able neither to impose the lock on a user NOR (the load-bearing direction) to
+ * silently DISABLE an org's lock. Combined with `"scope": "machine"` in package.json
+ * this is defense in depth. Guarded so a stub host without getConfiguration is safe
+ * (no lock).
+ */
+function resolveRequireGovernedAgentRuns() {
+    if (typeof vscode.workspace?.getConfiguration !== 'function')
+        return false;
+    const inspect = vscode.workspace
+        .getConfiguration('glyphstudio')
+        .inspect('governance.requireGovernedAgentRuns');
+    return (0, configScope_1.selectGlobalScopedBool)(inspect, false);
+}
 /**
  * EXPLICITLY UNGOVERNED TERMINAL (⌃⌘U). Open a STOCK VS Code terminal — plain host env,
  * NO governance: NO supervisor proxy (no HTTPS_PROXY/HTTP_PROXY), NO env sanitization
@@ -3915,7 +5359,33 @@ const deliberatelyUngovernedTerminals = new WeakSet();
  * guard pattern) so a minimal host/test stub without them degrades to an unbadged stock
  * terminal instead of throwing. Best-effort + non-fatal end to end.
  */
-function openUngovernedTerminal(context) {
+function openUngovernedTerminal(context, output) {
+    // REQUIRE-GOVERNED LOCK (agent mode Slice 2). When the machine-scoped
+    // glyphstudio.governance.requireGovernedAgentRuns lock is ON, this command is the ONE
+    // surface the lock can genuinely refuse: a deliberately-ungoverned terminal
+    // GlyphStudio itself would create. Refuse it (no terminal), say why with the governed
+    // path one click away, and emit the always-on audit line (an output-channel line, NOT
+    // a trace event). The decision itself is the pure, headlessly-tested
+    // shouldRefuseUngovernedTerminal(). Stock terminals are untouched — the lock cannot
+    // govern or block those.
+    if ((0, agentInvocationSteer_1.shouldRefuseUngovernedTerminal)({
+        requireGovernedAgentRuns: resolveRequireGovernedAgentRuns(),
+    })) {
+        try {
+            output.appendLine(agentInvocationSteer_1.UNGOVERNED_TERMINAL_REFUSED_AUDIT_LINE);
+        }
+        catch {
+            /* best-effort: the audit line must never break the refusal notification */
+        }
+        void vscode.window
+            .showErrorMessage(agentInvocationSteer_1.UNGOVERNED_TERMINAL_REFUSED_MESSAGE, agentInvocationSteer_1.AGENT_STEER_OPEN_GOVERNED_BUTTON)
+            .then((choice) => {
+            if (choice === agentInvocationSteer_1.AGENT_STEER_OPEN_GOVERNED_BUTTON) {
+                void vscode.commands.executeCommand('glyphstudio.openGovernedTerminal');
+            }
+        });
+        return;
+    }
     // No env, no strictEnv, no proxy: a plain stock terminal with the full host environment.
     const terminalOptions = {
         name: 'Ungoverned Terminal',
@@ -3934,6 +5404,16 @@ function openUngovernedTerminal(context) {
     // accidental-terminal steer (its own confirming notice below is the single signal).
     deliberatelyUngovernedTerminals.add(terminal);
     terminal.show();
+    // ESCAPE-HATCH AUDIT (agent mode Slice 1). ALWAYS-ON operator-visible audit line in
+    // the Governed Run channel — emitted on EVERY ⌃⌘U open, independent of the one-time
+    // user notice below (which stays separately dismissible; the audit is not
+    // dismissible). An output-channel line only — NOT a trace event.
+    try {
+        output.appendLine(agentInvocationSteer_1.UNGOVERNED_TERMINAL_OPEN_AUDIT_LINE);
+    }
+    catch {
+        /* best-effort: the audit line must never break opening a terminal */
+    }
     // One-time honest CONFIRMING notice. Best-effort + non-fatal: a state-store/UI failure
     // must never break opening the terminal. Mirrors the A1 notice's read-flag /
     // show-with-"Don't show again" / persist-on-dismiss shape.
@@ -4177,6 +5657,11 @@ async function openGovernedTerminalSurface(context, output, surface, detected) {
     // (A1, Part 2) never warns about a surface GlyphStudio itself governs + badged. The set
     // is a WeakSet so a closed terminal is collected without us tracking close events.
     glyphSpekOwnedTerminals.add(terminal);
+    // BROKER CHIPS: record terminal→runId + the runId as a governed-terminal session,
+    // so the chips' shell-integration tracker can attribute this terminal's command
+    // windows to the run and the run/event tap accepts its policy_decision events.
+    governedTerminalRunIdByTerminal.set(terminal, start.runId);
+    governedSurfaceTerminalRunIds.add(start.runId);
     // Tie the supervised session's lifetime to the terminal: when the operator closes
     // it, FINALIZE the run (terminal/stop → signed verdict incl. assurance) and surface
     // the finalized posture. A `degraded` verdict is shown as lower-assurance and is
@@ -4467,13 +5952,72 @@ function buildNativeChatSessionFactory(context, output) {
             // index/retrieve to (the same source the chat participant passes per-call). When
             // no folder is open, omit it — the supervisor pins the root from the first retrieve.
             const workspaceRoot = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+            // MULTI-ROOT: bind every workspace folder too, so chat retrieves can name any
+            // of them (the legacy workspaceRoot stays folder 0 for older supervisors).
+            const workspaceRoots = liveIndexWorkspaceRoots();
             return (0, supervisorBridgeRunner_1.openChatSession)({
                 bridgeServerPath: resolveBundledBridgeServerPath(context),
                 extensionVersion: resolveExtensionVersion(context),
                 runsBase: resolveRunsBase(),
                 ...(workspaceRoot ? { workspaceRoot } : {}),
+                ...(workspaceRoots.length > 0 ? { workspaceRoots } : {}),
                 output,
             });
+        },
+    };
+}
+/**
+ * Wrap a {@link NativeChatSessionFactory} so every session it opens REGISTERS its
+ * `indexUpdate` capability with the per-session index fan-out (indexUpdateFanout.ts —
+ * the save/watch freshness loop then keeps that bridge child's OWN in-memory index
+ * fresh) and UNREGISTERS it on the session's EXISTING dispose path (no dangling
+ * targets: a dead session can never be retained as a fan-out target). A chat child
+ * without an index yet refuses updates benignly (existing-index-only) until its lazy
+ * warm-up build completes — the fanout treats that as a once-logged skip.
+ *
+ * Only the LONG-LIVED chat surfaces are wrapped (the chat participant + the native
+ * chat panel, which hold one session each across turns). The per-invocation factories
+ * (inline edit, commit message, terminal Cmd-K) open short-lived sessions that never
+ * build an index, so wrapping them would only add register/refuse churn per command.
+ *
+ * No workspace folder / failed connect → the factory result passes through UNWRAPPED
+ * (there is no index to keep fresh and no session to register).
+ */
+function withIndexUpdateRegistration(fanout, label, factory) {
+    return {
+        open: async () => {
+            const opened = await factory.open();
+            const session = opened.session;
+            const workspaceRoot = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+            if (!opened.connected || !session || !workspaceRoot)
+                return opened;
+            const unregister = fanout.register(label, (batch) => session.indexUpdate({
+                // Per-root freshness batches carry their owning root; a legacy rootless
+                // batch falls back to the historical first-folder root.
+                workspaceRoot: batch.workspaceRoot ?? workspaceRoot,
+                changed: batch.changed,
+                deleted: batch.deleted,
+            }));
+            // Delegate every session method; only dispose() is augmented (unregister
+            // FIRST, then the real teardown). Explicit delegation — no spread — keeps the
+            // ChatSession contract visible and type-checked here.
+            const wrapped = {
+                sendTurn: (messages, handlers, routing) => session.sendTurn(messages, handlers, routing),
+                chatBackends: () => session.chatBackends(),
+                indexRetrieve: (params) => session.indexRetrieve(params),
+                webFetch: (params) => session.webFetch(params),
+                indexBuild: (params, opts) => session.indexBuild(params, opts),
+                indexUpdate: (params) => session.indexUpdate(params),
+                mcpList: (params) => session.mcpList(params),
+                mcpCall: (params) => session.mcpCall(params),
+                approvalRespond: (params) => session.approvalRespond(params),
+                onRunEvent: (listener) => session.onRunEvent(listener),
+                dispose: () => {
+                    unregister();
+                    session.dispose();
+                },
+            };
+            return { ...opened, session: wrapped };
         },
     };
 }
@@ -4549,8 +6093,8 @@ function buildChatTerminalDeps(context, output) {
             if (!detected) {
                 // HONEST, non-silent: surface the reason in the webview empty state.
                 return {
-                    error: "Couldn't find Claude Code / Codex on your PATH. Open a terminal and run `claude` once, " +
-                        "or make sure it's installed.",
+                    error: "Couldn't find Claude Code / Codex / Gemini on your PATH. Open a terminal and run " +
+                        "`claude` once, or make sure it's installed.",
                 };
             }
             // BINARY-SWAP GUARD (sweep-27/28). Canonicalize the detected path and REFUSE a
@@ -4563,7 +6107,11 @@ function buildChatTerminalDeps(context, output) {
                     'a swapped/planted binary. Run a trusted agent in a Governed Terminal yourself if you intend to.');
                 return undefined;
             }
-            const actorType = detected.agent === 'claude' ? 'claude-code-cli' : 'codex-cli';
+            const actorType = detected.agent === 'claude'
+                ? 'claude-code-cli'
+                : detected.agent === 'codex'
+                    ? 'codex-cli'
+                    : 'native'; // gemini (and any future CLI) maps to the existing 'native' tag
             const request = assembleGovernedTerminalRequest(context, output, actorType);
             if (!request)
                 return undefined;

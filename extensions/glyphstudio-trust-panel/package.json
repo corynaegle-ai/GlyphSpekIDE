@@ -45,7 +45,10 @@
     "onCommand:glyphstudio.openNativeChat",
     "onCommand:glyphstudio.inlineEdit",
     "onCommand:glyphstudio.generateCommitMessage",
+    "onCommand:glyphstudio.reviewChanges",
+    "onCommand:glyphstudio.planBuild",
     "onCommand:glyphstudio.indexWorkspace",
+    "onCommand:glyphstudio.purgeIndex",
     "onChatParticipant:glyphstudio.codex",
     "onLanguageModelChatProvider:glyphstudio"
   ],
@@ -112,6 +115,14 @@
         "title": "GlyphStudio: Revoke Governed-Build Authorization (This Workspace)"
       },
       {
+        "command": "glyphstudio.createCheckpoint",
+        "title": "GlyphStudio: Create Checkpoint"
+      },
+      {
+        "command": "glyphstudio.restoreCheckpoint",
+        "title": "GlyphStudio: Restore Checkpoint…"
+      },
+      {
         "command": "glyphstudio.openGovernedTerminal",
         "title": "GlyphStudio: Open Governed Terminal"
       },
@@ -152,6 +163,10 @@
         "title": "GlyphStudio: Index Workspace"
       },
       {
+        "command": "glyphstudio.purgeIndex",
+        "title": "GlyphStudio: Purge Persisted Index"
+      },
+      {
         "command": "glyphstudio.verifyAutoTest",
         "title": "GlyphStudio: Verify (Auto Test)"
       },
@@ -160,17 +175,41 @@
         "title": "GlyphStudio: Generate Terminal Command"
       },
       {
+        "command": "glyphstudio.chat.selectModel",
+        "title": "GlyphStudio: Select Chat Model"
+      },
+      {
         "command": "glyphstudio.generateCommitMessage",
         "title": "GlyphStudio: Generate Commit Message",
         "category": "GlyphStudio",
         "icon": "$(sparkle)"
+      },
+      {
+        "command": "glyphstudio.reviewChanges",
+        "title": "GlyphStudio: Review Changes (Verifier-Backed)",
+        "category": "GlyphStudio",
+        "icon": "$(checklist)"
+      },
+      {
+        "command": "glyphstudio.planBuild",
+        "title": "GlyphStudio: Plan & Build (Governed)",
+        "category": "GlyphStudio",
+        "icon": "$(list-ordered)"
+      },
+      {
+        "command": "glyphstudio.exportVerifierKey",
+        "title": "GlyphStudio: Export Verifier Public Key"
+      },
+      {
+        "command": "glyphstudio.trustVerifierKey",
+        "title": "GlyphStudio: Trust a Verifier Key…"
       }
     ],
     "keybindings": [
       {
-        "comment": "Cmd-K-style inline edit. NOTE: bare `cmd+k` is VS Code's chord LEADER (cmd+k cmd+s open keyboard shortcuts, cmd+k cmd+c add comment, \u2026); binding it alone would shadow every cmd+k chord. We therefore bind a NON-colliding chord under that leader: cmd+k cmd+i ('i' for inline edit). editorTextFocus gates it to an active editor.",
+        "comment": "Cmd-K-style inline edit. NOTE: bare `cmd+k` is VS Code's chord LEADER; binding it alone would shadow every cmd+k chord, so we bind a chord UNDER that leader. COLLISION FIXED (2026-06-12): the previous `cmd+k cmd+i` is the FORK CORE 'Show Hover' chord (glyphstudio-codeoss editor/contrib/hover hoverActions) \u2014 and in this fork CORE bindings shadow extension bindings, so the old binding never fired. Grep of the fork's src/vs (KeyChord registrations, tests excluded) + built-in extensions + this package.json on 2026-06-12: cmd+k cmd+e = core Settings editor (preferences.contribution.ts), cmd+k cmd+g = fork GlyphStudio Home (glyphstudioHome.contribution.ts), cmd+k cmd+j = core Unfold All (folding.ts), cmd+k cmd+n = built-in git extension (extensions/git/package.json) \u2014 all taken; `cmd+k cmd+v` had ZERO hits in either KeyChord or string form (the markdown extension's `cmd+k v` is a DIFFERENT chord), so cmd+k cmd+v is the binding. editorTextFocus gates it to an active editor.",
         "command": "glyphstudio.inlineEdit",
-        "key": "cmd+k cmd+i",
+        "key": "cmd+k cmd+v",
         "when": "editorTextFocus"
       },
       {
@@ -369,6 +408,13 @@
           "command": "glyphstudio.generateCommitMessage",
           "when": "scmProvider == git"
         }
+      ],
+      "scm/title": [
+        {
+          "command": "glyphstudio.reviewChanges",
+          "when": "scmProvider == git",
+          "group": "navigation"
+        }
       ]
     },
     "configuration": {
@@ -392,6 +438,12 @@
           "default": [],
           "scope": "machine",
           "description": "SPKI PEM (or base64) public keys of trusted verifiers, provisioned out-of-band. A verdict is fully AUTHORITATIVE only if signed by one of these (the built-in demo key yields the separate, clearly-labeled DEMO-AUTHORITATIVE state, never product AUTHORITATIVE). A key embedded in a bundle is never trusted. The extension also pins its managed keystore key (~/.glyphstudio/verifier/public.pem) in addition to these. Machine-scoped: a workspace/.vscode/settings.json cannot inject a trust root."
+        },
+        "glyphstudio.governance.requireGovernedAgentRuns": {
+          "type": "boolean",
+          "default": false,
+          "scope": "machine",
+          "description": "Require the governed path for agent runs GlyphStudio creates: the Ungoverned Terminal command is refused and agent-CLI invocations detected in non-governed terminals raise a modal warning. Cannot retroactively govern or block stock terminals — those remain observable only. Off by default."
         },
         "glyphstudio.supervisorMode": {
           "type": "string",
@@ -439,15 +491,51 @@
           "scope": "machine",
           "description": "Sandbox runtime backing governed runs. P0 ships the Docker runtime; the remote (Firecracker) plane is future work. Machine-scoped so a workspace cannot redirect execution."
         },
+        "glyphstudio.verifierRuntime": {
+          "type": "string",
+          "enum": [
+            "auto",
+            "docker",
+            "firecracker",
+            "off"
+          ],
+          "default": "auto",
+          "scope": "machine",
+          "enumDescriptions": [
+            "DEFAULT. Use Docker for the independent sandboxed verifier when its daemon is reachable; otherwise degrade HONESTLY to the inline-unsandboxed check (the verdict carries a structured reason and never claims independent verification).",
+            "Use Docker when reachable; otherwise the honest inline degrade (never a fabricated independent verdict).",
+            "EXPLICIT hard-plane opt-in. Use Firecracker when this host can structurally run it (Linux + /dev/kvm + firecracker/jailer); an incapable host falls through to Docker, then to the honest inline degrade. Never selected automatically.",
+            "Never isolate: the verifier always runs the inline-unsandboxed check (degraded; never assurance 'full'), with the preference recorded as the reason."
+          ],
+          "description": "Sandbox runtime backing the INDEPENDENT verifier of a governed agentic build (the only path to assurance 'full'). When no isolating runtime is available the build still verifies via the honest inline-unsandboxed check and carries a structured 'why' on the verdict — it never fabricates independence. Machine-scoped: a workspace/.vscode/settings.json cannot redirect verifier execution."
+        },
         "glyphstudio.halo.tintChrome": {
           "type": "boolean",
           "default": false,
           "description": "Authority Halo fallback (opt-in). When ON, GlyphStudio tints real workbench chrome EDGES (title bar, activity-bar / status-bar borders) to the current run's assurance color (slate=read \u00b7 amber=claimed \u00b7 violet=SOFT \u00b7 blue=verified \u00b7 red=denied) via workbench.colorCustomizations \u2014 an honest pre-fork stand-in for the whole-frame halo ring. OFF by default because it persistently recolors your chrome; when off, the status-bar 'authority:' segment + the Trust Panel header accent are the honest backstop. Fully reversible: turning it off (or deactivating the extension) restores your prior color customizations exactly. The same `glyphstudio.authority` context-key is set regardless, so the future fork halo ring needs no extension change."
         },
+        "glyphstudio.checkpoint.enabled": {
+          "type": "boolean",
+          "default": true,
+          "description": "Session checkpoints: snapshot the working tree's TRACKED state (a `git stash create` dangling commit — no stash-list/ref pollution) automatically before each governed agentic build, plus on demand via 'GlyphStudio: Create Checkpoint'. HONEST LIMITS: untracked file content is NOT captured (paths are listed only); checkpoints are SESSION-SCOPED (the dangling commit is git-GC-ephemeral and the registry is in-memory — they do not survive a window reload); a checkpoint is ADVISORY, never verified. Restore ('GlyphStudio: Restore Checkpoint…') covers tracked divergence only, behind a modal confirm listing exactly what will change."
+        },
+        "glyphstudio.inlineEdit.applyMode": {
+          "type": "string",
+          "default": "preview",
+          "enum": [
+            "preview",
+            "direct"
+          ],
+          "enumDescriptions": [
+            "preview — DEFAULT. A successful rewrite opens a read-only original ↔ proposed diff; NOTHING is written until you press Apply (the stale-buffer guard re-runs at apply time). Discard / dismissing applies nothing.",
+            "direct — apply the rewrite immediately after the stale-buffer guard, with no diff review (the pre-2026-06-12 behavior). Still an undoable edit (⌘Z restores the original)."
+          ],
+          "description": "How a successful governed inline edit (cmd+k cmd+v, glyphstudio.inlineEdit) reaches your buffer. 'preview' (DEFAULT) gates the apply behind a read-only original ↔ proposed diff with Apply/Discard — nothing is written until you explicitly Apply, and the stale-buffer guard re-runs at apply time in case you typed while reviewing. 'direct' applies immediately after the guard. Both modes apply an UNDOABLE WorkspaceEdit (⌘Z restores the original). UX preference, not trust posture — the edit is the governed gateway model's output either way."
+        },
         "glyphstudio.inlineCompletion.enabled": {
           "type": "boolean",
-          "default": false,
-          "description": "Local code-completion (Tab) \u2014 an UNGOVERNED, on-device assist: fill-in-the-middle on a loopback Ollama model (http://127.0.0.1:11434). It is NOT routed through the GlyphStudio Model broker and does NOT appear in the governed Model-Calls trace. Fully local (no egress, no credential, works offline / air-gapped). Best-effort: if the daemon or the model is unavailable it silently does nothing and never breaks typing. OFF by default \u2014 opt in."
+          "default": true,
+          "description": "Local code-completion (Tab) \u2014 an UNGOVERNED, on-device assist: fill-in-the-middle on a loopback Ollama model (http://127.0.0.1:11434). It is NOT routed through the GlyphStudio Model broker and does NOT appear in the governed Model-Calls trace. Fully local (no egress, no credential, works offline / air-gapped). Best-effort: if the daemon or the model is unavailable it silently does nothing and never breaks typing. Enabled by default; set false to disable."
         },
         "glyphstudio.inlineCompletion.autoImport": {
           "type": "boolean",
@@ -581,6 +669,12 @@
           ],
           "description": "Repo-aware Tab completion (glyphstudio.inlineCompletion.repoAware): how to build the RETRIEVAL QUERY that lands cross-file context. The query — not latency — is repo-aware FIM's real weak spot: the 'window' baseline mostly matches the current file (excluded) and surfaces nothing cross-file. 'symbol' directs the index search at the cursor symbol; 'lsp' asks the language server for the symbol's definition index-free; 'auto' (default) tries LSP → symbol → window → plain. All best-effort and bounded by glyphstudio.inlineCompletion.repoAwareTimeoutMs — they never block typing."
         },
+        "glyphstudio.codeIndex.enabled": {
+          "type": "boolean",
+          "default": true,
+          "scope": "machine",
+          "description": "MASTER code-index switch — the deployment-level privacy gate. When false, GlyphStudio builds NO code index and performs NO index retrieval anywhere: auto-index on folder open, the 'GlyphStudio: Index Workspace' command, chat @Codebase retrieval (including its background warm-up), and repo-aware Tab/FIM retrieval are ALL off. Plain Tab completion itself stays available (loopback-local, no index; governed by glyphstudio.inlineCompletion.enabled). The per-feature glyphstudio.index.* and glyphstudio.inlineCompletion.repoAware* settings only apply when this is true. The index is local/on-device by construction either way — this switch is for deployments that must not build one at all. Machine-scoped so a workspace cannot re-enable indexing against deployment policy. Takes effect live: turning it off stops all NEW index work immediately (an index already built in memory this session is not wiped — reload the window to drop it; no automatic persisted-index purge is performed — run 'GlyphStudio: Purge Persisted Index' to delete an on-disk snapshot)."
+        },
         "glyphstudio.index.persist": {
           "type": "boolean",
           "default": false,
@@ -602,11 +696,55 @@
           "default": true,
           "description": "Auto Index: automatically build the on-device code index in the BACKGROUND when you open a folder/workspace, so repo-aware chat and Tab completion are warm immediately. Local \u2014 nothing egresses; it needs the local model runtime (Ollama) running and fails quietly if it is not. Non-blocking: it runs the same 'GlyphStudio: Index Workspace' build off the activation path (a cold build can take tens of seconds on a medium repo, minutes on a large one). Turn OFF to index only on demand \u2014 lazily on first chat/completion, or via 'GlyphStudio: Index Workspace'."
         },
+        "glyphstudio.index.watch": {
+          "type": "boolean",
+          "default": true,
+          "description": "Index freshness: keep the local code index fresh as you save. Once an index exists for this session (built on folder open or via 'GlyphStudio: Index Workspace'), file saves/creates/deletes are batched over a short quiet period and applied as an INCREMENTAL background re-index — only the windows whose content actually changed are re-embedded (deleted files are evicted); unchanged code is never re-processed. Background-only: zero work on the typing/Tab path, no notifications (each applied batch is logged to the indexer's output channel). Only meaningful when an index exists; the master glyphstudio.codeIndex.enabled switch takes precedence. The batch is filtered through the SAME on-device ignore/secret gates a full build uses; nothing egresses code. Turn OFF to re-index only on demand.",
+          "markdownDescription": "Index freshness: keep the local code index fresh as you save. Once an index exists for this session, saves/creates/deletes are batched (~1.75s quiet period) and applied as an **incremental, background-only** re-index — only changed windows are re-embedded, deleted files are evicted. Zero work on the typing/Tab path; no toasts (batches are logged to the indexer's output channel). Gated by `#glyphstudio.codeIndex.enabled#` first. Local by construction — nothing egresses code."
+        },
         "glyphstudio.index.buildTimeoutMs": {
           "type": "number",
           "default": 1800000,
           "minimum": 30000,
           "description": "INACTIVITY BACKSTOP (ms) for a 'GlyphStudio: Index Workspace' build (default 1800000 = 30 minutes). The build STREAMS progress, and every progress event RESETS this timer \u2014 so a long but PROGRESSING build never times out. This cap only fires if the build STALLS with no progress for the whole window (e.g. the local embedder daemon hung). Raise it for very large repos with a slow embedder; the build still aborts promptly on a genuine stall. This is NOT the global request timeout (chat/run RPCs keep their own 30s)."
+        },
+        "glyphstudio.chat.backend": {
+          "type": "string",
+          "enum": [
+            "codex",
+            "ollama",
+            "auto"
+          ],
+          "default": "codex",
+          "enumDescriptions": [
+            "Frontier: the Codex CLI on your own ChatGPT subscription. Governed + metadata-traced through the supervisor; codex authenticates from its own store (no credential ever crosses the bridge) and picks its own model unless glyphstudio.chat.model overrides it.",
+            "Local \u2014 sovereign: an on-device Ollama model over loopback only. Nothing leaves your machine for the model call; still routed + traced through the supervisor.",
+            "Auto \u2014 the explainable cost router decides per turn: cheap/small tasks (commit message, terminal Cmd-K, small prompts) and over-budget sessions go local (ollama); hard reasoning goes frontier (codex); a sensitive workspace ALWAYS stays local (fail-closed \u2014 never silently frontier). Every decision logs a human-readable reason + an approximate (\u2248) token estimate. See docs/model-routing.md."
+          ],
+          "description": "The chat gateway backend every governed AI turn rides (chat panel, inline edit, terminal Cmd-K, AI commit message). Set via 'GlyphStudio: Select Chat Model' (which probes what is actually reachable) or here directly. 'auto' enables the explainable cost router (cheap/sensitive \u2192 local, hard reasoning \u2192 frontier; every decision carries a visible reason). An unknown value falls back to codex \u2014 with an honest note on the surface's output channel, never silently."
+        },
+        "glyphstudio.chat.routing.sensitiveWorkspace": {
+          "type": "boolean",
+          "default": false,
+          "scope": "resource",
+          "description": "Mark THIS workspace's content as sensitive for chat auto-routing. GUARANTEE: with glyphstudio.chat.backend = 'auto', every gateway turn routes to the LOCAL backend (loopback ollama) \u2014 auto-routing will NEVER send workspace content off-machine, even when the local daemon is down (the turn then fails honestly instead of silently using a frontier model). An EXPLICIT backend setting ('codex') is your own choice and overrides this. Workspace-scoped so each repo can declare its own sensitivity."
+        },
+        "glyphstudio.chat.budget.perTurnMaxOutputTokens": {
+          "type": "number",
+          "default": 0,
+          "minimum": 0,
+          "description": "Per-turn OUTPUT-token ceiling for governed chat turns (0 = off). HONEST enforcement: REAL for the ollama backend (mapped to num_predict, clamped to 8192 supervisor-side); ADVISORY for codex today (the codex CLI has no output-cap flag \u2014 the value rides the wire but is not enforced)."
+        },
+        "glyphstudio.chat.budget.perTaskTokens": {
+          "type": "number",
+          "default": 0,
+          "minimum": 0,
+          "description": "Per-task (per chat session) token budget for auto-routing (0 = off). Token usage is the sum the backends HONESTLY report per turn (\u2248 approximate; turns without usage reports add 0). When a session crosses the budget you get a ONE-TIME visible warning, and with glyphstudio.chat.backend = 'auto' subsequent turns PREFER the local backend. This is a routing preference, not a hard cutoff \u2014 turns are never blocked."
+        },
+        "glyphstudio.chat.model": {
+          "type": "string",
+          "default": "",
+          "description": "Model override for the selected chat backend; empty = the backend's default (codex picks its own model; ollama uses the supervisor's default, qwen2.5-coder:7b). For ollama, use an installed model name as listed by 'GlyphStudio: Select Chat Model'."
         },
         "glyphstudio.chat.maxAttachmentKB": {
           "type": "number",
@@ -754,6 +892,90 @@
           "scope": "machine",
           "description": "Maximum concurrent @Docs fetches in flight for a chat turn. Enforced: at most this many web/fetch calls run at once and results stay in reference order. Machine-scoped so a workspace cannot widen documentation egress concurrency."
         },
+        "glyphstudio.chat.git.enabled": {
+          "type": "boolean",
+          "default": true,
+          "description": "@Git chat context. Type `@git` in chat to attach your uncommitted WORKING-COPY diff (staged + unstaged changes, plus untracked file paths by NAME only) to the turn, or `@git branch` to attach the branch diff vs the merge-base with the default branch. Default ON because this is LOCAL-ONLY data with no collection egress: a read-only `git diff` of your own repository — unlike @Web/@Docs nothing is fetched, and the (secret-redacted) diff is only included in the governed chat turn you are already sending. The diff text is secret-redacted with the same redaction the AI commit message applies before it reaches the model, and capped at glyphstudio.chat.git.maxBytes with a visible truncation marker. Set false to never attach git context (an honest 'disabled' marker is shown when a turn references @git)."
+        },
+        "glyphstudio.chat.git.maxBytes": {
+          "type": "number",
+          "default": 65536,
+          "minimum": 1024,
+          "maximum": 1048576,
+          "description": "Byte cap for the diff text one `@git` reference attaches to a chat turn (default 65536 = 64 KB; the cap applies per collection — staged is budgeted first, the remainder goes to unstaged). A larger diff is truncated on a line boundary with an EXPLICIT `[truncated N bytes]` marker — never silently — and the chat citation shows the omitted byte count. Untracked files are listed by path only and are not subject to this cap."
+        },
+        "glyphstudio.chat.errors.enabled": {
+          "type": "boolean",
+          "default": true,
+          "description": "@Errors chat context. Type `@errors` in chat to attach the workspace's CURRENT diagnostics (errors + warnings from the Problems panel) to the turn, or `@errors <path>` for one file (workspace-relative path or basename). Default ON because this is LOCAL-ONLY IDE metadata with no collection egress: an in-memory read of your own language servers' diagnostics — unlike @Web/@Docs nothing is fetched, and the listing only rides the governed chat turn you are already sending on the trusted channel (the @Git posture). Honesty: diagnostic lines are attached AS-IS — they are IDE metadata (paths, rule names, messages), NOT file contents, and NO redaction is applied. Capped at 100 diagnostics and glyphstudio.chat.errors.maxBytes with a visible 'showing N of M' truncation marker. Set false to never attach diagnostics (an honest 'disabled' marker is shown when a turn references @errors)."
+        },
+        "glyphstudio.chat.errors.maxBytes": {
+          "type": "number",
+          "default": 32768,
+          "minimum": 1024,
+          "maximum": 262144,
+          "description": "Byte cap for the diagnostics listing one `@errors` reference attaches to a chat turn (default 32768 = 32 KB, on top of the fixed 100-diagnostic count cap). Errors are listed before warnings, so under truncation errors survive first; truncation drops WHOLE entries (never mid-line) and is ALWAYS surfaced by an explicit 'showing N of M diagnostics' marker — never silently."
+        },
+        "glyphstudio.chat.symbols.enabled": {
+          "type": "boolean",
+          "default": true,
+          "description": "@Symbols chat context. Type `@symbols <query>` in chat (quote a multi-word query: `@symbols \"foo bar\"`) to attach the workspace symbol index's matches — symbol name, kind, and file:line ONLY; file contents are never read — to the turn. Default ON because this is LOCAL-ONLY IDE metadata with no collection egress: one in-editor workspace-symbol-provider query against your own language servers — unlike @Web/@Docs nothing is fetched, and the listing only rides the governed chat turn you are already sending on the trusted channel (the @Git posture). Honesty: results are attached AS-IS with NO redaction (names/kinds/locations are IDE metadata, not file contents). Capped at the top 30 matches and glyphstudio.chat.symbols.maxBytes with a visible 'showing N of M' truncation marker. Set false to never attach symbols (an honest 'disabled' marker is shown when a turn references @symbols)."
+        },
+        "glyphstudio.chat.symbols.maxBytes": {
+          "type": "number",
+          "default": 16384,
+          "minimum": 1024,
+          "maximum": 131072,
+          "description": "Byte cap for the symbol listing one `@symbols <query>` reference attaches to a chat turn (default 16384 = 16 KB, on top of the fixed top-30 result cap). Truncation drops WHOLE entries (never mid-line) and is ALWAYS surfaced by an explicit 'showing N of M matches' marker — never silently."
+        },
+        "glyphstudio.chat.folders.enabled": {
+          "type": "boolean",
+          "default": true,
+          "description": "@Folders chat context. Type `@folder <path>` in chat (alias `@folders`; up to 3 per turn) to attach a bounded walk of that workspace folder's files to the turn — the folder-granular sibling of attaching files. Default ON because this is LOCAL-ONLY data with no collection egress: the files are read from your own workspace — unlike @Web/@Docs nothing is fetched, and the contents only ride the governed chat turn you are already sending on the trusted channel (the @Files/@Git posture). Filtering honesty: a NAME-based secret-path denylist is applied (dotenv files, key material, credential stores, .ssh/.aws/.gnupg/.git paths — skips are reported as a count, never by name) but NO content redaction is performed — a secret inside an innocently named file IS attached. Bounds, every one visible via explicit markers in the chat: depth ≤5, ≤25 files, 64 KB per file (truncated with a note), aggregate glyphstudio.chat.folders.maxBytes; symlinks are never followed; binary files are skipped; node_modules/.git/dist/out/build/coverage and hidden directories (except .github/.vscode) are not entered. Set false to never attach folders (an honest 'disabled' marker is shown when a turn references @folder)."
+        },
+        "glyphstudio.chat.folders.maxBytes": {
+          "type": "number",
+          "default": 262144,
+          "minimum": 16384,
+          "maximum": 1048576,
+          "description": "Aggregate byte budget for the files one `@folder <path>` reference attaches to a chat turn (default 262144 = 256 KB, on top of the fixed 25-file and 64 KB-per-file caps). Files are attached whole (or to their per-file cap, with a visible per-file truncation note); when the next file would exceed this budget the walk STOPS attaching and reports the remainder with an explicit 'N more file(s) not attached' marker — never silently."
+        },
+        "glyphstudio.chat.terminal.enabled": {
+          "type": "boolean",
+          "default": true,
+          "description": "@Terminal chat context. Type `@terminal` in chat to attach the recent completed-command outputs (command line, exit code, output) of the most-recently-active GOVERNED terminal — a terminal GlyphStudio itself created as governed. CAPTURE SCOPE, by design: ONLY GlyphStudio-created governed terminals are ever captured — stock terminals are NEVER captured (referencing one yields an honest 'not captured (by design)' marker), and a deliberately-ungoverned (⌃⌘U) terminal is not captured either (its marker honestly calls it ungoverned). PRIVACY: captured output lives in SESSION MEMORY ONLY — it is never written to disk and is dropped when the window closes; capture is LOCAL-ONLY with no collection egress — output only rides the governed chat turn you are already sending on the trusted channel (the @Git posture; note terminal output can embed results your commands fetched from remote systems — you ran those commands deliberately in the governed envelope). REDACTION honesty: heuristic redaction of OBVIOUS secret shapes (KEY=VALUE secret assignments, Authorization headers, high-entropy tokens) is applied AT CAPTURE TIME, before storage, and truncation only ever cuts already-redacted text (redact-then-truncate) — this is NOT a guarantee against every secret. Output is ANSI-stripped (best-effort). Caps, all with visible truncation markers: last 5 commands per terminal, 16 KB output tail per command (the end of output is where errors live), 64 KB per terminal, and glyphstudio.chat.terminal.maxBytes per attach with an explicit 'showing N of M captured commands' marker. Set false to disable capture AND attach (an honest 'disabled' marker is shown when a turn references @terminal)."
+        },
+        "glyphstudio.chat.terminal.maxBytes": {
+          "type": "number",
+          "default": 32768,
+          "minimum": 4096,
+          "maximum": 262144,
+          "description": "Byte cap for the governed-terminal output one `@terminal` reference attaches to a chat turn (default 32768 = 32 KB, on top of the fixed capture caps: 5 commands / 16 KB output tail per command / 64 KB per terminal). Over budget, the OLDEST whole command records are dropped first — surfaced by an explicit 'showing N of M captured commands' marker, never silently; only when the single newest command alone exceeds the budget is its (already-redacted) output tail-cut further, with a visible per-command truncation note."
+        },
+        "glyphstudio.chat.codebaseSearch.enabled": {
+          "type": "boolean",
+          "default": true,
+          "description": "codebase_search: let the chat model run its OWN searches against the LOCAL on-device code index mid-turn (in addition to the automatic per-turn retrieval). The model requests a search by emitting a [[codebase_search: <query>]] marker in its reply; GlyphStudio runs the existing index retrieval, shows a VISIBLE per-round line in the chat panel (query + result count, with clickable file citations — no invisible tool calls), feeds the results back, and re-prompts. Bounded by glyphstudio.chat.codebaseSearch.maxRounds and a per-turn result-size budget. Fully local: nothing in the search path egresses code; the results only ride the governed chat turn you are already sending. Gated by the master glyphstudio.codeIndex.enabled switch (when that is off, the tool is not offered to the model at all). Set false to never offer the tool (an honest 'disabled' note is fed back if the model requests one anyway)."
+        },
+        "glyphstudio.chat.codebaseSearch.maxRounds": {
+          "type": "number",
+          "default": 3,
+          "minimum": 1,
+          "maximum": 10,
+          "description": "Maximum number of self-directed codebase_search rounds the chat model may run per user message (each round is one extra governed model call plus one local index retrieval). When the limit is reached, a visible 'round limit reached' note is shown and the model answers with the context already gathered. Default 3."
+        },
+        "glyphstudio.chat.mcp.enabled": {
+          "type": "boolean",
+          "default": true,
+          "description": "mcp_call: let the chat model call tools from the MCP servers configured in the workspace's .glyphstudio/mcp.json, brokered by the GOVERNED supervisor (the extension never spawns or speaks to an MCP server directly). The model requests a call by emitting an [[mcp_call: <server>.<tool> | {json args}]] marker in its reply; GlyphStudio routes the call through the supervisor's policy engine (a policy 'ask' shows an Approve/Deny modal — no decision within the approval window denies the call honestly), shows a VISIBLE per-round line in the chat panel (server.tool + outcome — no invisible tool calls), feeds the result back EXPLICITLY labeled as UNTRUSTED third-party MCP server output, and re-prompts. Bounded by glyphstudio.chat.mcp.maxRounds and a per-turn result-size budget. Every call is policy-decided and traced with the existing trace event types. Set false to never offer the tool (an honest 'disabled' note is fed back if the model requests one anyway)."
+        },
+        "glyphstudio.chat.mcp.maxRounds": {
+          "type": "number",
+          "default": 3,
+          "minimum": 1,
+          "maximum": 10,
+          "description": "Maximum number of self-directed governed MCP tool calls the chat model may run per user message (each round is one extra governed model call plus one supervisor-brokered MCP call, which may itself require an Approve/Deny decision). When the limit is reached, a visible 'round limit reached' note is shown and the model answers with the context already gathered. Default 3."
+        },
         "glyphstudio.rules.enabled": {
           "type": "boolean",
           "default": true,
@@ -824,7 +1046,7 @@
     "verify-tracked-refs": "node ../tools/verify-tracked-refs.mjs",
     "compile": "npm run bundle:supervisor && tsc -p .",
     "//test": "Explicit curated list (NOT a glob \u2014 a broad glob has caused env inspector-port hangs here). When you add a new test/*.test.mjs, ADD IT TO THIS LIST or CI stays green without it.",
-    "test": "npm run bundle:supervisor && tsc -p . && node --test test/inlineScript.test.mjs test/configScope.test.mjs test/supervisorRunner.test.mjs test/policyHash.test.mjs test/bridgeProtocol.test.mjs test/bridgeContractConformance.test.mjs test/bridge.test.mjs test/bridgeServerSpawn.test.mjs test/liveRunStream.test.mjs test/runEventProtocol.test.mjs test/liveRunModel.test.mjs test/mockRunStream.test.mjs test/liveReducerGolden.test.mjs test/chatViewModel.test.mjs test/chatDemoState.test.mjs test/chatModelSelection.test.mjs test/operatorGesture.test.mjs test/runGovernedTaskGate.test.mjs test/webviewGestureGate.test.mjs test/liveSchemaGate.test.mjs test/m5FailureEmission.test.mjs test/governedTerminalEnv.test.mjs test/governedTerminalSession.test.mjs test/openGovernedTerminalCommand.test.mjs test/openChatCommand.test.mjs test/governedTerminalResolution.test.mjs test/agentCliCodex.test.mjs test/iconSpriteInjection.test.mjs test/livePanelLabels.test.mjs test/liveRunTrustIngestion.test.mjs test/runTrustBadge.test.mjs test/governedRunsModel.test.mjs test/governedRunsView.test.mjs test/governedRunsCard.test.mjs test/governedRunsCardView.test.mjs test/agentLaunch.test.mjs test/openChatBinaryPin.test.mjs test/agentBinaryIdentity.test.mjs test/ptyHost.test.mjs test/chatTerminalView.test.mjs test/loginShellResolve.test.mjs test/nodePtyBaseDirs.test.mjs test/chatSendBridge.test.mjs test/nativeChatCommand.test.mjs test/chatParticipantAgent.test.mjs test/chatProviderFailClosed.test.mjs test/chatTurnSerialization.test.mjs test/agenticBuildReview.test.mjs test/agenticBuildBridge.test.mjs test/agenticBuildPromotion.test.mjs test/promoteChatToBuildCommand.test.mjs test/frictionSurface.test.mjs test/statusBarSegments.test.mjs test/haloChrome.test.mjs test/authorityLadder.test.mjs test/provenanceGutter.test.mjs test/agentRunSnapshot.test.mjs test/agentRunDetail.test.mjs test/evidenceSummary.test.mjs test/liveEvidenceSummary.test.mjs test/liveEvidenceRibbon.test.mjs test/codeContextInjection.test.mjs test/fileAttachmentContext.test.mjs test/attachmentCap.test.mjs test/bridgeIndexRetrieve.test.mjs test/bridgeWebFetch.test.mjs test/webContextParsing.test.mjs test/inlineCompletionContext.test.mjs test/ollamaFimClient.test.mjs test/bridgeRunsBaseMkdir.test.mjs test/chatBuildIntent.test.mjs test/inlineEdit.test.mjs test/inlineEditStaleBuffer.test.mjs test/definitionWorkspaceScope.test.mjs test/inlineCompletionNotice.test.mjs test/ungovernedTerminalNotice.test.mjs test/terminalCommandGen.test.mjs test/terminalCmdKTarget.test.mjs test/repoAwareFim.test.mjs test/repoAwareQuery.test.mjs test/indexStatusBar.test.mjs test/indexProgress.test.mjs test/bridgeIndexBuildStream.test.mjs test/foreignInstructionFilter.test.mjs test/scopeContextCache.test.mjs test/fimRequestBody.test.mjs test/autoImport.test.mjs test/alternatesDedup.test.mjs test/compileGate.test.mjs test/compileGateProvider.test.mjs test/autoChunkLoop.test.mjs test/autoChunkProvider.test.mjs test/verifyTestGen.test.mjs test/verifyExtract.test.mjs test/verifyRunner.test.mjs test/verifyCard.test.mjs test/autoChunkResultCache.test.mjs test/verifyRepair.test.mjs test/verifyCardFix.test.mjs test/webContextHardening.test.mjs test/webMarkerContract.test.mjs test/webEgressGate.test.mjs test/ungovernedTerminalOpenNotice.test.mjs test/governedFloatingTerminalMarker.test.mjs test/governedFloatingTerminalSeam.test.mjs test/floatingTerminalUnify.test.mjs test/docsContext.test.mjs test/rulesContext.test.mjs",
+    "test": "npm run bundle:supervisor && tsc -p . && node --test test/inlineScript.test.mjs test/configScope.test.mjs test/supervisorRunner.test.mjs test/policyHash.test.mjs test/bridgeProtocol.test.mjs test/bridgeContractConformance.test.mjs test/bridge.test.mjs test/bridgeServerSpawn.test.mjs test/liveRunStream.test.mjs test/runEventProtocol.test.mjs test/liveRunModel.test.mjs test/mockRunStream.test.mjs test/liveReducerGolden.test.mjs test/chatViewModel.test.mjs test/chatGatewayFailure.test.mjs test/stubGatewayRetired.test.mjs test/operatorGesture.test.mjs test/runGovernedTaskGate.test.mjs test/webviewGestureGate.test.mjs test/liveSchemaGate.test.mjs test/m5FailureEmission.test.mjs test/governedTerminalEnv.test.mjs test/governedTerminalSession.test.mjs test/openGovernedTerminalCommand.test.mjs test/openChatCommand.test.mjs test/governedTerminalResolution.test.mjs test/agentCliCodex.test.mjs test/iconSpriteInjection.test.mjs test/livePanelLabels.test.mjs test/liveRunTrustIngestion.test.mjs test/runTrustBadge.test.mjs test/governedRunsModel.test.mjs test/governedRunsView.test.mjs test/governedRunsCard.test.mjs test/governedRunsCardView.test.mjs test/agentLaunch.test.mjs test/openChatBinaryPin.test.mjs test/agentBinaryIdentity.test.mjs test/ptyHost.test.mjs test/chatTerminalView.test.mjs test/loginShellResolve.test.mjs test/nodePtyBaseDirs.test.mjs test/chatSendBridge.test.mjs test/nativeChatCommand.test.mjs test/chatParticipantAgent.test.mjs test/chatProviderFailClosed.test.mjs test/chatTurnSerialization.test.mjs test/agenticBuildReview.test.mjs test/agenticBuildBridge.test.mjs test/agenticBuildPromotion.test.mjs test/promoteChatToBuildCommand.test.mjs test/frictionSurface.test.mjs test/statusBarSegments.test.mjs test/haloChrome.test.mjs test/authorityLadder.test.mjs test/provenanceGutter.test.mjs test/agentRunSnapshot.test.mjs test/agentRunDetail.test.mjs test/evidenceSummary.test.mjs test/liveEvidenceSummary.test.mjs test/liveEvidenceRibbon.test.mjs test/codeContextInjection.test.mjs test/fileAttachmentContext.test.mjs test/attachmentCap.test.mjs test/bridgeIndexRetrieve.test.mjs test/bridgeWebFetch.test.mjs test/webContextParsing.test.mjs test/inlineCompletionContext.test.mjs test/ollamaFimClient.test.mjs test/bridgeRunsBaseMkdir.test.mjs test/chatBuildIntent.test.mjs test/inlineEdit.test.mjs test/inlineEditStaleBuffer.test.mjs test/inlineEditPreview.test.mjs test/definitionWorkspaceScope.test.mjs test/inlineCompletionNotice.test.mjs test/ungovernedTerminalNotice.test.mjs test/terminalCommandGen.test.mjs test/terminalCmdKTarget.test.mjs test/repoAwareFim.test.mjs test/repoAwareQuery.test.mjs test/indexStatusBar.test.mjs test/indexProgress.test.mjs test/indexPurge.test.mjs test/bridgeIndexBuildStream.test.mjs test/foreignInstructionFilter.test.mjs test/scopeContextCache.test.mjs test/fimRequestBody.test.mjs test/autoImport.test.mjs test/alternatesDedup.test.mjs test/compileGate.test.mjs test/compileGateProvider.test.mjs test/autoChunkLoop.test.mjs test/autoChunkProvider.test.mjs test/verifyTestGen.test.mjs test/verifyExtract.test.mjs test/verifyRunner.test.mjs test/verifyCard.test.mjs test/autoChunkResultCache.test.mjs test/verifyRepair.test.mjs test/verifyCardFix.test.mjs test/webContextHardening.test.mjs test/webMarkerContract.test.mjs test/webEgressGate.test.mjs test/ungovernedTerminalOpenNotice.test.mjs test/agentInvocationSteer.test.mjs test/governedFloatingTerminalMarker.test.mjs test/governedFloatingTerminalSeam.test.mjs test/floatingTerminalUnify.test.mjs test/docsContext.test.mjs test/rulesContext.test.mjs test/gitContext.test.mjs test/codeIndexGate.test.mjs test/indexFreshness.test.mjs test/indexUpdateFanout.test.mjs test/workspaceRoots.test.mjs test/codebaseSearchTool.test.mjs test/mcpTool.test.mjs test/verifierKeyExchange.test.mjs test/verdictBinding.test.mjs test/reviewPanel.test.mjs test/planPanel.test.mjs test/commitMessageLogic.test.mjs test/changeReview.test.mjs test/planDocument.test.mjs test/buildPlanBridge.test.mjs test/chatBackendPicker.test.mjs test/chatRouter.test.mjs test/errorsContext.test.mjs test/symbolsContext.test.mjs test/secretPaths.test.mjs test/folderContext.test.mjs test/terminalContext.test.mjs test/sessionCheckpoint.test.mjs test/checkpointAffordance.test.mjs test/terminalDecisionChips.test.mjs test/commandDecisionChips.test.mjs test/askScrimCss.test.mjs test/steeringAudit.test.mjs",
     "package": "npm run bundle:supervisor && tsc -p . && vsce package --no-dependencies"
   },
   "devDependencies": {

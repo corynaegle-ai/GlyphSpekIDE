@@ -1,2 +1,11 @@
+# Source + tooling not needed in the packaged VSIX (the compiled dist/ ships).
+# NOTE: dist-supervisor/ is NOT excluded — the bundled, hash-pinned supervisor
+# (dist-supervisor/governed-run.mjs) MUST ship so the .vsix is self-contained.
+src/**
+test/**
+scripts/**
+tsconfig.json
+.gitignore
+node_modules/**
 **/*.map
 **/.DS_Store

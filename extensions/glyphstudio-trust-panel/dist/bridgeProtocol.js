@@ -43,8 +43,11 @@
  * caller-identity boundary (bridge.ts); this module is the message grammar.
  */
 Object.defineProperty(exports, "__esModule", { value: true });
-exports.TERMINAL_VERDICT_ASSURANCES = exports.TERMINAL_ENV_POSTURES = exports.MODEL_CREDENTIAL_FIELD_RE = exports.INDEX_PROGRESS_PHASES = exports.RUN_TRUSTS = exports.AUTONOMY_TIERS = exports.EXTENSION_POSTURES = exports.ACTOR_TYPES = exports.BridgeErrorCode = exports.BridgeNotification = exports.BridgeMethod = exports.BRIDGE_JSONRPC = exports.BRIDGE_PROTOCOL_VERSION = void 0;
+exports.TERMINAL_VERDICT_ASSURANCES = exports.TERMINAL_ENV_POSTURES = exports.MODEL_CREDENTIAL_FIELD_RE = exports.MAX_RECORD_HUMAN_PAYLOAD_BYTES = exports.RECORD_HUMAN_EVENT_TYPES = exports.MCP_CALL_STATUSES = exports.MCP_SERVER_STATUSES = exports.MAX_MCP_RESULT_JSON_BYTES = exports.MAX_MCP_ARGS_JSON_BYTES = exports.MAX_MCP_TOOL_NAME_CHARS = exports.MAX_MCP_SERVER_NAME_CHARS = exports.MAX_MCP_TOOLS_PER_SERVER = exports.MAX_MCP_SERVERS = exports.MAX_PLAN_FILE_CHARS = exports.MAX_PLAN_FILES_PER_STEP = exports.MAX_PLAN_RISK_CHARS = exports.MAX_PLAN_RISKS = exports.MAX_PLAN_STEP_DETAIL_CHARS = exports.MAX_PLAN_STEP_TITLE_CHARS = exports.MAX_PLAN_GOAL_CHARS = exports.MAX_PLAN_STEPS = exports.PLAN_PARSE_STATUSES = exports.CHANGE_REVIEW_PARSE_STATUSES = exports.CHANGE_REVIEW_SCOPES = exports.INDEX_PROGRESS_PHASES = exports.RUN_TRUSTS = exports.AUTONOMY_TIERS = exports.EXTENSION_POSTURES = exports.ACTOR_TYPES = exports.BridgeErrorCode = exports.BridgeNotification = exports.BridgeMethod = exports.BRIDGE_JSONRPC = exports.BRIDGE_PROTOCOL_VERSION = void 0;
 exports.isHandshakeCompatible = isHandshakeCompatible;
+exports.assertBuildPlanWellFormed = assertBuildPlanWellFormed;
+exports.mcpCapability = mcpCapability;
+exports.assertMcpCallWellFormed = assertMcpCallWellFormed;
 exports.findCredentialField = findCredentialField;
 exports.validateModelCallParams = validateModelCallParams;
 exports.validateModelCallResult = validateModelCallResult;
@@ -142,6 +145,18 @@ exports.BridgeMethod = {
      */
     ChatSend: 'chat/send',
     /**
+     * DISCOVER the chat backends this supervisor can route a {@link ChatSend} turn
+     * to (the model-picker surface). SYNCHRONOUS request/result: the supervisor
+     * PROBES each known backend AT REQUEST TIME and reports an HONEST per-backend
+     * status — `'ok'` only when the probe succeeded; `'unavailable'` with a short
+     * non-secret `detail` otherwise. `models` lists the LOCAL backend's installed
+     * model names (capped; names only) when enumerable. NO PHANTOM BACKENDS: the
+     * result never lists a backend the supervisor cannot actually route to, and
+     * never invents a model name. Carries non-secret ids/names only, NEVER a
+     * credential. MIRRORS the canonical spikes/p0-contracts/bridge.ts.
+     */
+    ChatBackends: 'chat/backends',
+    /**
      * Fetch one explicit http(s) URL for `@Web` chat context. Synchronous
      * request/result, handled supervisor-side only: the extension never fetches web
      * content directly. Mirrors the canonical spikes/p0-contracts/bridge.ts.
@@ -173,10 +188,14 @@ exports.BridgeMethod = {
      */
     RunCancel: 'run/cancel',
     /**
-     * Resolve a PENDING governed build's up-front authority grant (the remote-coding flow:
-     * a `coding.messages.send`/pending `build/start` parks a build awaiting approval).
-     * `allow` starts the held build down the approved path (codex spawned, signed verdict);
-     * `deny` discards it (no codex, terminal error). Additive; mirrors the canonical contract.
+     * Resolve a PENDING approval. Two kinds share this one RPC: a PENDING governed
+     * build's up-front authority grant (the remote-coding flow: a pending `build/start`
+     * parks a build awaiting approval — `allow` starts it down the approved path,
+     * `deny` discards it), and a HELD `mcp/call` whose policy decision was
+     * ask/force_ask (#9 Slice 2: the desktop approval modal's verdict — `allow`
+     * executes the brokered call exactly like an up-front allow; `deny`/timeout
+     * yields an honest 'denied' {@link McpCallResult}). Additive; mirrors the
+     * canonical contract.
      */
     ApprovalRespond: 'approval/respond',
     /**
@@ -205,6 +224,105 @@ exports.BridgeMethod = {
      * spikes/p0-contracts/bridge.ts.
      */
     IndexBuild: 'index/build',
+    /**
+     * INCREMENTALLY UPDATE the workspace's LOCAL code index from a batch of saved/
+     * watched file changes (the index-freshness loop). SYNCHRONOUS request/result:
+     * the supervisor filters the batch through the SAME discovery/ignore gates a full
+     * build uses, re-embeds ONLY the windows whose content hash differs (per-window-
+     * hash diff), and EVICTS windows for deleted files. Session-bound EXACTLY like
+     * {@link IndexRetrieve}/{@link IndexBuild}; only an EXISTING session index is
+     * updated (no index yet → honest `{ ok:false }` refusal — never a cold build).
+     * Memory-only mutation; nothing egresses code. Best-effort: on ANY error the
+     * result is `{ ok:false }` with a short non-secret `error`. MIRRORS the canonical
+     * spikes/p0-contracts/bridge.ts.
+     */
+    IndexUpdate: 'index/update',
+    /**
+     * Start a GOVERNED CHANGE REVIEW (#7 — "Review Changes (Verifier-Backed)"): ONE
+     * governed run over the workspace's PROPOSED state (the working tree, or a branch
+     * vs a base ref) producing a signed review artifact with TWO never-blurring
+     * layers — ADVISORY model findings plus the deterministic INDEPENDENT-VERIFIER
+     * verdict. The `review_findings` trace event is appended BEFORE the verifier
+     * runs, so the signed verdict's `traceRootHash` COMMITS to the findings. Mirrors
+     * build/start's ack-then-notifications style: the RESULT is only the ACK
+     * ({ runId }); the review STREAMS back as
+     * {@link BridgeNotification.ChangeReviewEvent} notifications, the terminal
+     * `result` carrying the {@link ChangeReview} render contract. MIRRORS the
+     * canonical spikes/p0-contracts/bridge.ts.
+     */
+    ChangeReviewStart: 'review/start',
+    /**
+     * Start a GOVERNED PLAN RUN (#8 — plan mode): pre-build governed planning. The
+     * supervisor mints a run + hash-chained trace, runs ONE governed READ-ONLY model
+     * turn producing a structured {@link BuildPlan}, appends the `plan_proposed`
+     * trace event, and PARKS the run (the PendingBuild idiom) — no file is edited and
+     * no build starts. The user reviews/edits the plan in the IDE; a later
+     * {@link BridgeMethod.AgenticBuildStart} with the SAME `runId` carrying a
+     * `planApproval` resolves the parked run (the server mints the approvalId and
+     * appends `plan_approved` BEFORE executing, so the build runs on the SAME trace),
+     * or a {@link BridgeMethod.BuildPlanReject} appends `plan_rejected` and closes
+     * the run. A plan is MODEL OPINION: advisory, tamper-evident via the chain,
+     * NEVER an assurance input. Mirrors review/start's ack-then-notifications style:
+     * the RESULT is only the ACK ({ runId }); the plan STREAMS back as
+     * {@link BridgeNotification.BuildPlanEvent} notifications, the terminal `result`
+     * carrying the {@link BuildPlanProposal} render contract. Read-only over the
+     * workspace (no authority grant needed: the planner edits nothing); carries no
+     * credential. MIRRORS the canonical spikes/p0-contracts/bridge.ts.
+     */
+    BuildPlanStart: 'plan/start',
+    /**
+     * REJECT a PARKED plan run (#8). The supervisor appends the `plan_rejected`
+     * trace event (with the optional non-secret reason) and closes the run — no
+     * build ever starts on it. The result is only the ACK ({ runId, rejected }).
+     * Mirrors run/cancel's lightweight params/ack shape conventions. MIRRORS the
+     * canonical spikes/p0-contracts/bridge.ts.
+     */
+    BuildPlanReject: 'plan/reject',
+    /**
+     * LIST the MCP servers + tools brokered for the session's workspace (#9 —
+     * governed MCP brokering). SYNCHRONOUS request/result: the supervisor — the
+     * ONLY component that owns MCP stdio server children (the extension/UI never
+     * spawns or speaks to one) — reports each server configured in
+     * `.glyphstudio/mcp.json` with an HONEST per-server status
+     * ('ok' | 'spawn-failed' | 'init-failed' | 'disabled') and its discovered
+     * tools. Tool input schemas cross the wire as RAW JSON STRINGS
+     * ({@link McpToolInfo.inputSchemaJson}) — third-party schemas we do not vouch
+     * for, never lifted into typed contract shapes. Carries non-secret
+     * names/descriptions only, NEVER a credential. MIRRORS the canonical
+     * spikes/p0-contracts/bridge.ts.
+     */
+    McpList: 'mcp/list',
+    /**
+     * BROKER one MCP tool call (#9). SYNCHRONOUS request/result: the supervisor
+     * routes EVERY call through the policy engine's decide() as tool kind 'mcp'
+     * with the capability string `mcp/<server>/<tool>` (see {@link mcpCapability})
+     * and traces it with the EXISTING policy_decision/tool_start/tool_end trace
+     * event types — ZERO new trace event types (a headline property of the MCP
+     * design). The result's raw JSON output carries the 'mcp' (UNTRUSTED)
+     * provenance label downstream: instruction-demoted data, never system/
+     * developer instructions. TRUST POSTURE: brokering governs the CALL boundary;
+     * the MCP server binary itself is third-party code running on the host —
+     * brokered calls ≠ a sandboxed server. Carries no credential on the wire.
+     * MIRRORS the canonical spikes/p0-contracts/bridge.ts.
+     */
+    McpCall: 'mcp/call',
+    /**
+     * APPEND one HUMAN-ORIGIN event to a run's hash-chained trace (#10 Slice 1 —
+     * the apply/diff decision + session-checkpoint record path). SYNCHRONOUS
+     * request/result: the supervisor appends EXACTLY ONE event of the requested
+     * {@link RecordHumanParams.type} to the run's trace — through the run's LIVE
+     * TraceWriter when the run is still open, or by REHYDRATING the persisted
+     * trace.jsonl tail when the run has already closed — and returns the appended
+     * event's chain position ({ ok, seq, hash }): EVIDENCE the append really
+     * happened, not a claim. TRUST POSTURE: `source` is FORCED to 'human'
+     * SERVER-SIDE — a client cannot mint a supervisor/verifier-attributed event
+     * through this RPC; the payload is DATA, NOT AUTHORITY (a human event can
+     * never carry a verdict). Appends are REFUSED with an honest JSON-RPC error —
+     * NEVER a silent success — for an unknown runId, a missing trace file, or an
+     * unparseable/tamper-suspect chain tail. MIRRORS the canonical
+     * spikes/p0-contracts/bridge.ts.
+     */
+    RecordHuman: 'run/recordHuman',
 };
 /** Server→client notification methods (no response expected). */
 exports.BridgeNotification = {
@@ -244,6 +362,28 @@ exports.BridgeNotification = {
      * credential and never any code/chunk text.
      */
     IndexProgress: 'index/progress',
+    /**
+     * One change-review stream event (#7). After a
+     * {@link BridgeMethod.ChangeReviewStart} ack, the supervisor emits a sequence of
+     * these tagged with the same `runId`: `state` lifecycle markers, then exactly one
+     * terminal `result` (carrying the {@link ChangeReview} render contract — advisory
+     * findings + the signed verifier verdict) or `error`. The payload is a
+     * {@link ChangeReviewStreamEvent}. Carries non-secret review EVIDENCE, never a
+     * credential. MIRRORS the canonical spikes/p0-contracts/bridge.ts.
+     */
+    ChangeReviewEvent: 'review/event',
+    /**
+     * One plan-run stream event (#8). After a {@link BridgeMethod.BuildPlanStart}
+     * ack, the supervisor emits a sequence of these tagged with the same `runId`:
+     * `state` lifecycle markers, an optional `plan` event carrying the parsed
+     * {@link BuildPlan} as soon as it exists, then exactly one terminal `result`
+     * (the run is now PARKED awaiting approval/rejection; carries the
+     * {@link BuildPlanProposal} render contract) or `error`. The payload is a
+     * {@link BuildPlanStreamEvent} — the plan event discriminated union plus the
+     * `runId`. Carries non-secret plan TEXT (goal/steps/risks the UI renders),
+     * never a credential. MIRRORS the canonical spikes/p0-contracts/bridge.ts.
+     */
+    BuildPlanEvent: 'plan/event',
 };
 /* ============================================================== *
  * ERROR CODES
@@ -321,6 +461,292 @@ exports.RUN_TRUSTS = [
  * phase (the long pole) carries the meaningful percent and is streamed per BATCH.
  */
 exports.INDEX_PROGRESS_PHASES = ['discover', 'chunk', 'embed'];
+/** The full set of change-review scopes, for validation. */
+exports.CHANGE_REVIEW_SCOPES = [
+    'working-tree',
+    'branch',
+];
+/** The full set of findings parse statuses, for validation. */
+exports.CHANGE_REVIEW_PARSE_STATUSES = [
+    'ok',
+    'parse-failed',
+    'unavailable',
+];
+/** The full set of plan parse statuses, for validation. */
+exports.PLAN_PARSE_STATUSES = [
+    'ok',
+    'parse-failed',
+    'unavailable',
+];
+// --- plan caps (the cap values assertBuildPlanWellFormed enforces). MIRROR the
+// canonical values exactly — the conformance gate pins the method vocabulary and
+// the planDocument round-trip tests pin the gate behavior.
+/** Hard cap on the number of steps a single plan may carry. */
+exports.MAX_PLAN_STEPS = 20;
+/** Hard cap on a plan goal's length (chars). */
+exports.MAX_PLAN_GOAL_CHARS = 300;
+/** Hard cap on a plan step title's length (chars). */
+exports.MAX_PLAN_STEP_TITLE_CHARS = 120;
+/** Hard cap on a plan step detail's length (chars). */
+exports.MAX_PLAN_STEP_DETAIL_CHARS = 600;
+/** Hard cap on the number of risks a single plan may carry. */
+exports.MAX_PLAN_RISKS = 10;
+/** Hard cap on a single risk's length (chars). */
+exports.MAX_PLAN_RISK_CHARS = 300;
+/** Hard cap on the number of files a single plan step may name. */
+exports.MAX_PLAN_FILES_PER_STEP = 10;
+/** Hard cap on a plan step's file-path length (chars). */
+exports.MAX_PLAN_FILE_CHARS = 260;
+/** True iff `p` looks like an absolute path (POSIX or Windows drive/UNC). */
+function planPathLooksAbsolute(p) {
+    return p.startsWith('/') || /^[A-Za-z]:[\\/]/.test(p) || p.startsWith('\\\\');
+}
+/** True iff `p` contains a `..` traversal segment. */
+function planPathHasTraversal(p) {
+    return p.split(/[\\/]/).some((seg) => seg === '..');
+}
+/**
+ * CONTRACT-LEVEL ASSERTION for a {@link BuildPlan} — STRICT structural
+ * validation plus cap enforcement at the trust boundary, MIRRORING the
+ * canonical assertBuildPlanWellFormed byte-for-byte in behavior. Shared so the
+ * CLIENT can refuse to send a malformed/oversized plan (the server
+ * independently re-validates what arrived on the wire). STRICT, NEVER
+ * REPAIRING: a plan crossing the boundary is either exactly well-formed or
+ * REJECTED — it THROWS with the comma-joined dotted problem tags.
+ */
+function assertBuildPlanWellFormed(plan) {
+    if (!isModelObj(plan)) {
+        throw new Error('malformed BuildPlan: not-an-object');
+    }
+    const problems = [];
+    // goal — required, non-empty, capped.
+    if (!modelNonEmptyString(plan.goal)) {
+        problems.push('plan.goal');
+    }
+    else if (plan.goal.length > exports.MAX_PLAN_GOAL_CHARS) {
+        problems.push('plan.goal.over-cap');
+    }
+    // steps — required, a NON-EMPTY array (a plan with no steps plans nothing),
+    // capped in count; every member strictly validated.
+    if (!Array.isArray(plan.steps)) {
+        problems.push('plan.steps');
+    }
+    else if (plan.steps.length === 0) {
+        problems.push('plan.steps.empty');
+    }
+    else if (plan.steps.length > exports.MAX_PLAN_STEPS) {
+        problems.push('plan.steps.over-cap');
+    }
+    else {
+        plan.steps.forEach((step, i) => {
+            if (!isModelObj(step)) {
+                problems.push(`plan.steps[${i}]`);
+                return;
+            }
+            if (!modelNonEmptyString(step.title)) {
+                problems.push(`plan.steps[${i}].title`);
+            }
+            else if (step.title.length > exports.MAX_PLAN_STEP_TITLE_CHARS) {
+                problems.push(`plan.steps[${i}].title.over-cap`);
+            }
+            if (!modelNonEmptyString(step.detail)) {
+                problems.push(`plan.steps[${i}].detail`);
+            }
+            else if (step.detail.length > exports.MAX_PLAN_STEP_DETAIL_CHARS) {
+                problems.push(`plan.steps[${i}].detail.over-cap`);
+            }
+            // files — OPTIONAL; when present: capped count, every path a non-empty,
+            // bounded, workspace-relative string (the review finding conventions).
+            if (step.files !== undefined) {
+                if (!Array.isArray(step.files)) {
+                    problems.push(`plan.steps[${i}].files`);
+                }
+                else if (step.files.length > exports.MAX_PLAN_FILES_PER_STEP) {
+                    problems.push(`plan.steps[${i}].files.over-cap`);
+                }
+                else {
+                    step.files.forEach((file, j) => {
+                        if (typeof file !== 'string' ||
+                            file.trim().length === 0 ||
+                            file.length > exports.MAX_PLAN_FILE_CHARS ||
+                            planPathLooksAbsolute(file) ||
+                            planPathHasTraversal(file)) {
+                            problems.push(`plan.steps[${i}].files[${j}]`);
+                        }
+                    });
+                }
+            }
+        });
+    }
+    // risks — OPTIONAL; when present: capped count, every member a non-empty,
+    // bounded string.
+    if (plan.risks !== undefined) {
+        if (!Array.isArray(plan.risks)) {
+            problems.push('plan.risks');
+        }
+        else if (plan.risks.length > exports.MAX_PLAN_RISKS) {
+            problems.push('plan.risks.over-cap');
+        }
+        else {
+            plan.risks.forEach((risk, i) => {
+                if (typeof risk !== 'string' || risk.trim().length === 0) {
+                    problems.push(`plan.risks[${i}]`);
+                }
+                else if (risk.length > exports.MAX_PLAN_RISK_CHARS) {
+                    problems.push(`plan.risks[${i}].over-cap`);
+                }
+            });
+        }
+    }
+    if (problems.length > 0) {
+        throw new Error(`malformed BuildPlan: ${problems.join(', ')}`);
+    }
+}
+/* ============================================================== *
+ * MCP BROKERING RPC (#9 — governed MCP tool brokering) — MIRROR
+ *
+ * Mirrors the canonical spikes/p0-contracts/bridge.ts MCP section. The
+ * supervisor OWNS the MCP stdio server children (config:
+ * `.glyphstudio/mcp.json` `{"mcpServers":{name:{command,args,env}}}`); the
+ * extension/UI never spawns or speaks to an MCP server directly.
+ *
+ * TRUST POSTURE (load-bearing): every call is policy-brokered (tool kind
+ * 'mcp', capability `mcp/<server>/<tool>`) and traced with the EXISTING
+ * policy_decision/tool_start/tool_end trace event types — ZERO new trace
+ * event types. Results carry the 'mcp' (UNTRUSTED) provenance label. The
+ * server binary is third-party code on the host — brokered calls ≠ a
+ * sandboxed server. Tool input schemas stay RAW JSON strings (never vouched
+ * for). No shape carries a credential; server env (including any tokens) is
+ * configured supervisor-side and never crosses this wire.
+ * ============================================================== */
+// --- MCP caps (the cap values assertMcpCallWellFormed and the supervisor-side
+// loader/list projection enforce). MIRROR the canonical values exactly — the
+// conformance gate pins the vocabulary, the caps, and the gate behavior.
+/** Hard cap on the number of configured MCP servers brokered per workspace. */
+exports.MAX_MCP_SERVERS = 16;
+/** Hard cap on the number of tools listed per MCP server. */
+exports.MAX_MCP_TOOLS_PER_SERVER = 64;
+/** Hard cap on an MCP server name's length (chars) — the mcp.json key. */
+exports.MAX_MCP_SERVER_NAME_CHARS = 64;
+/** Hard cap on an MCP tool name's length (chars). */
+exports.MAX_MCP_TOOL_NAME_CHARS = 128;
+/** Hard cap on a call's argsJson payload (UTF-8 bytes). */
+exports.MAX_MCP_ARGS_JSON_BYTES = 32768;
+/**
+ * Hard cap on a brokered result's resultJson payload (UTF-8 bytes). The
+ * supervisor truncates an over-cap third-party result HONESTLY (a non-secret
+ * truncation marker in `reason`), never silently.
+ */
+exports.MAX_MCP_RESULT_JSON_BYTES = 262144;
+/** The full set of MCP server statuses, for validation. */
+exports.MCP_SERVER_STATUSES = [
+    'ok',
+    'spawn-failed',
+    'init-failed',
+    'disabled',
+];
+/** The full set of MCP call statuses, for validation. */
+exports.MCP_CALL_STATUSES = [
+    'ok',
+    'denied',
+    'error',
+];
+/**
+ * Build the capability string a brokered MCP call requests:
+ * `mcp/<server>/<tool>`. The SINGLE owner of the format so policy matching,
+ * tracing, and the UI can never drift on the prefix/separator.
+ */
+function mcpCapability(server, tool) {
+    return `mcp/${server}/${tool}`;
+}
+/** UTF-8 byte length of a string, dependency-free (mirrors the canonical helper). */
+function mcpUtf8ByteLength(s) {
+    let bytes = 0;
+    for (let i = 0; i < s.length; i += 1) {
+        const code = s.codePointAt(i);
+        if (code <= 0x7f)
+            bytes += 1;
+        else if (code <= 0x7ff)
+            bytes += 2;
+        else if (code <= 0xffff)
+            bytes += 3;
+        else {
+            bytes += 4;
+            i += 1; // surrogate pair consumed two UTF-16 units
+        }
+    }
+    return bytes;
+}
+/**
+ * CONTRACT-LEVEL ASSERTION for {@link McpCallParams} — STRICT structural
+ * validation plus cap enforcement at the trust boundary, MIRRORING the
+ * canonical assertMcpCallWellFormed byte-for-byte in behavior. STRICT, NEVER
+ * REPAIRING: a call crossing the boundary is either exactly well-formed or
+ * REJECTED — it THROWS with the comma-joined dotted problem tags. `argsJson`
+ * must PARSE as JSON and the parsed value must be a JSON OBJECT (the MCP
+ * `arguments` shape); a string that merely resembles JSON is rejected.
+ */
+function assertMcpCallWellFormed(call) {
+    if (!isModelObj(call)) {
+        throw new Error('malformed McpCallParams: not-an-object');
+    }
+    const problems = [];
+    // server — required, non-empty, capped.
+    if (!modelNonEmptyString(call.server)) {
+        problems.push('call.server');
+    }
+    else if (call.server.length > exports.MAX_MCP_SERVER_NAME_CHARS) {
+        problems.push('call.server.over-cap');
+    }
+    // tool — required, non-empty, capped.
+    if (!modelNonEmptyString(call.tool)) {
+        problems.push('call.tool');
+    }
+    else if (call.tool.length > exports.MAX_MCP_TOOL_NAME_CHARS) {
+        problems.push('call.tool.over-cap');
+    }
+    // argsJson — required STRING, byte-capped, parseable, a JSON object.
+    if (typeof call.argsJson !== 'string') {
+        problems.push('call.argsJson');
+    }
+    else if (mcpUtf8ByteLength(call.argsJson) > exports.MAX_MCP_ARGS_JSON_BYTES) {
+        problems.push('call.argsJson.over-cap');
+    }
+    else {
+        let parsed;
+        let parseFailed = false;
+        try {
+            parsed = JSON.parse(call.argsJson);
+        }
+        catch {
+            parseFailed = true;
+        }
+        if (parseFailed) {
+            problems.push('call.argsJson.not-json');
+        }
+        else if (!isModelObj(parsed)) {
+            problems.push('call.argsJson.not-object');
+        }
+    }
+    if (problems.length > 0) {
+        throw new Error(`malformed McpCallParams: ${problems.join(', ')}`);
+    }
+}
+/** The full set of record-human event types, for validation. */
+exports.RECORD_HUMAN_EVENT_TYPES = [
+    'human_accepted',
+    'human_rejected',
+    'human_corrected_output',
+    'checkpoint_created',
+    'checkpoint_restored',
+];
+/**
+ * Hard cap on a record-human payload (UTF-8 bytes of its JSON serialization).
+ * Payloads are small structured summaries (decision, file counts, a checkpoint
+ * sha) — NEVER diff/file content. An over-cap payload is REFUSED honestly,
+ * never truncated. MIRRORS the canonical spikes/p0-contracts/bridge.ts.
+ */
+exports.MAX_RECORD_HUMAN_PAYLOAD_BYTES = 16384;
 /* ============================================================== *
  * MODEL RPC RUNTIME VALIDATORS (MIRROR of spikes/p0-contracts/model.ts).
  *

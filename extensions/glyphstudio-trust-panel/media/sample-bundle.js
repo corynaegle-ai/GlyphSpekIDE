@@ -62,7 +62,7 @@
     "runId": "0mpromfs2-247dbae4-e280-4856-aa2c-f0e75b4e8404",
     "events": [
       {
-        "hash": "4fcd8a0bd21d002ec1871c6d579223d71da8ab6a0da3c7875b58f13615c9b148",
+        "hash": "edf44e2bd920161bbb48a27034709dac481d8520207012563a1474d619483b74",
         "payload": {
           "provenanceLabel": "user",
           "runDir": "/glyphstudio/runs/0mpromfs2-247dbae4-e280-4856-aa2c-f0e75b4e8404",
@@ -76,13 +76,13 @@
         "v": 1
       },
       {
-        "hash": "6699e8ed488fb7c46cf967b2b052c700e61afe7dd66a69e9dfa1b1055b2f89e7",
+        "hash": "dff774155c405d9a29312697fa793188e7fe2b45ed752867ef067923b5f5ca20",
         "payload": {
           "from": "created",
           "reason": "worktree provisioned",
           "to": "worktree_ready"
         },
-        "prevHash": "4fcd8a0bd21d002ec1871c6d579223d71da8ab6a0da3c7875b58f13615c9b148",
+        "prevHash": "edf44e2bd920161bbb48a27034709dac481d8520207012563a1474d619483b74",
         "runId": "0mpromfs2-247dbae4-e280-4856-aa2c-f0e75b4e8404",
         "seq": 1,
         "ts": 1780105112953,
@@ -90,13 +90,13 @@
         "v": 1
       },
       {
-        "hash": "591a98fae53fc771112b7601a59a69d4152a14c209ec20649392c297a67d3098",
+        "hash": "c8f1cee030fb0edd0c6c59e771dd573645bc5216fcc78efa18d714b9fa88e5ad",
         "payload": {
           "from": "worktree_ready",
           "reason": "sandbox provisioned",
           "to": "sandbox_ready"
         },
-        "prevHash": "6699e8ed488fb7c46cf967b2b052c700e61afe7dd66a69e9dfa1b1055b2f89e7",
+        "prevHash": "dff774155c405d9a29312697fa793188e7fe2b45ed752867ef067923b5f5ca20",
         "runId": "0mpromfs2-247dbae4-e280-4856-aa2c-f0e75b4e8404",
         "seq": 2,
         "ts": 1780105113013,
@@ -104,13 +104,13 @@
         "v": 1
       },
       {
-        "hash": "e38ddf76752ae2e565c32aa273b29c2e63c558d8b7935e6058de16654a9bab04",
+        "hash": "dc4a74632811bf6ed5dcba3ae1b72984bc7ed24bea67ecbcf39bdae5e8787cec",
         "payload": {
           "from": "sandbox_ready",
           "reason": "entering execution",
           "to": "executing"
         },
-        "prevHash": "591a98fae53fc771112b7601a59a69d4152a14c209ec20649392c297a67d3098",
+        "prevHash": "c8f1cee030fb0edd0c6c59e771dd573645bc5216fcc78efa18d714b9fa88e5ad",
         "runId": "0mpromfs2-247dbae4-e280-4856-aa2c-f0e75b4e8404",
         "seq": 3,
         "ts": 1780105113013,
@@ -118,7 +118,7 @@
         "v": 1
       },
       {
-        "hash": "84d1338ae7577348c9a5037aa5f276e44ea8b9aeace4393e0afe3cbcc75f5656",
+        "hash": "19c15ccad4523da684de571720c2707e3ea29db5c4f6675767360d9d4d082f93",
         "payload": {
           "decision": "allow",
           "path": "src/interval.js",
@@ -126,7 +126,7 @@
           "requestedCapability": "file_read:src/interval.js",
           "tool": "file_read"
         },
-        "prevHash": "e38ddf76752ae2e565c32aa273b29c2e63c558d8b7935e6058de16654a9bab04",
+        "prevHash": "dc4a74632811bf6ed5dcba3ae1b72984bc7ed24bea67ecbcf39bdae5e8787cec",
         "runId": "0mpromfs2-247dbae4-e280-4856-aa2c-f0e75b4e8404",
         "seq": 4,
         "ts": 1780105114605,
@@ -134,13 +134,13 @@
         "v": 1
       },
       {
-        "hash": "4114af96abef6b0fdca247b8186c7b479cc44cd53f3c82e4dc221aee90bbb052",
+        "hash": "cbe9aea6088f15cef8efdd8a07c0519db9434b2bd0d4e981d602c7174f8337e6",
         "payload": {
           "provenanceLabel": "user",
           "requestedCapability": "file_read:src/interval.js",
           "tool": "file_read"
         },
-        "prevHash": "84d1338ae7577348c9a5037aa5f276e44ea8b9aeace4393e0afe3cbcc75f5656",
+        "prevHash": "19c15ccad4523da684de571720c2707e3ea29db5c4f6675767360d9d4d082f93",
         "runId": "0mpromfs2-247dbae4-e280-4856-aa2c-f0e75b4e8404",
         "seq": 5,
         "ts": 1780105114606,
@@ -148,14 +148,14 @@
         "v": 1
       },
       {
-        "hash": "42feca362b2b97b8364ab99b34196fa377612f30c4654a36e723c01efb585b2a",
+        "hash": "64627323b84a99fa76f7badb30b4902c59a12af606115d4d0e9dd6bab5266dad",
         "payload": {
           "contentLength": 2411,
           "ok": true,
           "provenanceLabel": "user",
           "tool": "file_read"
         },
-        "prevHash": "4114af96abef6b0fdca247b8186c7b479cc44cd53f3c82e4dc221aee90bbb052",
+        "prevHash": "cbe9aea6088f15cef8efdd8a07c0519db9434b2bd0d4e981d602c7174f8337e6",
         "runId": "0mpromfs2-247dbae4-e280-4856-aa2c-f0e75b4e8404",
         "seq": 6,
         "ts": 1780105114606,
@@ -163,7 +163,7 @@
         "v": 1
       },
       {
-        "hash": "2e7bc248b5be7d9d433a86039fbf08ffa822b3b94c8a8310a2d322f4e28e1546",
+        "hash": "a96bded31d979f0c8963744bcfae832406073dd30714ebfea2184d5cb5abbee1",
         "payload": {
           "decision": "allow",
           "path": "src/interval.js",
@@ -171,7 +171,7 @@
           "requestedCapability": "file_write:src/interval.js",
           "tool": "file_write"
         },
-        "prevHash": "42feca362b2b97b8364ab99b34196fa377612f30c4654a36e723c01efb585b2a",
+        "prevHash": "64627323b84a99fa76f7badb30b4902c59a12af606115d4d0e9dd6bab5266dad",
         "runId": "0mpromfs2-247dbae4-e280-4856-aa2c-f0e75b4e8404",
         "seq": 7,
         "ts": 1780105122870,
@@ -179,13 +179,13 @@
         "v": 1
       },
       {
-        "hash": "9249bbd04a1e12279c036ccde50b6f6720f6e9553ec8a09a20509313c467cca8",
+        "hash": "8615abd8f72fba9798cf629d732084c0b6975a8772f4a0900f6e305aafd5e25b",
         "payload": {
           "provenanceLabel": "user",
           "requestedCapability": "file_write:src/interval.js",
           "tool": "file_write"
         },
-        "prevHash": "2e7bc248b5be7d9d433a86039fbf08ffa822b3b94c8a8310a2d322f4e28e1546",
+        "prevHash": "a96bded31d979f0c8963744bcfae832406073dd30714ebfea2184d5cb5abbee1",
         "runId": "0mpromfs2-247dbae4-e280-4856-aa2c-f0e75b4e8404",
         "seq": 8,
         "ts": 1780105122870,
@@ -193,13 +193,13 @@
         "v": 1
       },
       {
-        "hash": "4869281b9e8209be445c7912c90a7baf46ccea8af20ec44213e52ad5afa67850",
+        "hash": "d18df32d8e8801f8ed1fc61ef33d38bfba9438947c53fd8fe77d0f8112290896",
         "payload": {
           "ok": true,
           "provenanceLabel": "user",
           "tool": "file_write"
         },
-        "prevHash": "9249bbd04a1e12279c036ccde50b6f6720f6e9553ec8a09a20509313c467cca8",
+        "prevHash": "8615abd8f72fba9798cf629d732084c0b6975a8772f4a0900f6e305aafd5e25b",
         "runId": "0mpromfs2-247dbae4-e280-4856-aa2c-f0e75b4e8404",
         "seq": 9,
         "ts": 1780105122870,
@@ -207,7 +207,7 @@
         "v": 1
       },
       {
-        "hash": "01b0adbad6e72e2139f07fa24ee7de4b3ed4d4bbaaa76d533b659d41bfeb104a",
+        "hash": "fe6ab2c3b5c96cf2ba57cbeb1e8cbf403e1d4f5e0a601af5ef11ac2d14543e9b",
         "payload": {
           "command": [
             "npm",
@@ -218,7 +218,7 @@
           "requestedCapability": "command:npm",
           "tool": "command"
         },
-        "prevHash": "4869281b9e8209be445c7912c90a7baf46ccea8af20ec44213e52ad5afa67850",
+        "prevHash": "d18df32d8e8801f8ed1fc61ef33d38bfba9438947c53fd8fe77d0f8112290896",
         "runId": "0mpromfs2-247dbae4-e280-4856-aa2c-f0e75b4e8404",
         "seq": 10,
         "ts": 1780105123185,
@@ -226,13 +226,13 @@
         "v": 1
       },
       {
-        "hash": "420e15ea638883b21c1e09710d6cb384116e0a39ed1834f41ef88ebc5f9bf53d",
+        "hash": "ce81a000b20671d5bbb62fad0c94e54631dc2b2c6a058bb76bb5746d0dc550b2",
         "payload": {
           "provenanceLabel": "user",
           "requestedCapability": "command:npm",
           "tool": "command"
         },
-        "prevHash": "01b0adbad6e72e2139f07fa24ee7de4b3ed4d4bbaaa76d533b659d41bfeb104a",
+        "prevHash": "fe6ab2c3b5c96cf2ba57cbeb1e8cbf403e1d4f5e0a601af5ef11ac2d14543e9b",
         "runId": "0mpromfs2-247dbae4-e280-4856-aa2c-f0e75b4e8404",
         "seq": 11,
         "ts": 1780105123185,
@@ -240,7 +240,7 @@
         "v": 1
       },
       {
-        "hash": "13d3be27f5161d6fccbe218ce1596e4be2f2ec40559b0aa5603ed2d738da9e12",
+        "hash": "5c18fcf5892846513a1f793456452d83c6d2972af235cc21ef6d5a06640415c0",
         "payload": {
           "durationMs": 5173,
           "exitCode": 0,
@@ -248,7 +248,7 @@
           "stdoutLength": 1871,
           "tool": "command"
         },
-        "prevHash": "420e15ea638883b21c1e09710d6cb384116e0a39ed1834f41ef88ebc5f9bf53d",
+        "prevHash": "ce81a000b20671d5bbb62fad0c94e54631dc2b2c6a058bb76bb5746d0dc550b2",
         "runId": "0mpromfs2-247dbae4-e280-4856-aa2c-f0e75b4e8404",
         "seq": 12,
         "ts": 1780105128358,
@@ -256,13 +256,13 @@
         "v": 1
       },
       {
-        "hash": "8db73a1db8bd9399b3ecc1901cb74296516a05b4f6561ed5efadfd7a16858a6a",
+        "hash": "7d202b88dff236e033bc39166fc36f5808a394807099ecd0e7ec5c5125bfe71c",
         "payload": {
           "from": "executing",
           "reason": "run complete",
           "to": "completed"
         },
-        "prevHash": "13d3be27f5161d6fccbe218ce1596e4be2f2ec40559b0aa5603ed2d738da9e12",
+        "prevHash": "5c18fcf5892846513a1f793456452d83c6d2972af235cc21ef6d5a06640415c0",
         "runId": "0mpromfs2-247dbae4-e280-4856-aa2c-f0e75b4e8404",
         "seq": 13,
         "ts": 1780105129487,
@@ -295,10 +295,10 @@
         }
       ],
       "overallVerdict": "pass",
-      "traceRootHash": "8db73a1db8bd9399b3ecc1901cb74296516a05b4f6561ed5efadfd7a16858a6a",
+      "traceRootHash": "7d202b88dff236e033bc39166fc36f5808a394807099ecd0e7ec5c5125bfe71c",
       "signature": {
         "alg": "ed25519",
-        "value": "3Voxh5z24ZIGqXveZui/EBVlQ0hEC03z9LuUkCE8Czs+WvVVcc8trgnrywuM6EPDQrGmKk4fv/HqkxvBZpnyDQ==",
+        "value": "aPOdr5vi3qNO262NAKfUipcp8JomAXZCLlomiAkMj6zHWj1nOr1D/AYoTqiCqm0/skmp69fXjBJTzQkJnX69BA==",
         "keyId": "demo-ed25519-DEMO-ONLY"
       }
     },

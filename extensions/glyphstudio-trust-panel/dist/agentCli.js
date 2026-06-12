@@ -1,7 +1,7 @@
 "use strict";
 /*
  * GlyphStudio AGENT-CLI DETECTION — extension-local, headlessly-testable PATH scan for
- * an installed coding-agent CLI (claude / codex). Mirrors the spike launcher's
+ * an installed coding-agent CLI (claude / codex / gemini). Mirrors the spike launcher's
  * detectAgentCli (spikes/p0-governed-cli/cli-agent-launcher.ts); the extension is a
  * SEPARATE build package and cannot import the spikes tree, so the detection is
  * restated here (node:fs/path/os only — no which/execa/cross-spawn deps).
@@ -17,8 +17,13 @@ exports.detectAgentCli = detectAgentCli;
 const node_fs_1 = require("node:fs");
 const node_path_1 = require("node:path");
 const node_os_1 = require("node:os");
-/** The agent CLIs we look for on PATH, highest preference first. */
-exports.KNOWN_AGENT_CLIS = ['claude', 'codex'];
+/**
+ * The agent CLIs we look for on PATH, highest preference first (claude → codex →
+ * gemini; the pre-gemini order is preserved). NOTE: gemini has NO dedicated actorType —
+ * it maps to the existing 'native' actor tag (the ActorType vocabulary in
+ * bridgeProtocol.ts / runEventProtocol is deliberately untouched).
+ */
+exports.KNOWN_AGENT_CLIS = ['claude', 'codex', 'gemini'];
 /** The candidate executable basenames for `agent` on the current platform. */
 function candidateNames(agent) {
     if ((0, node_os_1.platform)() === 'win32') {
@@ -61,7 +66,7 @@ function resolveOnPath(agent, env = process.env) {
 }
 /**
  * Detect an installed agent CLI, trying {@link KNOWN_AGENT_CLIS} in preference order
- * (`claude`, then `codex`). Returns the first found, or undefined if none is
+ * (`claude`, then `codex`, then `gemini`). Returns the first found, or undefined if none is
  * installed. The env (and thus PATH) is injectable for tests.
  */
 function detectAgentCli(env = process.env) {
