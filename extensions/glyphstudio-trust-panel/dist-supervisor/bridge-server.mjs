@@ -41,12 +41,12 @@ function isIpLiteral(host) {
   if (h.length === 0) return false;
   if (h.startsWith("[") && h.endsWith("]")) return true;
   if (h.includes(":")) return true;
-  const v4 = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/.exec(h);
-  if (v4) {
-    return v4.slice(1).every((o) => {
-      const n = Number(o);
-      return n >= 0 && n <= 255;
-    });
+  const parts = h.split(".");
+  if (parts.length >= 1 && parts.length <= 4) {
+    const isNumericPart = (p) => /^0[xX][0-9a-fA-F]+$/.test(p) || // hex
+    /^0[0-7]*$/.test(p) || // octal (incl. bare "0")
+    /^[1-9][0-9]*$/.test(p);
+    if (parts.every((p) => p.length > 0 && isNumericPart(p))) return true;
   }
   return false;
 }
@@ -2096,6 +2096,11 @@ var CHANGE_REVIEW_PARSE_STATUSES = [
   "parse-failed",
   "unavailable"
 ];
+var REVIEW_FINDING_SEVERITIES = [
+  "info",
+  "warn",
+  "high"
+];
 function assertChangeReviewWellFormed(review) {
   if (!isShapeObj(review)) return { ok: false, problems: ["not-an-object"] };
   const problems = [];
@@ -2114,7 +2119,28 @@ function assertChangeReviewWellFormed(review) {
     )) {
       problems.push("review.findings.parseStatus");
     }
-    if (!Array.isArray(findings.items)) problems.push("review.findings.items");
+    if (findings.reason !== void 0 && typeof findings.reason !== "string") {
+      problems.push("review.findings.reason");
+    }
+    if (!Array.isArray(findings.items)) {
+      problems.push("review.findings.items");
+    } else {
+      findings.items.forEach((item, i) => {
+        if (!isShapeObj(item)) {
+          problems.push(`review.findings.items[${i}]`);
+          return;
+        }
+        if (!shapeNonEmptyString(item.file)) problems.push(`review.findings.items[${i}].file`);
+        if (!REVIEW_FINDING_SEVERITIES.includes(item.severity)) {
+          problems.push(`review.findings.items[${i}].severity`);
+        }
+        if (!shapeNonEmptyString(item.title)) problems.push(`review.findings.items[${i}].title`);
+        if (typeof item.detail !== "string") problems.push(`review.findings.items[${i}].detail`);
+        if (item.startLine !== void 0 && typeof item.startLine !== "number") {
+          problems.push(`review.findings.items[${i}].startLine`);
+        }
+      });
+    }
   }
   if (!isShapeObj(review.verdict)) {
     problems.push("review.verdict");
@@ -4643,7 +4669,7 @@ function encryptAtRestHook(key, plaintext) {
   return encryptBlob(key, Buffer.from(plaintext, "utf8"));
 }
 function pathFromChunkId(id) {
-  const match = /^(.*):\d+-\d+$/.exec(id);
+  const match = /^(.*):\d+-\d+(?:#\d+)?$/.exec(id);
   return match ? match[1] : id;
 }
 var defaultLoadChunks = async (workspaceRoot, discoverOptions, chunkOptions) => {
@@ -4655,7 +4681,12 @@ var defaultLoadChunks = async (workspaceRoot, discoverOptions, chunkOptions) => 
   });
   const chunks = [];
   for (const file of discovered) {
-    const text = await readFile2(file.absPath, "utf8");
+    let text;
+    try {
+      text = await readFile2(file.absPath, "utf8");
+    } catch {
+      continue;
+    }
     chunks.push(...chunkFile2(file.path, text, chunkOptions));
   }
   return chunks;
@@ -6354,8 +6385,42 @@ function normalizeIpLiteral(host) {
       return parts.join(".");
     }
   }
-  if (h.startsWith("::ffff:")) return h.slice("::ffff:".length);
+  if (h.startsWith("::ffff:")) {
+    const rest = h.slice("::ffff:".length);
+    if (isIP(rest) === 4) return rest;
+  }
   return h;
+}
+function embeddedIpv4FromV6(ip) {
+  const h = ip.toLowerCase();
+  const dz = h.indexOf("::");
+  let groups;
+  if (dz === -1) {
+    groups = h.split(":");
+  } else {
+    const head = h.slice(0, dz).split(":").filter((g2) => g2.length > 0);
+    const tail = h.slice(dz + 2).split(":").filter((g2) => g2.length > 0);
+    const tailGroupCount = tail.reduce((acc, g2) => acc + (g2.includes(".") ? 2 : 1), 0);
+    const fill = 8 - head.length - tailGroupCount;
+    if (fill < 0) return void 0;
+    groups = [...head, ...Array(fill).fill("0"), ...tail];
+  }
+  if (groups.length >= 1 && groups[groups.length - 1].includes(".")) {
+    const dotted = groups[groups.length - 1];
+    groups = [...groups.slice(0, -1), "", ""];
+    const n = ipv4ToNumber(dotted);
+    if (n === void 0) return void 0;
+    groups[groups.length - 2] = (n >>> 16 & 65535).toString(16);
+    groups[groups.length - 1] = (n & 65535).toString(16);
+  }
+  if (groups.length !== 8) return void 0;
+  const g = groups.map((x) => Number.parseInt(x || "0", 16));
+  if (g.some((x) => !Number.isInteger(x) || x < 0 || x > 65535)) return void 0;
+  const isMapped = g[0] === 0 && g[1] === 0 && g[2] === 0 && g[3] === 0 && g[4] === 0 && g[5] === 65535;
+  const isNat64 = g[0] === 100 && g[1] === 65435 && g[2] === 0 && g[3] === 0 && g[4] === 0 && g[5] === 0;
+  if (!isMapped && !isNat64) return void 0;
+  const v4 = (g[6] << 16 | g[7]) >>> 0;
+  return uint32ToDottedQuad(v4);
 }
 function isPublicAddress(address) {
   const ip = normalizeIpLiteral(address);
@@ -6380,6 +6445,8 @@ function isPublicAddress(address) {
   }
   if (family === 6) {
     const h = ip.toLowerCase();
+    const embedded = embeddedIpv4FromV6(h);
+    if (embedded !== void 0) return isPublicAddress(embedded);
     if (h === "::" || h === "::1") return false;
     if (h.startsWith("fe80:") || h.startsWith("fe8") || h.startsWith("fe9") || h.startsWith("fea") || h.startsWith("feb")) return false;
     if (h.startsWith("fc") || h.startsWith("fd")) return false;
@@ -6788,6 +6855,9 @@ async function governedStreamRequest(opts) {
   const proxy = new URL2(opts.proxyUrl);
   const timeoutMs = safeInt(opts.timeoutMs, STREAM_DEFAULT_TIMEOUT_MS, 100, 6e5);
   const bodyBuf = Buffer.from(opts.body ?? "", "utf8");
+  if (/[\r\n\s]/.test(opts.method)) {
+    throw new Error(`refused \u2014 method '${opts.method.replace(/[\r\n\s]+/g, " ")}' contains whitespace or a line break`);
+  }
   const headerLines = [];
   for (const [name, value] of Object.entries(opts.headers ?? {})) {
     if (OWNED_HEADERS.has(name.trim().toLowerCase())) continue;
@@ -10695,7 +10765,20 @@ async function runGovernedChangeReview(opts) {
     }
     const checks = [];
     verifyRan = !!resolvedVerifyCommand;
-    if (resolvedVerifyCommand) {
+    const branchSnapshotUnavailable = opts.scope === "branch" && verifySourceTree === "";
+    if (resolvedVerifyCommand && branchSnapshotUnavailable) {
+      const reason = "branch HEAD snapshot could not be created \u2014 independent verification skipped";
+      isolationUnavailableReason ??= reason;
+      log(
+        `branch HEAD snapshot unavailable \u2014 refusing to run the inline verify check against the dirty working tree (${reason}); forcing verdict 'error'`
+      );
+      checks.push({
+        name: `${NOT_VERIFIED_CHECK_NAME} (branch HEAD snapshot unavailable)`,
+        command: [],
+        status: "error"
+      });
+      verifyRan = false;
+    } else if (resolvedVerifyCommand) {
       const inlineCwd = opts.scope === "branch" && verifySourceTree !== "" ? verifySourceTree : opts.cwd;
       const check = await runVerifyCheck(
         resolvedVerifyCommand,
@@ -12718,11 +12801,15 @@ var BridgeServer = class {
       return;
     }
     const run2 = this.runs.get(governed.runId);
-    const tracePath = run2?.created?.dir ? join18(runSubdirPath(run2.created.dir, "trace"), "trace.jsonl") : void 0;
-    const sink = tracePath ? createTraceWriter(tracePath) : void 0;
+    const sessionAppend = governed.session.appendTraceEvent;
     const seen = /* @__PURE__ */ new Set();
     const recordAttempt = (attempt) => {
-      if (!sink) return;
+      if (!sessionAppend) {
+        this.logLine(
+          `[bridge-server] web/fetch: run '${governed.runId}' session exposes no appendTraceEvent \u2014 policy_decision append skipped (best-effort by design).`
+        );
+        return;
+      }
       const key = `${attempt.host}:${attempt.port}:${attempt.contentSha256 ?? ""}`;
       if (seen.has(key)) return;
       seen.add(key);
@@ -12740,20 +12827,7 @@ var BridgeServer = class {
         runEffectiveProvenance: this.runEffectiveProvenance(run2),
         ...attempt.contentSha256 ? { contentSha256: attempt.contentSha256 } : {}
       };
-      const appended = sink.append({
-        v: TRACE_EVENT_VERSION,
-        runId: governed.runId,
-        seq: 0,
-        ts: Date.now(),
-        type: "policy_decision",
-        payload
-      });
-      this.emitRunEventEnvelope({
-        rev: RUN_EVENT_PROTOCOL_VERSION,
-        runId: governed.runId,
-        kind: "trace_event",
-        event: appended
-      });
+      sessionAppend("policy_decision", payload);
     };
     try {
       const result = await governedWebFetch({
@@ -12765,22 +12839,9 @@ var BridgeServer = class {
         ...typeof params.maxRedirects === "number" ? { maxRedirects: params.maxRedirects } : {},
         onAttempt: recordAttempt
       });
-      if (result.ok && run2 && sink) {
+      if (result.ok && run2 && sessionAppend) {
         this.ingestRunTaint(run2, "web", "web/fetch", (type, payload) => {
-          const appended = sink.append({
-            v: TRACE_EVENT_VERSION,
-            runId: governed.runId,
-            seq: 0,
-            ts: Date.now(),
-            type,
-            payload
-          });
-          this.emitRunEventEnvelope({
-            rev: RUN_EVENT_PROTOCOL_VERSION,
-            runId: governed.runId,
-            kind: "trace_event",
-            event: appended
-          });
+          sessionAppend(type, payload);
         });
       }
       const response = result.ok ? { ...result, runId: governed.runId } : result;
@@ -14888,23 +14949,15 @@ var BridgeServer = class {
         });
         return;
       }
-      const sink = createTraceWriter(tracePath);
+      const sessionAppend = governed.session.appendTraceEvent;
       const appendAndMirror = (type, payload, source) => {
-        const appended = sink.append({
-          v: TRACE_EVENT_VERSION,
-          runId,
-          seq: 0,
-          ts: Date.now(),
-          type,
-          payload,
-          ...source !== void 0 ? { source } : {}
-        });
-        this.emitRunEventEnvelope({
-          rev: RUN_EVENT_PROTOCOL_VERSION,
-          runId,
-          kind: "trace_event",
-          event: appended
-        });
+        if (!sessionAppend) {
+          this.logLine(
+            `[bridge-server] mcp/call: run '${runId}' session exposes no appendTraceEvent \u2014 '${type}' append skipped (best-effort by design).`
+          );
+          return;
+        }
+        sessionAppend(type, payload, source);
       };
       const policy = this.mcp?.policy ?? DEFAULT_MCP_POLICY;
       const request = {

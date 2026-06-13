@@ -131,6 +131,20 @@ const FORWARDED_ENV_KEYS = [
 function buildBridgeEnv(opts) {
     const src = process.env;
     const runsBase = opts.runsBase ?? defaultRunsBase();
+    if (opts.runsBase === undefined) {
+        // F3: no caller-supplied (workspace-namespaced) runsBase → the un-namespaced
+        // ~/.glyphstudio/runs fallback. Warn so a future omission can't silently
+        // cross-mix two workspaces' runs. `output` is present on the real options shape;
+        // guard it because a few call sites pass a structurally-narrower cast.
+        try {
+            opts.output?.appendLine(`[bridge] WARNING: no runsBase supplied; using un-namespaced fallback ${runsBase} ` +
+                `(NOT per-workspace — runs from different projects may cross-mix). ` +
+                `Pass a workspace-scoped runsBase (extension.ts resolveRunsBase).`);
+        }
+        catch {
+            /* logging is best-effort; never block env-building on a missing channel */
+        }
+    }
     // The bridge-server child is spawned with cwd = runsBase (see the SupervisorBridge
     // construction below). Node's child_process.spawn reports a MISLEADING
     // `spawn <execPath> ENOENT` when the cwd directory does not exist — and resolveRunsBase()
@@ -196,7 +210,16 @@ function buildBridgeEnv(opts) {
     }
     return env;
 }
-/** The $HOME-based default runs base (mirrors extension.ts resolveRunsBase). */
+/**
+ * The bare $HOME-based runs base — `~/.glyphstudio/runs`, WITHOUT a per-workspace
+ * key (F3). This is NOT equivalent to extension.ts `resolveRunsBase()`, which
+ * appends a per-workspace namespace so distinct projects never share a runs dir.
+ * It is only the UN-NAMESPACED fallback used when a caller omits `opts.runsBase`.
+ * Every production bridge call site passes an explicit, workspace-namespaced
+ * `runsBase`; reaching this fallback means a future caller forgot to, which would
+ * silently cross-mix two workspaces' runs under one dir. buildBridgeEnv warns when
+ * it lands here so that omission fails LOUD, not silent.
+ */
 function defaultRunsBase() {
     return path.join(os.homedir(), '.glyphstudio', 'runs');
 }

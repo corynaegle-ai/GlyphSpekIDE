@@ -2026,13 +2026,22 @@ class NativeChatPanel {
     async ensureSession() {
         if (this.session)
             return this.session;
-        const opened = await this.sessionFactory.open();
-        if (!opened.connected || !opened.session) {
-            this.postGatewayError(opened.message || 'could not open the governed chat session.');
-            return undefined;
+        // Memoize the in-flight open so concurrent callers share ONE child (F2).
+        if (!this.sessionOpenPromise) {
+            this.sessionOpenPromise = (async () => {
+                const opened = await this.sessionFactory.open();
+                if (!opened.connected || !opened.session) {
+                    this.postGatewayError(opened.message || 'could not open the governed chat session.');
+                    return undefined;
+                }
+                this.session = opened.session;
+                return this.session;
+            })().finally(() => {
+                // Clear on settle so a failed open can be retried on the next send.
+                this.sessionOpenPromise = undefined;
+            });
         }
-        this.session = opened.session;
-        return this.session;
+        return this.sessionOpenPromise;
     }
     post(msg) {
         // VS Code queues messages to a live webview, so a post that races the webview's
@@ -2404,27 +2413,42 @@ function activate(context) {
     // (one of MOCK_SCENARIOS) to exercise a specific failure state; default is the
     // isolated-native happy path. This is the stub event source the design calls for
     // until the supervisor-side stdio server is wired.
-    context.subscriptions.push(vscode.commands.registerCommand('glyphstudio.demoLiveRun', async (scenarioArg) => {
-        const scenario = mockRunStream_1.MOCK_SCENARIOS.includes(scenarioArg)
-            ? scenarioArg
-            : 'isolated-native';
-        const panel = TrustPanel.createOrShow(context.extensionUri, gate);
-        panel.reveal();
-        const runId = `demo-${scenario}-${Date.now().toString(36)}`;
-        const events = (0, mockRunStream_1.mockRunStream)(scenario, runId);
-        // Stream the envelopes with a small delay so the panel renders them as a
-        // live feed rather than all at once. postRunEvent buffers any that arrive
-        // before the webview signals ready.
-        let i = 0;
-        const tick = () => {
-            if (i >= events.length)
-                return;
-            panel.postRunEvent(events[i]);
-            i += 1;
-            setTimeout(tick, 200);
-        };
-        tick();
-    }));
+    //
+    // HONESTY GATE (F1): this streams FABRICATED `mockRunStream` envelopes through the
+    // SAME production `postRunEvent` seam real governed-run traces use, so a shipped,
+    // palette-reachable copy would render fake trust evidence indistinguishably from
+    // real data — a direct violation of the "never fabricate trust evidence" promise.
+    // Register it ONLY outside Production (Development/Test). Defense in depth: the
+    // command is also hidden from the palette in package.json (commandPalette
+    // `when:false`). Unlike `previewAgenticBuildReview`, this feed carries no
+    // preview/fixture marker downstream, so dev-gating — not a marker — is the fix.
+    // Read ExtensionMode defensively (`?.`): under a test/headless vscode stub the
+    // enum can be absent, and a bare `vscode.ExtensionMode.Production` would throw
+    // during activation. Absent enum ⇒ treat as non-production (register the dev tool).
+    const productionMode = vscode.ExtensionMode?.Production;
+    if (productionMode === undefined || context.extensionMode !== productionMode) {
+        context.subscriptions.push(vscode.commands.registerCommand('glyphstudio.demoLiveRun', async (scenarioArg) => {
+            const scenario = mockRunStream_1.MOCK_SCENARIOS.includes(scenarioArg)
+                ? scenarioArg
+                : 'isolated-native';
+            const panel = TrustPanel.createOrShow(context.extensionUri, gate);
+            panel.reveal();
+            const runId = `demo-${scenario}-${Date.now().toString(36)}`;
+            const events = (0, mockRunStream_1.mockRunStream)(scenario, runId);
+            // Stream the envelopes with a small delay so the panel renders them as a
+            // live feed rather than all at once. postRunEvent buffers any that arrive
+            // before the webview signals ready.
+            let i = 0;
+            const tick = () => {
+                if (i >= events.length)
+                    return;
+                panel.postRunEvent(events[i]);
+                i += 1;
+                setTimeout(tick, 200);
+            };
+            tick();
+        }));
+    }
     // AGENTIC BUILD REVIEW PREVIEW (Phase B). Opens the Trust Panel and renders a
     // realistic FIXTURE review so Cory can SEE the review UI now — the compact
     // evidence object (intent + actor + honest governed-unsandboxed posture, signed
@@ -4252,7 +4276,10 @@ function resolveSourceCommit(repoRoot) {
  * end-to-end path: hash-pin → handshake → run/create against the spawned
  * supervisor (not a mock/stub). It reveals the Trust Panel and surfaces the run's
  * trust posture. Streaming live run/event from this created run into the panel is
- * the documented follow-up; for now the panel keeps its embedded sample feed.
+ * the documented follow-up (see the M5 live path below); in the meantime the
+ * in-IDE panel shows its honest empty state ("no governed run in this project
+ * yet"), not a sample feed — getWebviewContent injects GLYPHSTUDIO_PANEL_CONTEXT
+ * ='workspace' so app.js never preloads the bundled demo sample.
  */
 /**
  * Resolve the repo + policy and assemble the full §10.3 run request shared by the
@@ -5139,7 +5166,9 @@ function withAmbientDevModePosture(context, onRunEvent) {
 /**
  * Spawn the PACKAGED bridge-server, create a REAL run, KEEP THE CHILD ALIVE, and
  * DRIVE it so the supervisor streams the LIVE `run/event` sequence into the Trust
- * Panel — a real run streaming in, not the embedded sample. The panel's
+ * Panel — a real run streaming in. (The in-IDE panel has no embedded sample feed:
+ * it opens to an honest empty state via GLYPHSTUDIO_PANEL_CONTEXT='workspace';
+ * only the standalone demo page preloads a sample.) The panel's
  * postRunEvent runs validateRunEvent + the fail-closed schema gate on every
  * streamed envelope before rendering. The child disposes once the run closes.
  *

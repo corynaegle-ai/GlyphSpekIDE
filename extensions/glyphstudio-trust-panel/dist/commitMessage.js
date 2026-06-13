@@ -66,7 +66,9 @@ var __importStar = (this && this.__importStar) || (function () {
     };
 })();
 Object.defineProperty(exports, "__esModule", { value: true });
+exports.byteBoundedPrefix = byteBoundedPrefix;
 exports.commitMessageSystemPrompt = commitMessageSystemPrompt;
+exports.isPathWithin = isPathWithin;
 exports.registerGenerateCommitMessage = registerGenerateCommitMessage;
 const node_crypto_1 = require("node:crypto");
 const fs = __importStar(require("node:fs"));
@@ -101,6 +103,24 @@ const MSG = {
 const GATEWAY_TIMEOUT_MS = 60_000;
 /** Cap on the diff bytes sent to the gateway (AC18). Beyond this, the diff is truncated. */
 const MAX_DIFF_BYTES = 60_000;
+/**
+ * Truncate `text` to at most `maxBytes` UTF-8 BYTES without splitting a multibyte
+ * codepoint (AC18). `String.prototype.slice` counts UTF-16 code units, so for a
+ * multibyte diff it would keep MORE bytes than the cap; we slice the UTF-8 buffer
+ * and back off any trailing continuation bytes (0b10xxxxxx) so the decoded prefix
+ * never ends in a split codepoint (no U+FFFD tail). Pure + ASCII-fast.
+ */
+function byteBoundedPrefix(text, maxBytes) {
+    const buf = Buffer.from(text, 'utf8');
+    if (buf.length <= maxBytes)
+        return text;
+    let end = maxBytes;
+    // A UTF-8 continuation byte is 0b10xxxxxx (0x80–0xBF); a cut mid-sequence ends on
+    // one. Walk back over any continuation bytes to land on a codepoint boundary.
+    while (end > 0 && (buf[end] & 0xc0) === 0x80)
+        end -= 1;
+    return buf.toString('utf8', 0, end);
+}
 /**
  * The trusted verifier key set (operator setting + machine keystore), read defensively. A
  * verdict is only treated as signed when one of these (or, valid-but-untrusted, the bundle's
@@ -458,6 +478,23 @@ function stagedFiles(repo) {
     });
 }
 /**
+ * True iff `child` is the directory `root` itself or a path nested UNDER it, matched
+ * on a path-segment boundary so a sibling repo can never false-match (`/repo-foo`
+ * vs `/repo`). Compares normalized paths and requires the next char after `root` to
+ * be the platform separator (AC22).
+ */
+function isPathWithin(child, root) {
+    const c = path.normalize(child);
+    const r = path.normalize(root).replace(new RegExp(`${escapeRegExp(path.sep)}+$`), '');
+    if (c === r)
+        return true;
+    return c.startsWith(r + path.sep);
+}
+/** Escape a string for literal use inside a RegExp. */
+function escapeRegExp(s) {
+    return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+/**
  * Resolve the Git repository the command was invoked FOR (multi-root safe — AC22). The SCM
  * input passes its source-control as the command argument; we match its rootUri to a known
  * repository. Falls back to the single repository when there is exactly one, else undefined
@@ -479,7 +516,7 @@ function resolveInvokedRepository(api, arg) {
     const active = vscode.window.activeTextEditor?.document.uri.fsPath;
     if (active) {
         const byActive = api.repositories
-            .filter((r) => active.startsWith(r.rootUri.fsPath))
+            .filter((r) => isPathWithin(active, r.rootUri.fsPath))
             .sort((a, b) => b.rootUri.fsPath.length - a.rootUri.fsPath.length)[0];
         if (byActive)
             return byActive;
@@ -560,7 +597,9 @@ async function generateForRepository(repository, staged, deps, discover) {
     }
     // Truncate for context budget (AC18).
     const diffTruncated = Buffer.byteLength(fullDiff, 'utf8') > MAX_DIFF_BYTES;
-    const diff = diffTruncated ? fullDiff.slice(0, MAX_DIFF_BYTES) : fullDiff;
+    // Slice by BYTES (codepoint-safe), not by UTF-16 units, so the cap is honored
+    // for multibyte diffs (AC18).
+    const diff = diffTruncated ? byteBoundedPrefix(fullDiff, MAX_DIFF_BYTES) : fullDiff;
     const binaryFiles = detectBinaryFiles(fullDiff);
     // (5) Evidence: discover signed bundles, compute the staged-content fingerprint, and let the
     // PURE logic pick the single corresponding run (content-bound) and grade it.

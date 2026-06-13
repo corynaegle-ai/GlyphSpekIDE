@@ -384,6 +384,12 @@
       }
     ],
     "menus": {
+      "commandPalette": [
+        {
+          "command": "glyphstudio.demoLiveRun",
+          "when": "false"
+        }
+      ],
       "view/title": [
         {
           "command": "glyphstudio.runs.newGovernedTerminal",

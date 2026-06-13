@@ -746,6 +746,19 @@ class SupervisorBridge {
             const error = this.closeReason || 'bridge is not connected (handshake not completed).';
             return { ok: false, error };
         }
+        // SINGLE IN-FLIGHT SLOT (F4): index/progress notifications are id-less, so we
+        // correlate them to the one in-flight build via indexBuildPendingId. Builds are
+        // serialized today by the command, but the transport cannot enforce that — a
+        // second concurrent build would silently OVERWRITE the slot, misrouting the first
+        // build's progress and stopping its inactivity-timer reset. Reject the overlapping
+        // build HONESTLY (the file's never-throw {ok:false} idiom) so an accidental future
+        // overlap fails loud rather than corrupting the first build's progress stream.
+        if (this.indexBuildPendingId !== undefined) {
+            return {
+                ok: false,
+                error: 'an index/build is already in flight on this bridge; builds must be serialized.',
+            };
+        }
         // Mark THIS request as the in-flight index/build so handleLine can correlate the
         // (id-less) index/progress notifications to it. nextId is the id request() will mint.
         const buildId = this.nextId;

@@ -434,7 +434,6 @@ function decideRefusal(input) {
 function redactObviousSecrets(diff) {
     if (typeof diff !== 'string' || diff.length === 0)
         return '';
-    const SECRET_KEY = /(pass(?:word|wd)?|secret|token|api[_-]?key|access[_-]?key|client[_-]?secret|private[_-]?key|auth)/i;
     const lines = diff.split('\n');
     const out = [];
     for (const line of lines) {
@@ -454,10 +453,10 @@ function redactObviousSecrets(diff) {
             if (redacted === body) {
                 redacted = redacted.replace(/\b([A-Za-z0-9_\-]{32,}|AKIA[0-9A-Z]{12,}|sk-[A-Za-z0-9]{16,}|gh[pousr]_[A-Za-z0-9]{20,})\b/g, '***REDACTED***');
             }
+            // NOTE: when a key LOOKS secret-y but no value pattern matched, we leave the
+            // line as-is (avoid mangling) — that is simply the `redacted === body` no-op
+            // above, so there is no extra branch to take here.
             out.push('+' + redacted);
-            if (SECRET_KEY.test(body) && redacted === body) {
-                // Key looked secret-y but no value pattern matched — leave as-is (avoid mangling).
-            }
         }
         else {
             out.push(line);

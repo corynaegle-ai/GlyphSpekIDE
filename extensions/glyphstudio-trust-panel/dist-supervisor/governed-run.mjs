@@ -200,12 +200,12 @@ function isIpLiteral(host) {
   if (h.length === 0) return false;
   if (h.startsWith("[") && h.endsWith("]")) return true;
   if (h.includes(":")) return true;
-  const v4 = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/.exec(h);
-  if (v4) {
-    return v4.slice(1).every((o) => {
-      const n = Number(o);
-      return n >= 0 && n <= 255;
-    });
+  const parts = h.split(".");
+  if (parts.length >= 1 && parts.length <= 4) {
+    const isNumericPart = (p) => /^0[xX][0-9a-fA-F]+$/.test(p) || // hex
+    /^0[0-7]*$/.test(p) || // octal (incl. bare "0")
+    /^[1-9][0-9]*$/.test(p);
+    if (parts.every((p) => p.length > 0 && isNumericPart(p))) return true;
   }
   return false;
 }
