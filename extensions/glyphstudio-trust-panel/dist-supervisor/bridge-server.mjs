@@ -9612,6 +9612,7 @@ var AGENTIC_VERIFIER_ISOLATION = "inline-unsandboxed";
 var NOT_VERIFIED_CHECK_NAME = "changed-files only \u2014 NOT independently verified by a build/test";
 var VERIFY_DEFAULT_TIMEOUT_MS = 15 * 6e4;
 var AGENTIC_AGENT_BACKEND = "codex-cli";
+var OBSERVED_WRITE_AUDIT_CAP = 64;
 function checkStatusForExit(exitCode) {
   return exitCode === 0 ? "pass" : "fail";
 }
@@ -9987,6 +9988,50 @@ async function runGovernedAgenticBuild(opts) {
       },
       "verifier"
     );
+  }
+  if (opts.writePolicy) {
+    const policy = opts.writePolicy;
+    const changed = agentic2?.changedFiles ?? [];
+    const denied = [];
+    for (const f of changed) {
+      const path6 = f.path;
+      const decision = decide(policy, {
+        runId,
+        tool: "file_write",
+        payload: { path: path6 },
+        // The actor's own edits to the worktree — user-authored provenance (the taint
+        // firewall only escalates an 'allow', which we ignore here anyway).
+        provenanceLabel: "user",
+        requestedCapability: `file_write:${path6}`
+      });
+      if (decision !== "allow") denied.push({ path: path6, decision });
+    }
+    const recorded = denied.slice(0, OBSERVED_WRITE_AUDIT_CAP);
+    for (const { path: path6, decision } of recorded) {
+      const payload = {
+        tool: "file_write",
+        requestedCapability: `file_write:${path6}`,
+        destination: path6,
+        decision,
+        enforcement: "observe-only",
+        provenanceLabel: "user",
+        rule: "observed \u2014 in-container write to a policy-denied path (soft plane \u2014 NOT blocked)"
+      };
+      append("policy_decision", payload, "policy");
+    }
+    const dropped = denied.length - recorded.length;
+    if (dropped > 0) {
+      const payload = {
+        tool: "file_write",
+        requestedCapability: `file_write:audit-cap`,
+        destination: `+${dropped} more denied writes`,
+        decision: denied[recorded.length].decision,
+        enforcement: "observe-only",
+        provenanceLabel: "user",
+        rule: `observed \u2014 +${dropped} more in-container write(s) to policy-denied path(s) not recorded (audit cap ${OBSERVED_WRITE_AUDIT_CAP} reached; soft plane \u2014 NOT blocked)`
+      };
+      append("policy_decision", payload, "policy");
+    }
   }
   emit({ type: "verdict", verdict });
   emit({ type: "run_closed", runId, ok: verdict.overallVerdict === "pass" });
@@ -13164,6 +13209,12 @@ var BridgeServer = class {
         // operator's machine-scoped choice so the runner's runtime selection (and
         // its honest degraded reason) reflects it. Absent ⇒ the runner's 'auto'.
         ...this.agentic?.verifierRuntime !== void 0 ? { verifierRuntime: this.agentic.verifierRuntime } : {},
+        // OBSERVE-ONLY in-container write audit (soft-plane file-write residual):
+        // forward the reviewed write-policy so the runner traces every in-container
+        // write to a policy-denied path as an enforcement:'observe-only' decision on
+        // this run's ONE chain. ABSENT ⇒ no such events (behavior unchanged). It never
+        // blocks/fails — hard per-write enforcement stays the FC/seccomp follow-on.
+        ...this.agentic?.writePolicy ? { writePolicy: this.agentic.writePolicy } : {},
         // The operator-APPROVED plan (#8 plan-mode resume): claims-only — the
         // bundle's actor-claims render the formatPlanClaim summary; the chain
         // already carries the structured plan via plan_approved.
@@ -15368,7 +15419,13 @@ if (chatPolicyPath) {
 }
 var agentic = {
   ...verifierPrivateKey ? { verifierPrivateKey } : {},
-  ...verifierRuntime ? { verifierRuntime } : {}
+  ...verifierRuntime ? { verifierRuntime } : {},
+  // OBSERVE-ONLY in-container write audit (#15): reuse the SAME loaded chat policy
+  // (the GLYPHSTUDIO_CHAT_POLICY_PATH one that governs MCP brokering) so an agentic
+  // build's changed files are evaluated against write_paths and traced observe-only
+  // (soft plane — NOT blocked; per-write blocking + runtime-created-file masking stay
+  // the FC/seccomp residual). No policy configured ⇒ no audit (behavior unchanged).
+  ...mcp?.policy ? { writePolicy: mcp.policy } : {}
 };
 var server = serveStdio(process, {
   ...supervisorVersion ? { supervisorVersion } : {},

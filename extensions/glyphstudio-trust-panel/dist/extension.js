@@ -310,11 +310,15 @@ class RunStatusController {
             this.authorityItem = vscode.window.createStatusBarItem(align.Left, 100);
             this.sandboxItem = vscode.window.createStatusBarItem(align.Left, 99);
             this.tracedItem = vscode.window.createStatusBarItem(align.Left, 98);
+            // The transient decision chip sits just RIGHT of the traced-count item
+            // (lower priority = further right within the LEFT alignment). Hidden until a
+            // policy_decision arrives, then auto-cleared.
+            this.transientItem = vscode.window.createStatusBarItem(align.Left, 97);
             this.policyItem = vscode.window.createStatusBarItem(align.Right, 50);
             // Clicking the authority/traced segments reveals the Trust Panel (evidence).
             this.authorityItem.command = 'glyphstudio.openTrustPanel';
             this.tracedItem.command = 'glyphstudio.openTrustPanel';
-            context.subscriptions.push(this.authorityItem, this.sandboxItem, this.tracedItem, this.policyItem);
+            context.subscriptions.push(this.authorityItem, this.sandboxItem, this.tracedItem, this.transientItem, this.policyItem);
         }
         // Re-apply/restore the halo + refresh the policy segment when settings change
         // (reversible toggle). Guarded so a stub host without the config event is safe.
@@ -338,11 +342,59 @@ class RunStatusController {
     notify(rawEvent) {
         if (this.model.ingest(rawEvent))
             this.render();
+        // Cosmetic, ADDITIVE: a policy_decision briefly lights the transient chip. We
+        // read only this event kind and ignore everything else; it never touches the
+        // four persistent segments above.
+        this.maybeShowTransientChip(rawEvent);
     }
     /** Focus the segments on a run (Governed Runs tree-row click). View-only. */
     focus(runId) {
+        // A focus change makes a prior run's decision chip stale — clear it immediately
+        // so we never show another run's decision under the newly-focused run.
+        this.clearTransientChip();
         if (this.model.focus(runId))
             this.render();
+    }
+    /**
+     * If the raw envelope is a `policy_decision` trace event, project it (the PURE,
+     * tested honesty seam) onto the transient chip and show it, then schedule a single
+     * reused auto-clear timer. Any non-policy_decision envelope is ignored. The chip is
+     * cosmetic — observe-only decisions render 'observed', never 'approved'/'allow'.
+     */
+    maybeShowTransientChip(rawEvent) {
+        if (!this.transientItem)
+            return;
+        if (!rawEvent || typeof rawEvent !== 'object')
+            return;
+        const env = rawEvent;
+        if (env.kind !== 'trace_event' || !env.event || typeof env.event !== 'object') {
+            return;
+        }
+        const ev = env.event;
+        if (ev.type !== 'policy_decision')
+            return;
+        const view = (0, statusBarSegments_1.projectTransientChip)(ev.payload);
+        if (!view)
+            return; // no usable decision → show nothing (never fabricate)
+        this.transientItem.text = transientChipIcon(view.kind) + ' ' + view.text;
+        this.transientItem.tooltip = view.tooltip;
+        this.transientItem.color = transientChipThemeColor(view.kind);
+        this.transientItem.show();
+        // Single reused timer: clear+reset on each new decision so it never stacks.
+        if (this.transientTimer)
+            clearTimeout(this.transientTimer);
+        this.transientTimer = setTimeout(() => {
+            this.transientTimer = undefined;
+            this.transientItem?.hide();
+        }, RunStatusController.TRANSIENT_CHIP_MS);
+    }
+    /** Hide the transient chip + cancel its auto-clear timer. Idempotent. */
+    clearTransientChip() {
+        if (this.transientTimer) {
+            clearTimeout(this.transientTimer);
+            this.transientTimer = undefined;
+        }
+        this.transientItem?.hide();
     }
     /**
      * The webview confirmed (or revoked) a signature-VERIFIED authority for a run —
@@ -451,6 +503,9 @@ class RunStatusController {
     }
     /** Restore any applied halo tint (called on deactivate). Best-effort. */
     async dispose() {
+        // Cancel the transient chip's timer + hide it (the StatusBarItem itself is
+        // disposed via context.subscriptions like the four persistent items).
+        this.clearTransientChip();
         if (this.haloApplied && this.haloSnapshot !== undefined) {
             try {
                 const cfg = vscode.workspace.getConfiguration('workbench');
@@ -467,6 +522,8 @@ class RunStatusController {
         void vscode.commands.executeCommand('setContext', 'glyphstudio.authority', undefined);
     }
 }
+/** How long the transient chip stays visible before auto-clearing (ms). */
+RunStatusController.TRANSIENT_CHIP_MS = 4000;
 /**
  * Map an assurance level to its status-bar ThemeColor. We reuse built-in theme
  * colors so the `authority:` segment honors the user's theme (and contrast), while
@@ -487,6 +544,44 @@ function authorityThemeColor(level) {
         case 'read':
         default:
             return undefined; // default status-bar foreground (no over-emphasis)
+    }
+}
+/**
+ * The codicon prefix for the transient decision chip, by kind. Cosmetic only —
+ * the honest wording lives in the chip text/tooltip, never in the icon.
+ */
+function transientChipIcon(kind) {
+    switch (kind) {
+        case 'deny':
+            return '$(circle-slash)';
+        case 'ask':
+            return '$(question)';
+        case 'allow':
+            return '$(check)';
+        case 'observed':
+        default:
+            return '$(eye)'; // observe-only: watched, NOT blocked/allowed
+    }
+}
+/**
+ * Map a transient chip kind to its status-bar ThemeColor, reusing the SAME built-in
+ * theme colors the persistent segments use (deny → error red, ask → warning). An
+ * observe-only chip is deliberately UNcolored (default foreground) so a soft-plane
+ * observation never reads as an enforced allow. Guarded for a stub host.
+ */
+function transientChipThemeColor(kind) {
+    if (typeof vscode.ThemeColor !== 'function')
+        return undefined;
+    switch (kind) {
+        case 'deny':
+            return new vscode.ThemeColor('statusBarItem.errorForeground');
+        case 'ask':
+            return new vscode.ThemeColor('statusBarItem.warningForeground');
+        case 'allow':
+        case 'observed':
+        default:
+            // No over-emphasis: an enforced allow / a soft observation use default fg.
+            return undefined;
     }
 }
 /**
@@ -3041,6 +3136,79 @@ function activate(context) {
             context.subscriptions.push({ dispose: () => decorationManager.dispose() });
             onGenerating = decorationManager.onGenerating;
         }
+        // v2-C — ADVISORY governed-rules FIM STEERING (host wiring).
+        //
+        // POSTURE / HONESTY: this is the FIM/Tab path — there is NO run id and NO chain to anchor,
+        // so it is and stays UNGOVERNED + UNTRACED. We deliberately emit NO `steering_rules_applied`
+        // event here (the chat path owns that, where a chain exists). This reader only prepends the
+        // file's governing rules into the LOCAL model's KV-stable prefix as advisory context; the
+        // pure renderer (buildFimSteeringPreamble) tags the block "advisory; local-only, not
+        // governed". The whole feature is OPT-IN (default OFF) because this is a latency-sensitive
+        // keystroke path and the steering is advisory.
+        //
+        // GATE: glyphstudio.inlineCompletion.steeringRules (boolean, DEFAULT FALSE). NOTE FOR THE
+        // COORDINATOR: the `contributes.configuration` entry for this key is NOT yet declared in
+        // package.json (this slice does not own package.json). A missing contributes entry still
+        // reads as `undefined` here → defaults to false, so behavior is byte-identical to today
+        // until the manifest entry is added; please add it so the toggle is user-discoverable.
+        //
+        // CACHING (REQUIRED — hot path): resolving rules walks the rules dirs, which is far too
+        // expensive per keystroke. We cache the rendered preamble per document URI with a short TTL
+        // so at most ONE rules resolution happens per file per few seconds. The provider ALSO caches
+        // the stable prefix; this cache keeps the reader itself off the rules-dir walk on every call.
+        //
+        // RESOLVE-NEVER-THROW: every path is best-effort and returns undefined on any error so a
+        // failed read can never break typing — matching the sibling reader closures.
+        const FIM_STEERING_TTL_MS = 5000;
+        const FIM_STEERING_MAX_CHARS = 1200;
+        const fimSteeringCache = new Map();
+        const readFimSteeringPreamble = (document) => {
+            try {
+                // GATE: opt-in only. Read live (no manifest entry yet → undefined → default false).
+                const on = vscode.workspace
+                    .getConfiguration('glyphstudio')
+                    .get('inlineCompletion.steeringRules', false);
+                if (!on)
+                    return undefined;
+                const uriKey = document.uri.toString();
+                const now = Date.now();
+                const cached = fimSteeringCache.get(uriKey);
+                if (cached && cached.expiresAt > now) {
+                    return cached.value;
+                }
+                // Resolve the rules GOVERNING this file: always-apply + glob-applicable only. FIM has
+                // NO prompt, so we pass an EMPTY prompt (no `@mention`) and NO agentRequested names —
+                // exactly the "incidental, file-scoped" rule set. resolveTurnRules is the same
+                // vscode-coupled entry the chat path uses; its `message.content` is assembleRulesBlock's
+                // output (authority-ordered). undefined message → no governing rules for this file.
+                let relPath;
+                try {
+                    const rel = vscode.workspace?.asRelativePath?.(document.uri, false);
+                    relPath =
+                        typeof rel === 'string' && rel.length > 0
+                            ? rel.split('\\').join('/')
+                            : String(document.uri.fsPath ?? document.uri).split('\\').join('/');
+                }
+                catch {
+                    relPath = String(document.uri.fsPath ?? document.uri).split('\\').join('/');
+                }
+                const turn = (0, chatParticipant_1.resolveTurnRules)('', [relPath]);
+                const rulesBlock = turn.message?.content;
+                const preamble = (0, inlineCompletion_1.buildFimSteeringPreamble)({
+                    rulesBlock,
+                    maxChars: FIM_STEERING_MAX_CHARS,
+                });
+                // buildFimSteeringPreamble returns '' for "nothing to inject"; normalize to undefined so
+                // the provider's `?? ''` keeps the prefix byte-identical to the gate-off case.
+                const value = preamble.length > 0 ? preamble : undefined;
+                fimSteeringCache.set(uriKey, { value, expiresAt: now + FIM_STEERING_TTL_MS });
+                return value;
+            }
+            catch {
+                // best-effort: a failing steering read must never break inline completion.
+                return undefined;
+            }
+        };
         const inlineProvider = new inlineCompletion_1.GlyphStudioInlineCompletionProvider(() => vscode.workspace
             .getConfiguration('glyphstudio')
             .get('inlineCompletion.model', 'qwen2.5-coder:3b-base'), inlineOutput, undefined, 
@@ -3146,7 +3314,10 @@ function activate(context) {
             .getConfiguration('glyphstudio')
             .get('inlineCompletion.maxTokens', 256), () => vscode.workspace
             .getConfiguration('glyphstudio')
-            .get('inlineCompletion.enabled', true));
+            .get('inlineCompletion.enabled', true), 
+        // v2-C — ADVISORY governed-rules FIM steering reader (see readFimSteeringPreamble above).
+        // Opt-in (default OFF), per-URI TTL-cached, ungoverned/untraced, resolve-never-throw.
+        readFimSteeringPreamble);
         context.subscriptions.push(vscode.languages.registerInlineCompletionItemProvider({ pattern: '**' }, inlineProvider));
         // AUTO-IMPORT-AFTER-ACCEPT COMMAND. VS Code runs an InlineCompletionItem.command after the
         // item is accepted; this handler adds any workspace import the accepted snippet references
@@ -3429,7 +3600,11 @@ function setupIndexWorkspace(context, output, fanout) {
     // MULTI-ROOT: every open workspace folder is indexable (capped to the supervisor's
     // bindable prefix — workspaceRoots.ts MAX_WORKSPACE_ROOTS). `workspaceRoot` stays
     // folder 0: the legacy single-root binding + the fallback root for rootless batches.
-    const workspaceRoot = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+    // LIVE REBIND: `let` (not `const`) so a runtime folder change updates folder 0 in
+    // lockstep with the reopened session (see the onDidChangeWorkspaceFolders listener
+    // below); the no-folder→folder transition also arms the loop that was a no-op at
+    // activation.
+    let workspaceRoot = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
     // The status-bar item (when the host supports it). Created left of center so it sits
     // with the other GlyphStudio surface affordances; clicking it runs the command (reindex).
     let statusItem;
@@ -3454,24 +3629,51 @@ function setupIndexWorkspace(context, output, fanout) {
     // reused for every reindex. Disposed on deactivate via context.subscriptions.
     let sessionPromise;
     let disposed = false;
+    // The root SET the open session is HANDSHAKE-BOUND to (the supervisor pins
+    // sessionWorkspaceRoots at handshake and fail-closed-refuses index calls for unbound
+    // roots). Tracked here so a live folder change can decide whether the bound set
+    // actually changed before paying for a session reopen (diffWorkspaceRoots → no-op on
+    // a pure reorder / unchanged set). Set whenever a session is opened.
+    let boundSessionRoots = [];
     const openSession = () => {
         if (!workspaceRoot)
             return Promise.resolve(undefined);
         if (!sessionPromise) {
+            // MULTI-ROOT: bind ALL open folders into the session's root set so the
+            // per-root build/update/retrieve calls below are accepted for each folder.
+            const roots = liveIndexWorkspaceRoots();
+            boundSessionRoots = roots;
             sessionPromise = (0, supervisorBridgeRunner_1.openChatSession)({
                 bridgeServerPath: resolveBundledBridgeServerPath(context),
                 extensionVersion: resolveExtensionVersion(context),
                 runsBase: resolveRunsBase(),
                 workspaceRoot,
-                // MULTI-ROOT: bind ALL open folders into the session's root set so the
-                // per-root build/update/retrieve calls below are accepted for each folder.
-                workspaceRoots: liveIndexWorkspaceRoots(),
+                workspaceRoots: roots,
                 output,
             })
                 .then((res) => (res.connected ? res.session : undefined))
                 .catch(() => undefined);
         }
         return sessionPromise;
+    };
+    // LIVE REBIND — RE-PIN the supervisor's session roots. The supervisor binds the root
+    // SET at HANDSHAKE and refuses index calls for unbound roots, so the ONLY way to bind
+    // a folder added at runtime (with NO supervisor change) is to dispose this session and
+    // reopen it — the next openSession() re-handshakes with the fresh liveIndexWorkspaceRoots().
+    // Heavyweight (a fresh bridge child + a cold first-use build for any added folder); v1
+    // accepts that. FUTURE OPTIMIZATION: a lighter `index/rebind-roots` RPC that re-pins the
+    // bound set on the EXISTING session would avoid the reopen + child respawn entirely.
+    const reopenIndexSession = () => {
+        const stale = sessionPromise;
+        sessionPromise = undefined; // the next openSession() rebuilds with fresh roots
+        void stale?.then((s) => {
+            try {
+                s?.dispose();
+            }
+            catch {
+                /* best-effort teardown of the superseded session */
+            }
+        });
     };
     context.subscriptions.push({
         dispose: () => {
@@ -3507,6 +3709,68 @@ function setupIndexWorkspace(context, output, fanout) {
     // dispose() cancels its timer so nothing can fire (or hold the host open)
     // after deactivate.
     let watchStarted = false;
+    // LIVE REBIND — the per-folder FileSystemWatchers, tracked OUTSIDE
+    // context.subscriptions so rewireIndexWatchers() can dispose the stale set and create
+    // a fresh one for the CURRENT folder set on a folder change. (A separate
+    // context.subscriptions entry below disposes whatever set is current at deactivate.)
+    let indexWatchers = [];
+    // The freshness `note` sink, captured once the loop arms so rewireIndexWatchers() (which
+    // may run from the folder-change listener) can wire fresh watchers to the SAME batcher.
+    let activeNote;
+    // Dispose every live watcher and create one fresh watcher PER current workspace folder
+    // (folder order, capped). Idempotent and safe to call repeatedly: the previous set is
+    // torn down first. No-ops until the loop has armed (activeNote set) and on a minimal
+    // host without the watcher API. The save listener is registered ONCE (in startIndexWatch)
+    // and is folder-agnostic, so it does not need re-wiring.
+    const rewireIndexWatchers = () => {
+        if (disposed)
+            return;
+        for (const w of indexWatchers) {
+            try {
+                w.dispose();
+            }
+            catch {
+                /* best-effort teardown of a superseded watcher */
+            }
+        }
+        indexWatchers = [];
+        const note = activeNote;
+        if (!note)
+            return;
+        const watchFolders = (vscode.workspace.workspaceFolders ?? []).slice(0, workspaceRoots_1.MAX_WORKSPACE_ROOTS);
+        if (watchFolders.length > 0 &&
+            typeof vscode.workspace.createFileSystemWatcher === 'function') {
+            for (const folder of watchFolders) {
+                try {
+                    const pattern = typeof vscode.RelativePattern === 'function'
+                        ? new vscode.RelativePattern(folder, '**/*')
+                        : '**/*';
+                    const watcher = vscode.workspace.createFileSystemWatcher(pattern);
+                    watcher.onDidCreate((uri) => note(uri, 'changed'));
+                    watcher.onDidChange((uri) => note(uri, 'changed'));
+                    watcher.onDidDelete((uri) => note(uri, 'deleted'));
+                    indexWatchers.push(watcher);
+                }
+                catch {
+                    /* minimal host without the watcher API: saves alone still keep it fresh */
+                }
+            }
+        }
+    };
+    // The live watcher set goes here so deactivate tears down whatever set is current.
+    context.subscriptions.push({
+        dispose: () => {
+            for (const w of indexWatchers) {
+                try {
+                    w.dispose();
+                }
+                catch {
+                    /* best-effort teardown */
+                }
+            }
+            indexWatchers = [];
+        },
+    });
     const startIndexWatch = () => {
         if (watchStarted || disposed || !workspaceRoot)
             return;
@@ -3518,10 +3782,15 @@ function setupIndexWorkspace(context, output, fanout) {
             const session = await openSession();
             if (!session)
                 return { ok: false, error: 'bridge unavailable' };
+            // MULTI-ROOT: a per-root batch addresses ITS OWN root's index; a rootless (legacy)
+            // batch falls back to the session's folder-0 root. LIVE REBIND: `workspaceRoot` is
+            // now mutable, so read folder 0 LIVE for the fallback (and refuse if all folders
+            // were removed — there is nothing to address).
+            const fallbackRoot = batch.workspaceRoot ?? workspaceRoot;
+            if (!fallbackRoot)
+                return { ok: false, error: 'no workspace folder' };
             return session.indexUpdate({
-                // MULTI-ROOT: a per-root batch addresses ITS OWN root's index; a rootless
-                // (legacy) batch falls back to the session's folder-0 root as before.
-                workspaceRoot: batch.workspaceRoot ?? workspaceRoot,
+                workspaceRoot: fallbackRoot,
                 changed: batch.changed,
                 deleted: batch.deleted,
             });
@@ -3597,28 +3866,83 @@ function setupIndexWorkspace(context, output, fanout) {
         }
         // The watcher catches create/delete + out-of-editor changes (git checkout,
         // codegen). Deletes matter: they drive the supervisor's orphan eviction.
-        // MULTI-ROOT: one watcher PER workspace folder (the folders open when the loop
-        // arms — the watcher set is not re-wired on later folder changes).
-        const watchFolders = (vscode.workspace.workspaceFolders ?? []).slice(0, workspaceRoots_1.MAX_WORKSPACE_ROOTS);
-        if (watchFolders.length > 0 && typeof vscode.workspace.createFileSystemWatcher === 'function') {
-            for (const folder of watchFolders) {
-                try {
-                    const pattern = typeof vscode.RelativePattern === 'function'
-                        ? new vscode.RelativePattern(folder, '**/*')
-                        : '**/*';
-                    const watcher = vscode.workspace.createFileSystemWatcher(pattern);
-                    watcher.onDidCreate((uri) => note(uri, 'changed'));
-                    watcher.onDidChange((uri) => note(uri, 'changed'));
-                    watcher.onDidDelete((uri) => note(uri, 'deleted'));
-                    context.subscriptions.push(watcher);
-                }
-                catch {
-                    /* minimal host without the watcher API: saves alone still keep it fresh */
-                }
-            }
-        }
+        // MULTI-ROOT: one watcher PER workspace folder. LIVE REBIND: publish `note` so
+        // rewireIndexWatchers() can (re)create the per-folder watcher set for the CURRENT
+        // folders — both here at arm-time AND on a later (debounced) folder change.
+        activeNote = note;
+        rewireIndexWatchers();
         output.appendLine('[indexWatch] index freshness loop active — saves and file changes re-index incrementally in the background.');
     };
+    // ── LIVE FOLDER REBIND (onDidChangeWorkspaceFolders) ────────────────────────
+    // GAP THIS CLOSES: setupIndexWorkspace wired its watchers + bound the supervisor
+    // session's root set ONCE, at activation. A folder added/removed at RUNTIME was not
+    // watched, and (because the supervisor pins sessionWorkspaceRoots at HANDSHAKE and
+    // fail-closed-refuses index calls for unbound roots) a runtime-added folder's index
+    // calls were REFUSED until the next reload. This listener rebinds both, LIVE.
+    //
+    // DEBOUNCE (~500ms): a multi-folder add/remove can fire several events in a burst;
+    // coalescing them into one rebind avoids a reopen storm (each reopen respawns a
+    // bridge child). UNCHANGED-SET NO-OP: a pure folder REORDER (or any change that
+    // leaves the bound SET identical) does NOT change the handshake binding, so
+    // diffWorkspaceRoots reports changed=false and we skip the reopen entirely.
+    const REBIND_DEBOUNCE_MS = 500;
+    let rebindTimer;
+    const performRebind = () => {
+        if (disposed)
+            return;
+        // Track folder 0 live (the legacy single-root binding + rootless-batch fallback);
+        // also re-arms the loop if we went from no-folder → folder since activation.
+        workspaceRoot = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+        const nextRoots = liveIndexWorkspaceRoots();
+        // (a) WATCHERS: always re-wire to the current folder set (cheap; create/delete only).
+        // Safe before the loop arms (rewireIndexWatchers no-ops until activeNote is set).
+        rewireIndexWatchers();
+        // (b) SESSION RE-PIN: only when the BOUND SET actually changed (no-op on reorder /
+        // unchanged set), and only if a session was ever opened (nothing to re-pin otherwise —
+        // the lazy openSession() will bind the fresh set on first use).
+        const { added, removed, changed } = (0, workspaceRoots_1.diffWorkspaceRoots)(boundSessionRoots, nextRoots);
+        if (changed && sessionPromise) {
+            output.appendLine(`[indexWatch] workspace folders changed — re-pinning the index session` +
+                (added.length ? ` (+${added.map((r) => path.basename(r)).join(', ')})` : '') +
+                (removed.length ? ` (-${removed.map((r) => path.basename(r)).join(', ')})` : '') +
+                `. Added folders cold-build on first use; removed folders drop on reopen.`);
+            // RE-HANDSHAKE: dispose + reopen so the supervisor pins the NEW set. The next
+            // openSession() reads liveIndexWorkspaceRoots() and updates boundSessionRoots.
+            reopenIndexSession();
+        }
+        else {
+            // Keep the tracked bound set current even on the lazy (no-session-yet) path so a
+            // later reopen decision compares against the right baseline.
+            boundSessionRoots = nextRoots;
+        }
+    };
+    if (typeof vscode.workspace.onDidChangeWorkspaceFolders === 'function') {
+        context.subscriptions.push(vscode.workspace.onDidChangeWorkspaceFolders(() => {
+            if (disposed)
+                return;
+            if (rebindTimer)
+                clearTimeout(rebindTimer);
+            rebindTimer = setTimeout(() => {
+                rebindTimer = undefined;
+                try {
+                    performRebind();
+                }
+                catch (err) {
+                    output.appendLine(`[indexWatch] folder rebind failed (non-fatal): ${String(err?.message ?? err)}`);
+                }
+            }, REBIND_DEBOUNCE_MS);
+        }));
+        // DISPOSAL: cancel a pending debounce timer at deactivate so it cannot fire (or hold
+        // the host open) after teardown. The listener itself is disposed via subscriptions.
+        context.subscriptions.push({
+            dispose: () => {
+                if (rebindTimer) {
+                    clearTimeout(rebindTimer);
+                    rebindTimer = undefined;
+                }
+            },
+        });
+    }
     const runIndexWorkspace = async () => {
         if (disposed)
             return;

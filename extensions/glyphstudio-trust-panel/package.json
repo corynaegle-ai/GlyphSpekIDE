@@ -548,6 +548,11 @@
           "default": true,
           "description": "When you accept a Tab completion that uses a symbol defined elsewhere in the workspace, automatically add the missing import (via the language server's add-import code action). Only unambiguous imports are applied; ambiguous ones are left for you to resolve with Quick Fix (⌘.). Runs on-device; no egress. Set false to disable."
         },
+        "glyphstudio.inlineCompletion.steeringRules": {
+          "type": "boolean",
+          "default": false,
+          "description": "Prepend your governed steering rules (always-apply + glob-matching, by file) to the Tab/FIM prompt so completions follow project conventions. ADVISORY ONLY: Tab completion is UNGOVERNED — these rules advise the local on-device model, are NOT policy-checked, and do NOT appear in the trace (no steering_rules_applied event). The rules block is placed in the KV-stable prefix (cached, minimal latency cost) and resolved at most once per file every few seconds. Off by default (opt-in; this is a latency-sensitive path)."
+        },
         "glyphstudio.inlineCompletion.model": {
           "type": "string",
           "default": "qwen2.5-coder:3b-base",
